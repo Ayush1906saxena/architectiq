@@ -1,0 +1,383 @@
+{
+  "problem": "twitter-feed",
+  "title": "Design a Twitter News Feed",
+  "concept_rubric_map": {
+    "fan_out_write": "scalability",
+    "fan_out_read": "scalability",
+    "celebrity_problem": "scalability",
+    "hybrid_fanout": "scalability",
+    "timeline_service": "api_design",
+    "tweet_storage": "database_design",
+    "notification_service": "failure_handling",
+    "trending_topics": "database_design",
+    "feed_ranking": "requirements_gathering",
+    "snowflake_ids": "database_design",
+    "cache_strategy": "caching_strategy",
+    "search_indexing": "database_design",
+    "media_storage": "caching_strategy",
+    "content_moderation": "failure_handling",
+    "capacity_estimation": "capacity_estimation"
+  },
+  "concepts": {
+    "fan_out_write": {
+      "name": "Fan-Out on Write",
+      "category": "architecture",
+      "rubric_area": "scalability",
+      "keywords": ["fan out", "push", "write", "precompute", "timeline", "denormalize", "fanout"],
+      "probes": {
+        "verify": [
+          "What is fan-out on write? Walk me through what happens when a user posts a tweet.",
+          "How do you precompute timelines for all followers?"
+        ],
+        "deepen": [
+          "When user A with 10,000 followers posts a tweet, you write to 10,000 timeline caches. At an average of 500 tweets/sec platform-wide and average 200 followers, that's 100K timeline writes/sec. Can your cache layer handle this?",
+          "Fan-out on write means a user's timeline is ready to read in O(1). But if a tweet is deleted, you must remove it from all follower timelines. With 10K followers, that's 10K cache deletions. What's the deletion latency?",
+          "Twitter processes ~500M tweets/day. With an average fanout of 200, that's 100B timeline insertions/day or ~1.15M/sec. What infrastructure handles this write amplification?"
+        ],
+        "challenge": [
+          "Fan-out on write wastes resources for inactive users. If 40% of users haven't opened the app in 30 days, you're writing to 40% dead timelines. How do you optimize?"
+        ],
+        "anti_bs": [
+          "You said 'fan-out on write.' Where exactly are these precomputed timelines stored? Redis? What data structure — sorted set, list? What's the max timeline size per user?"
+        ]
+      },
+      "common_mistakes": ["Not considering write amplification cost", "Not handling tweet deletions across all timelines", "Writing to inactive user timelines"]
+    },
+    "fan_out_read": {
+      "name": "Fan-Out on Read",
+      "category": "architecture",
+      "rubric_area": "scalability",
+      "keywords": ["fan out read", "pull", "on demand", "merge", "timeline", "lazy"],
+      "probes": {
+        "verify": [
+          "What is fan-out on read? When does this approach make more sense than fan-out on write?",
+          "When a user opens their feed, how do you assemble their timeline from scratch?"
+        ],
+        "deepen": [
+          "Fan-out on read: user follows 500 accounts. On timeline load, you query the 500 most recent tweets from each — that's 500 queries, then merge and sort. At p99, some of those queries take 50ms. What's the total timeline load latency?",
+          "To assemble a feed from 500 followees, you could use a priority queue merge of 500 sorted lists. Each list has the user's recent tweets sorted by time. What's the time complexity of merging K sorted lists of N items each?",
+          "Caching helps: cache each user's recent tweets (last 100). The merge then operates on cached data. But a user who tweets rarely has stale cache. How do you invalidate per-user tweet caches?"
+        ],
+        "challenge": [
+          "Fan-out on read is simple but slow — 200-500ms to assemble a timeline is unacceptable for a social app. Instagram reportedly targets <200ms for feed load. How do you get there with fan-out on read?"
+        ],
+        "anti_bs": [
+          "You said 'query each followee's tweets at read time.' How many followees can a user have? At 5,000 followees, you're doing 5,000 queries per timeline load. Is that feasible?"
+        ]
+      },
+      "common_mistakes": ["Not considering the latency of merging many followee timelines", "Not caching individual user tweet lists", "Ignoring the N+1 query problem"]
+    },
+    "celebrity_problem": {
+      "name": "Celebrity/Hotspot Problem",
+      "category": "scaling",
+      "rubric_area": "scalability",
+      "keywords": ["celebrity", "hotspot", "hot key", "popular", "million followers", "viral", "thundering herd"],
+      "probes": {
+        "verify": [
+          "What happens when a user with 50 million followers posts a tweet? How does fan-out on write handle this?",
+          "How do you identify 'celebrity' accounts that need special treatment?"
+        ],
+        "deepen": [
+          "Elon Musk has ~180M followers. Fan-out on write means 180M timeline cache writes per tweet. At 280 bytes per tweet reference, that's 50GB of cache writes for one tweet. If he tweets 20 times/day, that's 1TB/day of fanout writes just for one user.",
+          "A celebrity threshold of 10K followers means ~0.1% of users are celebrities (on Twitter's scale, ~500K accounts). These accounts generate 90% of fanout volume. How does that inform your hybrid strategy?",
+          "When a celebrity's tweet goes viral, millions of users load their timeline simultaneously. The tweet is in a single Redis shard. At 1M reads/sec to one key, you get a hot key problem. How do you replicate or shard that single tweet?"
+        ],
+        "challenge": [
+          "Your teammate says 'just increase the Redis cluster size for celebrity fanout.' But the issue isn't cluster capacity — it's that all writes go to the same followers' timeline keys. Adding nodes doesn't help if the keys are concentrated. What does?"
+        ],
+        "anti_bs": [
+          "You said 'handle celebrities differently.' What's the exact threshold? How do you classify users dynamically — a new user can go viral overnight?"
+        ]
+      },
+      "common_mistakes": ["Not quantifying the fanout cost for high-follower accounts", "Static celebrity classification that doesn't adapt", "Not addressing hot key problem in cache"]
+    },
+    "hybrid_fanout": {
+      "name": "Hybrid Fanout Approach",
+      "category": "architecture",
+      "rubric_area": "scalability",
+      "keywords": ["hybrid", "mixed", "pull push", "celebrity", "threshold", "combined", "merge"],
+      "probes": {
+        "verify": [
+          "How would you combine fan-out on write and fan-out on read? What's the hybrid approach?",
+          "Which users get fan-out on write and which get fan-out on read? What's the threshold?"
+        ],
+        "deepen": [
+          "Twitter's actual architecture: regular users (fan-out on write) push to follower timelines. Celebrities (fan-out on read) are merged at read time. A user's timeline = precomputed cache + real-time merge of celebrity tweets. How do you efficiently merge these two sources?",
+          "The merge point is critical: user opens app, you fetch their precomputed timeline (fast, O(1) from cache) and then fetch recent tweets from the 5 celebrities they follow (5 queries). Merge and return. What if they follow 200 celebrities?",
+          "Dynamically reclassifying users: an account goes viral and gains 1M followers in a day. You need to stop fan-out on write and switch to fan-out on read. But their tweets from today are already in millions of timelines. How do you handle the transition?"
+        ],
+        "challenge": [
+          "The hybrid approach adds complexity: two code paths, two caching strategies, a classification system, and a merge layer. Is the complexity worth it, or should you just over-provision fan-out on write for everyone?"
+        ],
+        "anti_bs": [
+          "You said 'hybrid approach.' Walk me through the exact data flow: user A follows 490 regular users and 10 celebrities. A opens the app. What queries execute, in what order, and how is the final timeline assembled?"
+        ]
+      },
+      "common_mistakes": ["Not explaining how precomputed and on-demand timelines are merged", "Static thresholds that don't adapt to viral events", "Not handling the transition when a user crosses the celebrity threshold"]
+    },
+    "timeline_service": {
+      "name": "Timeline Service API",
+      "category": "api",
+      "rubric_area": "api_design",
+      "keywords": ["timeline", "api", "feed", "endpoint", "pagination", "cursor", "rest", "graphql"],
+      "probes": {
+        "verify": [
+          "What's the API for fetching a user's timeline? Walk me through the endpoint design.",
+          "How do you handle pagination — offset-based or cursor-based? Why?"
+        ],
+        "deepen": [
+          "Offset-based pagination (page=3&size=20) breaks when new tweets are inserted: page 3 shifts and you show duplicates. Cursor-based pagination (cursor=tweet_id_1234&count=20) is stable. But what if tweet 1234 is deleted?",
+          "Twitter's API uses max_id and since_id cursors. GET /timeline?max_id=1234&count=20 returns 20 tweets with IDs <= 1234. This works because tweet IDs are monotonically increasing (Snowflake). What if your IDs aren't time-ordered?",
+          "GraphQL allows clients to request exactly the fields they need: { timeline { tweets { text, author { name, avatar } } } }. This reduces over-fetching. But timeline queries can be expensive — how do you rate-limit complex GraphQL queries?"
+        ],
+        "challenge": [
+          "Your mobile client needs a timeline with tweets, retweets, and ads interleaved. REST would require multiple endpoints. GraphQL solves this with one query. But caching GraphQL responses at the CDN is harder than REST. How do you handle CDN caching?"
+        ],
+        "anti_bs": [
+          "You said 'paginated API.' Show me the exact request and response format. What's in the cursor? How does the client know there are more results?"
+        ]
+      },
+      "common_mistakes": ["Using offset-based pagination for real-time feeds", "Not including cursor metadata in responses", "Not rate-limiting expensive timeline queries"]
+    },
+    "tweet_storage": {
+      "name": "Tweet Storage",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["tweet", "storage", "database", "schema", "table", "partition", "sharding", "sql", "nosql"],
+      "probes": {
+        "verify": [
+          "How do you store tweets? What database and schema would you use?",
+          "What are the primary access patterns for tweets — by ID, by user, by time range?"
+        ],
+        "deepen": [
+          "Twitter stores ~500M tweets/day. At 280 characters (~560 bytes) plus metadata (user_id, timestamp, reply_to, retweet_of), each tweet is ~1KB. That's 500GB/day, 182TB/year. How do you partition this data?",
+          "Access patterns: (1) get tweet by ID (random read), (2) get user's recent tweets (range scan by user_id + timestamp), (3) get tweets for timeline (batch of tweet IDs). These patterns suggest different indexes. What indexes do you create?",
+          "Sharding by user_id means one user's tweets are co-located — efficient for pattern (2). But pattern (1) requires knowing the user_id to find the shard. How do you handle get-by-tweet-ID without a global index?"
+        ],
+        "challenge": [
+          "Twitter uses Manhattan (custom KV store) for tweet storage instead of MySQL or Cassandra. At their scale (500M tweets/day), what limitations of off-the-shelf databases justify building custom storage?"
+        ],
+        "anti_bs": [
+          "You said 'store tweets in a database.' Which one? What's the schema? How is it partitioned? What's the primary key?"
+        ]
+      },
+      "common_mistakes": ["Not considering multiple access patterns in schema design", "Sharding strategy that doesn't support all query patterns", "Not estimating storage growth over years"]
+    },
+    "notification_service": {
+      "name": "Notification Service",
+      "category": "architecture",
+      "rubric_area": "failure_handling",
+      "keywords": ["notification", "push", "alert", "mention", "reply", "like", "queue", "async"],
+      "probes": {
+        "verify": [
+          "When a user is mentioned in a tweet or gets a reply, how do you deliver the notification?",
+          "Should notifications be synchronous with the tweet post or asynchronous?"
+        ],
+        "deepen": [
+          "A viral tweet gets 100K replies in an hour. The original author receives 100K notifications. Displaying all of them is useless — you need aggregation: '50,234 people replied to your tweet.' How do you aggregate in real-time?",
+          "Push notifications to mobile devices go through APNs (Apple) and FCM (Google). Both have rate limits — APNs throttles at ~100K/sec per provider certificate. With 200M daily active users and an average of 5 notifications/day, that's 1B notifications/day or ~12K/sec. Is that within limits?",
+          "Notification delivery must be at-least-once but not duplicated. A user shouldn't see the same 'X liked your tweet' notification twice. How do you deduplicate across retries?"
+        ],
+        "challenge": [
+          "Notifications for likes are low priority but high volume (billions/day). Notifications for DMs are high priority but low volume. How do you prioritize the notification pipeline?"
+        ],
+        "anti_bs": [
+          "You said 'send push notifications asynchronously.' Through what queue? What's the consumer architecture? How do you handle failures — retry with backoff? Dead letter queue?"
+        ]
+      },
+      "common_mistakes": ["Synchronous notification delivery blocking the write path", "Not aggregating high-volume notifications", "Not prioritizing notification types"]
+    },
+    "trending_topics": {
+      "name": "Trending Topics",
+      "category": "features",
+      "rubric_area": "database_design",
+      "keywords": ["trending", "hashtag", "count", "stream", "real-time", "sliding window", "top-k"],
+      "probes": {
+        "verify": [
+          "How do you compute trending topics in real-time? What data structure tracks hashtag frequencies?",
+          "What time window do you use — last hour, last 24 hours? How does the window affect what trends?"
+        ],
+        "deepen": [
+          "At 500M tweets/day with 2 hashtags each on average, you're processing 1B hashtag events/day (~12K/sec). A naive approach tracks exact counts for every hashtag. With 10M unique hashtags, that's a lot of state. Can you use approximate algorithms like Count-Min Sketch?",
+          "Twitter uses a velocity-based trending algorithm: it's not just the count but the rate of increase. A hashtag going from 100/hr to 10K/hr is trending; one steady at 50K/hr is not. How do you compute velocity over a sliding window?",
+          "Trending topics need geographic segmentation — trends in Tokyo differ from trends in New York. With 50 geographic regions and 10M hashtags each, you're maintaining 500M counters. How do you partition this?"
+        ],
+        "challenge": [
+          "Trending topics are a target for manipulation — botnets can artificially inflate hashtags. How do you detect and filter coordinated inauthentic behavior in the trending computation?"
+        ],
+        "anti_bs": [
+          "You said 'track hashtag counts.' In what data store? How do you efficiently get the top 10 hashtags without scanning all entries? What's the update cost per tweet?"
+        ]
+      },
+      "common_mistakes": ["Using only absolute counts instead of velocity", "Not segmenting trends by geography", "Not considering manipulation/gaming of trends"]
+    },
+    "feed_ranking": {
+      "name": "Feed Ranking Algorithm",
+      "category": "requirements",
+      "rubric_area": "requirements_gathering",
+      "keywords": ["ranking", "algorithm", "relevance", "chronological", "ml", "engagement", "score", "personalized"],
+      "probes": {
+        "verify": [
+          "Should the feed be chronological or algorithmically ranked? What factors determine tweet ordering?",
+          "What signals would you use for ranking — recency, engagement, user affinity?"
+        ],
+        "deepen": [
+          "Twitter's ranking model considers: recency (exponential decay), engagement (likes, retweets, replies), user-author affinity (how often you interact), content type (media tweets rank higher). How do you compute this score at read time without adding 500ms of latency?",
+          "Pre-computing rank scores at write time means scores are stale — a tweet posted 2 hours ago has accumulated engagement that changes its score. But re-ranking at read time for 500 tweets is expensive. What's the right re-ranking frequency?",
+          "A/B testing ranking algorithms: 5% of users get the new algorithm, 95% get the current one. You measure engagement (time-on-feed, interactions). How do you prevent the ranking model from creating filter bubbles?"
+        ],
+        "challenge": [
+          "A user complains they always see the same 10 accounts even though they follow 500. Your ranking model is optimizing for engagement, which creates a feedback loop — you see more from accounts you engage with, so you engage more. How do you add diversity?"
+        ],
+        "anti_bs": [
+          "You said 'rank by relevance.' What's the scoring function? Give me a concrete formula with weighted features, not just 'use ML.'"
+        ]
+      },
+      "common_mistakes": ["Not distinguishing between chronological and ranked feeds", "Not considering how ranking creates feedback loops", "Computing rankings entirely at read time causing latency spikes"]
+    },
+    "snowflake_ids": {
+      "name": "Snowflake ID Generation",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["snowflake", "id", "unique", "distributed", "time-sorted", "64-bit", "sequence", "worker"],
+      "probes": {
+        "verify": [
+          "How do you generate unique tweet IDs across a distributed system? Why not use auto-incrementing database IDs?",
+          "Walk me through Twitter's Snowflake ID format: timestamp, worker ID, sequence number."
+        ],
+        "deepen": [
+          "Snowflake: 41 bits for timestamp (69 years), 10 bits for worker ID (1,024 workers), 12 bits for sequence (4,096 IDs per millisecond per worker). At 500M tweets/day, that's ~5,800 tweets/sec. With 100 active workers, each generates 58 IDs/sec — well within the 4,096/ms limit. But during a viral event (World Cup final), traffic spikes 10x. Does the sequence space hold?",
+          "Snowflake IDs are time-sorted, which means they naturally partition by time. This is great for range queries but creates hot partitions — all recent writes go to the same partition. How do you handle write hotspots?",
+          "Clock skew between workers: if worker A's clock is 1 second ahead, its IDs are 'from the future.' When worker A's clock corrects backward, it could generate duplicate timestamps. How does Snowflake handle clock regression?"
+        ],
+        "challenge": [
+          "UUIDs (128-bit, random) avoid coordination entirely — no worker ID needed. But they're not time-sorted and are 2x the size. At 500M IDs/day, the 8 bytes saved per ID (Snowflake: 8 bytes, UUID: 16 bytes) saves 4GB/day. Is that worth the Snowflake complexity?"
+        ],
+        "anti_bs": [
+          "You said 'distributed ID generation.' What's the bit layout? How do you assign worker IDs? What happens if two workers get the same worker ID?"
+        ]
+      },
+      "common_mistakes": ["Not considering clock skew between workers", "Using auto-increment IDs in a distributed system", "Not explaining why IDs need to be time-sortable"]
+    },
+    "cache_strategy": {
+      "name": "Cache Strategy",
+      "category": "caching",
+      "rubric_area": "caching_strategy",
+      "keywords": ["cache", "redis", "memcached", "timeline cache", "tweet cache", "user cache", "invalidation"],
+      "probes": {
+        "verify": [
+          "What do you cache and where? Walk me through your caching layers.",
+          "How do you handle cache invalidation when a tweet is deleted or a user changes their profile?"
+        ],
+        "deepen": [
+          "Twitter caches timelines (last 800 tweet IDs per user), tweets (by ID), and user profiles. With 330M monthly active users and 800 tweet IDs (8 bytes each) per timeline: 330M x 6.4KB = 2.1TB of timeline cache. How many Redis instances do you need?",
+          "A tweet is cached by its ID. When it's liked, the like count changes. You can either invalidate the cache (causing a thundering herd of reads to the database) or update it (write-through). At 5B likes/day, what's the cache update rate?",
+          "Cache warming: a new user signs up and follows 200 accounts. Their timeline cache is empty. The first feed load requires assembling from scratch. How do you pre-warm the timeline cache?"
+        ],
+        "challenge": [
+          "Your teammate says 'cache everything in Redis.' But Redis costs $15/GB/month. At 2TB of timeline cache plus 500GB of tweet cache, that's $37,500/month. Can you tier your cache — hot data in Redis, warm data in Memcached, cold on disk?"
+        ],
+        "anti_bs": [
+          "You said 'cache the timeline.' What's in the cache — full tweet objects or just tweet IDs? What's the serialization format? What's the TTL?"
+        ]
+      },
+      "common_mistakes": ["Caching full tweet objects instead of IDs (cache size explosion)", "Not handling cache invalidation for deleted tweets", "Not estimating cache memory requirements"]
+    },
+    "search_indexing": {
+      "name": "Search Indexing",
+      "category": "features",
+      "rubric_area": "database_design",
+      "keywords": ["search", "index", "elasticsearch", "inverted index", "full text", "lucene", "query"],
+      "probes": {
+        "verify": [
+          "How do you support full-text search for tweets? What indexing strategy do you use?",
+          "How quickly must a new tweet become searchable? Real-time or near-real-time?"
+        ],
+        "deepen": [
+          "Twitter's search index (EarlyBird) indexes tweets in real-time. At 500M tweets/day, the indexer processes ~5,800 tweets/sec. Each tweet needs tokenization, normalization, and inverted index updates. What's the CPU cost per tweet for indexing?",
+          "Elasticsearch shards: with 182TB/year of tweets, you need aggressive index lifecycle management. Hot indices (last 7 days) on SSDs, warm (30 days) on HDDs, and cold (archived) on S3. How do you transition indices between tiers?",
+          "Search relevance for tweets differs from web search: recency matters enormously. A search for 'earthquake' should prioritize tweets from the last hour. How do you incorporate time decay into your relevance scoring?"
+        ],
+        "challenge": [
+          "Elasticsearch can handle 5K indexing operations/sec per shard. With 5,800 tweets/sec, you need at least 2 primary shards. But search queries fan out to all shards. With 100 shards, every search query hits 100 shards. How do you balance indexing throughput vs. query fan-out?"
+        ],
+        "anti_bs": [
+          "You said 'use Elasticsearch.' How many shards? How many replicas? What's the index mapping? What analyzer do you use for tweet text?"
+        ]
+      },
+      "common_mistakes": ["Not considering indexing latency for real-time search", "Not implementing time-based index lifecycle management", "Not accounting for search query fan-out across shards"]
+    },
+    "media_storage": {
+      "name": "Media Storage and Delivery",
+      "category": "storage",
+      "rubric_area": "caching_strategy",
+      "keywords": ["media", "image", "video", "s3", "cdn", "blob", "object storage", "thumbnail", "resize"],
+      "probes": {
+        "verify": [
+          "How do you store and serve images and videos attached to tweets?",
+          "What's the upload and serving architecture for media?"
+        ],
+        "deepen": [
+          "20% of tweets contain media. At 500M tweets/day, that's 100M media uploads/day. Average image: 2MB, average video: 15MB. Assuming 90% images and 10% videos: (90M x 2MB) + (10M x 15MB) = 330TB/day. What's your storage cost on S3 at $0.023/GB/month?",
+          "Images need multiple resolutions: thumbnail (150x150), small (340x340), medium (600x600), large (1200x1200). Generating all 4 eagerly on upload means 4x storage. Generating lazily on first request adds latency. Which approach?",
+          "CDN cache hit ratio for media: popular tweets' images might have 99% hit rate, but the long tail of old tweets has near-0% hit rate. With 330TB/day of new media, you can't cache it all at the CDN. What's your CDN caching strategy?"
+        ],
+        "challenge": [
+          "Your teammate says 'just use Cloudflare Images — they handle resizing, CDN, and storage.' But at 100M images/day, Cloudflare Images costs $0.50 per 1,000 images for transformations — that's $50K/day. Build vs. buy?"
+        ],
+        "anti_bs": [
+          "You said 'store media on S3 and serve via CDN.' What's the upload path? Does the client upload directly to S3 (pre-signed URL) or through your API servers? What's the latency difference?"
+        ]
+      },
+      "common_mistakes": ["Not estimating media storage costs", "Not implementing multiple image resolutions", "Serving media through API servers instead of CDN"]
+    },
+    "content_moderation": {
+      "name": "Content Moderation",
+      "category": "safety",
+      "rubric_area": "failure_handling",
+      "keywords": ["moderation", "filter", "spam", "abuse", "report", "nsfw", "safety", "policy"],
+      "probes": {
+        "verify": [
+          "How do you handle spam, abuse, and policy-violating content at scale?",
+          "Should moderation happen before a tweet is published (synchronous) or after (asynchronous)?"
+        ],
+        "deepen": [
+          "Synchronous moderation adds latency to every tweet post. An ML model inference takes 10-50ms. At 5,800 tweets/sec, you need enough GPU capacity for 5,800 inferences/sec. What's the infrastructure cost?",
+          "False positive rate matters enormously: if your ML model has 1% false positive rate and 500M tweets/day, 5M legitimate tweets/day are wrongly flagged. That's 5M angry users. How do you handle false positives?",
+          "Adversarial users evade text classifiers using Unicode homoglyphs, leetspeak, and image-based text. A sophisticated spam ring uses GPT-generated text that passes all classifiers. What defense layers do you add beyond text classification?"
+        ],
+        "challenge": [
+          "Twitter's trust and safety team is thousands of people plus ML systems and still can't catch everything. At what point do you accept that some violating content will be published and focus on fast takedown (detect + remove in <10 minutes) rather than prevention?"
+        ],
+        "anti_bs": [
+          "You said 'ML-based content moderation.' What model? What features? What's the precision and recall trade-off? How often do you retrain?"
+        ]
+      },
+      "common_mistakes": ["Not distinguishing between pre-publication and post-publication moderation", "Ignoring false positive rates", "Relying solely on ML without human review escalation"]
+    },
+    "capacity_estimation": {
+      "name": "Capacity Estimation",
+      "category": "requirements",
+      "rubric_area": "capacity_estimation",
+      "keywords": ["capacity", "qps", "storage", "bandwidth", "dau", "mau", "million", "billion", "tweets per day"],
+      "probes": {
+        "verify": [
+          "Walk me through your capacity estimation. How many users, tweets/day, reads/sec?",
+          "What's the read-to-write ratio for a Twitter-like system?"
+        ],
+        "deepen": [
+          "Twitter: 330M MAU, ~200M DAU. 500M tweets/day. Average user reads timeline 10 times/day — that's 2B timeline reads/day or ~23K reads/sec. With 500M tweets/day, that's ~5,800 writes/sec. Read-to-write ratio is ~4:1 for timeline reads. But including tweet views, it's 1000:1. Which ratio drives your architecture?",
+          "Storage: 500M tweets/day x 1KB/tweet = 500GB/day for text. With media (330TB/day), the total is ~330TB/day. Over 5 years with media, that's ~600PB. What storage tier strategy keeps this cost-manageable?",
+          "Network bandwidth: 23K timeline reads/sec x 50 tweets x 1KB = 1.15GB/sec of tweet data alone. Add media previews (200KB each, 5 per timeline): 23K x 5 x 200KB = 23GB/sec. What's your CDN bandwidth requirement?"
+        ],
+        "challenge": [
+          "Your numbers assume steady traffic. During the Super Bowl, Twitter sees 3-5x normal volume. Your system must handle 20K writes/sec and 100K reads/sec during spikes. How does that change your capacity planning?"
+        ],
+        "anti_bs": [
+          "You said '500 million tweets per day.' Show me: DAU x tweets per user per day. What's the average? What percentage of users actually tweet vs. just read?"
+        ]
+      },
+      "common_mistakes": ["Not separating text storage from media storage estimates", "Using MAU instead of DAU for QPS calculations", "Not planning for peak traffic events"]
+    }
+  }
+}

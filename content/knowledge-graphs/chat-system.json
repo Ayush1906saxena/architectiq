@@ -1,0 +1,383 @@
+{
+  "problem": "chat-system",
+  "title": "Design a Chat System",
+  "concept_rubric_map": {
+    "websocket_management": "api_design",
+    "connection_gateway": "scalability",
+    "message_ordering": "database_design",
+    "sequence_numbers": "database_design",
+    "presence_system": "requirements_gathering",
+    "group_messaging": "scalability",
+    "push_notifications": "failure_handling",
+    "message_storage": "database_design",
+    "e2e_encryption": "failure_handling",
+    "delivery_receipts": "api_design",
+    "offline_queue": "failure_handling",
+    "media_sharing": "caching_strategy",
+    "rate_limiting": "failure_handling",
+    "message_search": "database_design",
+    "capacity_estimation": "capacity_estimation"
+  },
+  "concepts": {
+    "websocket_management": {
+      "name": "WebSocket Connection Management",
+      "category": "networking",
+      "rubric_area": "api_design",
+      "keywords": ["websocket", "ws", "persistent connection", "long polling", "sse", "bidirectional", "tcp", "upgrade"],
+      "probes": {
+        "verify": [
+          "Why use WebSockets instead of HTTP polling? Walk me through the connection lifecycle.",
+          "What happens when a WebSocket connection drops? How does the client reconnect?"
+        ],
+        "deepen": [
+          "Each WebSocket connection holds a TCP socket. A single Linux server with default settings supports ~65K connections (ephemeral port range). With 10M concurrent users, you need at least 154 servers just for connections. How do you scale beyond the port limit?",
+          "WhatsApp handles 2M connections per server by tuning kernel parameters (net.core.somaxconn, fs.file-max). With 2M connections each consuming ~10KB of memory for buffers, that's 20GB of RAM just for connection state. What's your per-server connection budget?",
+          "WebSocket connections go through load balancers. L4 load balancers (TCP passthrough) are stateless but can't inspect traffic. L7 load balancers (HTTP) can route by user ID but terminate TLS and add latency. Which do you use?"
+        ],
+        "challenge": [
+          "Your teammate says 'use Server-Sent Events (SSE) for receiving messages and regular HTTP POST for sending — simpler than WebSockets.' SSE is unidirectional and doesn't require a persistent bidirectional connection. What do you lose?"
+        ],
+        "anti_bs": [
+          "You said 'WebSocket for real-time messaging.' What's the heartbeat interval? How do you detect a dead connection? What protocol do you use on top of WebSocket — raw JSON, Protocol Buffers, or a standard like MQTT?"
+        ]
+      },
+      "common_mistakes": ["Not considering connection limits per server", "Not implementing heartbeat/ping-pong for dead connection detection", "Using HTTP long polling when WebSockets are available"]
+    },
+    "connection_gateway": {
+      "name": "Connection Gateway Service",
+      "category": "architecture",
+      "rubric_area": "scalability",
+      "keywords": ["gateway", "connection", "stateful", "routing", "session", "sticky", "presence"],
+      "probes": {
+        "verify": [
+          "How do you know which server holds user B's WebSocket connection when user A sends a message to B?",
+          "What is a connection gateway and how does it differ from a regular application server?"
+        ],
+        "deepen": [
+          "Connection gateways are stateful — each gateway knows which users are connected to it. You need a mapping: user_id → gateway_server. This mapping is stored in Redis. With 10M concurrent users, that's 10M entries. Each entry is ~50 bytes (user_id + server_id). Total: 500MB. Feasible for a single Redis instance?",
+          "When a gateway server crashes, all connections (say 500K) are dropped. Those 500K clients reconnect to other gateways simultaneously — a reconnection storm. How do you prevent this from cascading?",
+          "Discord uses a gateway architecture where each guild (server) is assigned to a specific gateway. Messages within a guild stay on one gateway, reducing cross-gateway communication. But a user in 50 guilds needs connections to 50 gateways. How does Discord solve this?"
+        ],
+        "challenge": [
+          "Your teammate says 'use a message queue (Kafka) between gateways instead of direct server-to-server routing.' Every message goes to Kafka, and each gateway consumes messages for its connected users. What's the added latency vs. direct routing?"
+        ],
+        "anti_bs": [
+          "You said 'route messages through a gateway layer.' How does gateway A know that user B is on gateway C? What happens if that mapping is stale because user B just reconnected to gateway D?"
+        ]
+      },
+      "common_mistakes": ["Not maintaining a user-to-gateway mapping", "Not handling reconnection storms after gateway failure", "Stale routing information causing message delivery failures"]
+    },
+    "message_ordering": {
+      "name": "Message Ordering Guarantees",
+      "category": "consistency",
+      "rubric_area": "database_design",
+      "keywords": ["ordering", "order", "causal", "total order", "clock", "timestamp", "sequential", "fifo"],
+      "probes": {
+        "verify": [
+          "In a 1:1 chat, how do you guarantee messages appear in the correct order for both users?",
+          "What ordering guarantee do you provide — total order, causal order, or best-effort?"
+        ],
+        "deepen": [
+          "User A sends 'Hi' then 'How are you?' rapidly. Due to network variance, 'How are you?' arrives at the server first. If you use server-arrival timestamps, the messages appear out of order. How do you fix this?",
+          "In a group chat with 50 members across 3 data centers, total ordering requires coordination (like Raft). That adds 1 RTT (~50-200ms cross-DC). Causal ordering only orders causally related messages. For a chat app, is causal ordering sufficient?",
+          "Slack uses per-channel ordering with a monotonic sequence number assigned by the channel's primary server. This gives total order within a channel but not across channels. What's the trade-off vs. global total order?"
+        ],
+        "challenge": [
+          "WhatsApp uses sender-side timestamps. If sender A's phone clock is 5 minutes ahead, their messages appear to arrive 'from the future.' Is this a real problem? How do you handle client clock skew?"
+        ],
+        "anti_bs": [
+          "You said 'timestamp-based ordering.' Whose timestamp — the client's, the sender's server, or the receiver's server? Each choice has different consistency implications."
+        ]
+      },
+      "common_mistakes": ["Using server arrival time instead of logical ordering", "Not distinguishing between per-conversation and global ordering", "Ignoring client clock skew"]
+    },
+    "sequence_numbers": {
+      "name": "Sequence Number Generation",
+      "category": "consistency",
+      "rubric_area": "database_design",
+      "keywords": ["sequence", "number", "monotonic", "id", "counter", "snowflake", "ordering", "gap-free"],
+      "probes": {
+        "verify": [
+          "How do you assign sequence numbers to messages within a conversation?",
+          "Should sequence numbers be gap-free (1, 2, 3) or can they have gaps (1, 3, 7)?"
+        ],
+        "deepen": [
+          "Gap-free sequence numbers require a serialization point — a single counter per conversation. At 1,000 messages/sec in a hot group chat, that counter becomes a bottleneck. How do you scale sequence generation for high-throughput conversations?",
+          "Telegram uses per-user message IDs (pts — personal timestamp). Each user has their own monotonic sequence. A message has different IDs for sender and receiver. How do you correlate these for features like 'reply to message #42'?",
+          "If your sequence counter is in Redis (INCR per conversation), and Redis restarts, the counter resets. How do you ensure monotonicity across Redis restarts? Do you persist the counter or derive it from stored messages?"
+        ],
+        "challenge": [
+          "Your teammate says 'just use Snowflake IDs — they're unique and time-sorted.' But Snowflake IDs are 64-bit and not per-conversation sequential. A client can't tell if they missed a message because there's no expected 'next ID.' Is time-sorting sufficient, or do you need per-conversation sequences?"
+        ],
+        "anti_bs": [
+          "You said 'sequence numbers per conversation.' How do you generate them? Single counter? What's the coordination mechanism? What happens during a network partition?"
+        ]
+      },
+      "common_mistakes": ["Using global IDs instead of per-conversation sequences", "Not considering counter bottleneck for hot conversations", "Not ensuring monotonicity across server restarts"]
+    },
+    "presence_system": {
+      "name": "Online Presence System",
+      "category": "features",
+      "rubric_area": "requirements_gathering",
+      "keywords": ["presence", "online", "offline", "last seen", "status", "heartbeat", "active"],
+      "probes": {
+        "verify": [
+          "How do you track and display which users are currently online?",
+          "What's the difference between 'online,' 'away,' and 'last seen 5 minutes ago'?"
+        ],
+        "deepen": [
+          "With 10M concurrent users each sending heartbeats every 30 seconds, that's 333K heartbeat events/sec. Each heartbeat updates a timestamp in Redis. Can a single Redis instance handle 333K writes/sec?",
+          "A user has 500 friends. When they come online, you need to notify all 500 friends' UIs. If 1M users come online per minute (morning surge), that's 500M presence notifications/minute or 8.3M/sec. How do you handle this fan-out?",
+          "WhatsApp shows 'last seen' timestamps. Privacy-conscious users disable this. With 2B users and privacy settings per-user, how do you efficiently filter presence responses based on privacy settings?"
+        ],
+        "challenge": [
+          "Discord shows real-time presence for users in the same server. But with servers having 500K members, updating presence for all members on every status change is O(N). Discord limits real-time presence to 1,000 member servers. What's your threshold?"
+        ],
+        "anti_bs": [
+          "You said 'track online status.' How do you detect that a user went offline? What if their app crashes without sending a disconnect event? What's the timeout threshold?"
+        ]
+      },
+      "common_mistakes": ["Not considering heartbeat frequency vs. server load trade-off", "Not handling ungraceful disconnects", "Presence fan-out overwhelming the notification system"]
+    },
+    "group_messaging": {
+      "name": "Group Messaging",
+      "category": "features",
+      "rubric_area": "scalability",
+      "keywords": ["group", "channel", "broadcast", "multi-user", "fan out", "membership", "admin"],
+      "probes": {
+        "verify": [
+          "How does message delivery differ between 1:1 chat and a group chat with 500 members?",
+          "How do you store and manage group membership?"
+        ],
+        "deepen": [
+          "WhatsApp limits groups to 1,024 members. Slack channels can have 10,000+ members. Telegram channels have millions of subscribers. Each scale point requires a different architecture. At 1,024 members, you fan out to 1,024 connections per message. What's the delivery latency for the 1,024th member?",
+          "A message to a 10,000-member Slack channel: do you fan out to 10,000 individual delivery queues, or do each user's client subscribe to the channel and pull? Fan-out-on-write means 10,000 writes per message. Fan-out-on-read means each member queries the channel on open.",
+          "Group message deduplication: if the sender's message is delivered to a gateway, which then fans out to 500 connected members, what if the gateway crashes mid-fanout? 250 members got the message, 250 didn't. How do you resume without duplicates?"
+        ],
+        "challenge": [
+          "Telegram channels with 1M subscribers use a broadcast pattern — messages are stored once and members fetch on demand. This is essentially fan-out on read. At what group size do you switch from fan-out on write to fan-out on read?"
+        ],
+        "anti_bs": [
+          "You said 'fan out to all group members.' Through what mechanism? Direct WebSocket delivery? Message queue? PubSub? What guarantees delivery to offline members?"
+        ]
+      },
+      "common_mistakes": ["Using the same delivery architecture for small and large groups", "Not handling partial delivery failures during fan-out", "Not differentiating between active/inactive group members"]
+    },
+    "push_notifications": {
+      "name": "Push Notification Service",
+      "category": "delivery",
+      "rubric_area": "failure_handling",
+      "keywords": ["push", "notification", "apns", "fcm", "offline", "alert", "badge", "mobile"],
+      "probes": {
+        "verify": [
+          "When a user is offline (no WebSocket connection), how do you deliver the message notification?",
+          "Walk me through the integration with APNs (iOS) and FCM (Android)."
+        ],
+        "deepen": [
+          "APNs has a feedback service that tells you which device tokens are invalid (user uninstalled the app). If you don't process this feedback, you keep sending to invalid tokens, wasting resources and potentially getting throttled. How often do you poll the feedback service?",
+          "A user has 3 devices: iPhone, iPad, Android phone. They're offline on all 3. You send 3 push notifications for each message. They read the message on their iPhone and come online. How do you suppress the notification on the other 2 devices?",
+          "FCM has a payload limit of 4KB. A rich notification with message preview, sender photo URL, and action buttons can exceed this. How do you handle large payloads — truncate, or send a data-only notification and let the app fetch the full message?"
+        ],
+        "challenge": [
+          "Push notifications have unreliable delivery — APNs and FCM don't guarantee delivery. Delivery rates are typically 90-95%. For a chat app where every message matters, how do you handle the 5-10% that don't get delivered?"
+        ],
+        "anti_bs": [
+          "You said 'send push notifications.' What's in the notification payload? How do you batch notifications to avoid spamming a user with 50 pings from an active group chat?"
+        ]
+      },
+      "common_mistakes": ["Not batching notifications for rapid messages", "Not handling invalid device tokens", "Not suppressing notifications across multiple devices after read"]
+    },
+    "message_storage": {
+      "name": "Message Storage",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["message", "storage", "database", "cassandra", "hbase", "partition", "schema", "history"],
+      "probes": {
+        "verify": [
+          "How do you store messages? What database and schema do you use?",
+          "What are the primary access patterns — by conversation, by user, by time range?"
+        ],
+        "deepen": [
+          "WhatsApp processes 100B messages/day. At an average of 200 bytes per message, that's 20TB/day or 7.3PB/year. They use custom-built storage on top of Mnesia/SQLite. At this scale, what's your storage choice?",
+          "Primary access pattern: get messages in conversation C, ordered by time, paginated. Cassandra partition key = conversation_id, clustering key = message_timestamp. This co-locates all messages in a conversation. But a group chat with 10M messages has a 2GB partition — Cassandra recommends <100MB partitions. How do you sub-partition?",
+          "Message deletion: WhatsApp's 'Delete for Everyone' removes the message from all recipients within 2 days. With messages replicated across 3 nodes, you need to propagate the delete. A tombstone marks the deletion. How long do you keep tombstones before compaction removes them?"
+        ],
+        "challenge": [
+          "Your teammate says 'just use PostgreSQL with partitioning by month.' At 20TB/day, a monthly partition is 600TB. PostgreSQL can't handle a single table that large even with partitioning. At what message volume does PostgreSQL break?"
+        ],
+        "anti_bs": [
+          "You said 'store messages in Cassandra.' What's the partition key? What's the clustering key? Write the CQL CREATE TABLE statement."
+        ]
+      },
+      "common_mistakes": ["Not considering partition size limits in Cassandra", "Using a database that can't handle the write throughput", "Not planning for message deletion and tombstone management"]
+    },
+    "e2e_encryption": {
+      "name": "End-to-End Encryption",
+      "category": "security",
+      "rubric_area": "failure_handling",
+      "keywords": ["encryption", "e2e", "end to end", "signal protocol", "key exchange", "ratchet", "encrypt", "decrypt"],
+      "probes": {
+        "verify": [
+          "How do you implement end-to-end encryption so the server never sees plaintext messages?",
+          "What key exchange protocol do you use? Walk me through the Signal Protocol at a high level."
+        ],
+        "deepen": [
+          "Signal Protocol uses a Double Ratchet: each message gets a new encryption key. If a user has 1,000 active conversations and sends/receives 50 messages/day, that's 50,000 ratchet steps/day. The key state per conversation is ~2KB. With 1M active users, total key state is 2TB. Where do you store this?",
+          "Group E2E encryption: in a group of 100, Sender Key protocol means each sender has a group key shared with all members. When a member leaves, all sender keys must be rotated — 99 members each generate a new key and distribute to 98 others. That's 9,702 key exchanges. How does this scale to 1,000-member groups?",
+          "The server stores encrypted messages and cannot moderate content. A user reports abuse but the server can't read the message. How do you handle content moderation with E2E encryption?"
+        ],
+        "challenge": [
+          "WhatsApp uses E2E encryption for all messages. But they still offer encrypted cloud backups (opt-in). The backup encryption key is stored in a Hardware Security Module (HSM). If the user forgets their backup password, the messages are lost forever. Is this acceptable UX?"
+        ],
+        "anti_bs": [
+          "You said 'end-to-end encryption.' How does user A get user B's public key? How do you prevent a man-in-the-middle attack where the server substitutes its own key?"
+        ]
+      },
+      "common_mistakes": ["Not addressing key exchange mechanism", "Not considering group key rotation on member changes", "Storing encryption keys on the server defeats E2E purpose"]
+    },
+    "delivery_receipts": {
+      "name": "Delivery and Read Receipts",
+      "category": "features",
+      "rubric_area": "api_design",
+      "keywords": ["receipt", "delivered", "read", "seen", "ack", "acknowledgment", "tick", "blue tick"],
+      "probes": {
+        "verify": [
+          "How do you implement sent/delivered/read receipt indicators?",
+          "What's the difference between 'sent' (server received), 'delivered' (recipient's device received), and 'read' (recipient opened the conversation)?"
+        ],
+        "deepen": [
+          "In a group of 50, each message generates up to 50 delivery receipts and 50 read receipts — 100 receipt events per message. If the group sends 500 messages/day, that's 50,000 receipt events/day just for one group. With 100M active groups, that's 5 trillion receipt events/day. How do you handle this volume?",
+          "WhatsApp shows double blue ticks only when ALL group members have read the message. For a 100-member group where 3 members are offline, the blue tick never appears. How do you aggregate receipt state for groups?",
+          "Receipt delivery itself is a message that needs to be reliable. If a read receipt is lost, the sender thinks the recipient hasn't read the message. Do you apply the same delivery guarantees to receipts as to messages?"
+        ],
+        "challenge": [
+          "Receipts generate more traffic than messages themselves — each message produces N receipts in a group of N. Your teammate says 'batch receipts every 5 seconds to reduce traffic.' But that makes the UI feel sluggish. What's the right batching interval?"
+        ],
+        "anti_bs": [
+          "You said 'delivery receipts.' How does the server know a message was delivered to the recipient's device vs. just stored in the queue? What's the exact ack protocol?"
+        ]
+      },
+      "common_mistakes": ["Not batching receipts to reduce traffic", "Not handling partial read receipts in groups", "Treating receipts with the same priority as messages"]
+    },
+    "offline_queue": {
+      "name": "Offline Message Queue",
+      "category": "delivery",
+      "rubric_area": "failure_handling",
+      "keywords": ["offline", "queue", "store and forward", "pending", "sync", "catchup", "missed"],
+      "probes": {
+        "verify": [
+          "When a user is offline, how do you store their pending messages and deliver them when they come back online?",
+          "What's the maximum time you store offline messages? What happens to messages older than that?"
+        ],
+        "deepen": [
+          "A user goes offline for a week. During that time, they received 5,000 messages across 50 conversations. When they reconnect, do you deliver all 5,000 at once? What's the sync protocol?",
+          "WhatsApp stores offline messages on the server until delivered, then deletes them. If the server stores 100B messages/day and 5% of users are offline at any time, that's 5B pending messages. At 200 bytes each, that's 1TB of offline queue. What storage do you use?",
+          "During the sync on reconnect, the client sends its last known sequence number per conversation. The server sends all messages with sequence > last_known. But if 100K users reconnect simultaneously (after a server restart), the sync load spikes. How do you handle thundering herd on reconnect?"
+        ],
+        "challenge": [
+          "Signal deletes messages from the server after delivery. If the recipient is offline for 30 days, messages are lost. WhatsApp stores indefinitely until delivered. What's your retention policy and how does it affect storage costs?"
+        ],
+        "anti_bs": [
+          "You said 'queue messages for offline users.' Where is this queue? In-memory, Redis, Kafka, database? What's the delivery guarantee — at-least-once, exactly-once?"
+        ]
+      },
+      "common_mistakes": ["Not limiting offline queue size per user", "Thundering herd when many users reconnect simultaneously", "Not implementing incremental sync based on sequence numbers"]
+    },
+    "media_sharing": {
+      "name": "Media Sharing in Chat",
+      "category": "features",
+      "rubric_area": "caching_strategy",
+      "keywords": ["media", "image", "video", "file", "upload", "download", "thumbnail", "s3", "cdn"],
+      "probes": {
+        "verify": [
+          "How do you handle image and video sharing in chat? What's the upload/download flow?",
+          "Do you inline media in the message payload or store it separately with a reference?"
+        ],
+        "deepen": [
+          "WhatsApp compresses images to ~100KB before upload. At 7B images shared/day, that's 700TB/day of image storage. With encryption, these can't be deduplicated (same image encrypted with different keys produces different ciphertext). How do you manage this storage cost?",
+          "Upload flow: client uploads encrypted media to blob storage → gets URL → sends message with URL. If the upload succeeds but the message send fails, you have orphaned media. How do you garbage collect orphaned uploads?",
+          "Video preview: generating a thumbnail for a 100MB video takes ~2-5 seconds on a server. At 100M video shares/day, that's 100M thumbnail jobs/day or ~1,150/sec. What's your thumbnail generation pipeline?"
+        ],
+        "challenge": [
+          "Your teammate says 'let the client generate thumbnails and upload both.' This reduces server load but the client must wait for thumbnail generation before sending. On a slow phone, that's 3-5 seconds of delay. Which trade-off do you prefer?"
+        ],
+        "anti_bs": [
+          "You said 'upload to S3.' Does the client upload directly (pre-signed URL) or through your API? How do you enforce file size limits and type validation?"
+        ]
+      },
+      "common_mistakes": ["Not separating media storage from message storage", "Not handling orphaned media uploads", "Not compressing media before storage"]
+    },
+    "rate_limiting": {
+      "name": "Chat Rate Limiting",
+      "category": "safety",
+      "rubric_area": "failure_handling",
+      "keywords": ["rate limit", "spam", "throttle", "abuse", "flood", "limit"],
+      "probes": {
+        "verify": [
+          "How do you prevent a user or bot from flooding a chat with thousands of messages per second?",
+          "What rate limits do you set for different message types — text, media, group messages?"
+        ],
+        "deepen": [
+          "Telegram limits bots to 30 messages/sec to a group and 20 messages/min to a single user. WhatsApp limits forwarding to 5 contacts at a time. What are your specific limits and how did you arrive at those numbers?",
+          "Rate limiting at the WebSocket layer: when a user exceeds the limit, do you drop the message silently, return an error, or buffer and deliver later? Each choice has different UX implications.",
+          "A coordinated spam attack uses 10,000 accounts to each send 1 message to the same group — individually under the rate limit but collectively flooding the group with 10,000 messages. How do you detect and prevent this?"
+        ],
+        "challenge": [
+          "Your rate limit is 10 messages/sec per user. A legitimate user is rapidly tapping 'reaction' messages (emoji responses) in a group chat and hits the limit. They can't send their actual text message. How do you differentiate between message types in rate limiting?"
+        ],
+        "anti_bs": [
+          "You said 'rate limit messages.' At what layer? The WebSocket gateway, the message service, or the database? Different layers have different visibility into user behavior."
+        ]
+      },
+      "common_mistakes": ["Not rate limiting at the connection layer", "Single rate limit for all message types", "Not detecting coordinated multi-account spam"]
+    },
+    "message_search": {
+      "name": "Message Search",
+      "category": "features",
+      "rubric_area": "database_design",
+      "keywords": ["search", "full text", "elasticsearch", "index", "query", "find", "history"],
+      "probes": {
+        "verify": [
+          "How do you support searching through message history? Can users search across all conversations or only within one?",
+          "What search infrastructure do you use?"
+        ],
+        "deepen": [
+          "Slack indexes all messages in Elasticsearch. With 2B messages/day, the indexer processes ~23K messages/sec. Each message averages 50 tokens. At 50 tokens x 23K/sec = 1.15M index operations/sec. How many Elasticsearch shards do you need?",
+          "With E2E encryption, the server can't index message content because it's encrypted. How do you support search in an E2E encrypted chat? Signal doesn't offer server-side search — only on-device. Is on-device search sufficient for your use case?",
+          "Search ranking in chat differs from web search: the user typically wants the most recent matching message, not the most relevant. How do you weight recency vs. relevance in your search algorithm?"
+        ],
+        "challenge": [
+          "Slack's search indexes every message, consuming significant storage. With 10B messages in history and 100 bytes of index per message, that's 1TB of search index. A smaller startup might not need full-text search initially. At what scale does dedicated search infrastructure become necessary?"
+        ],
+        "anti_bs": [
+          "You said 'Elasticsearch for search.' How do you partition the index — by conversation, by user, by time? Each partitioning strategy has different query performance characteristics."
+        ]
+      },
+      "common_mistakes": ["Not addressing search with E2E encryption", "Not partitioning search indices appropriately", "Using the same relevance model as web search instead of prioritizing recency"]
+    },
+    "capacity_estimation": {
+      "name": "Capacity Estimation",
+      "category": "requirements",
+      "rubric_area": "capacity_estimation",
+      "keywords": ["capacity", "dau", "concurrent", "messages per day", "storage", "bandwidth", "qps", "million", "billion"],
+      "probes": {
+        "verify": [
+          "Walk me through your capacity estimation. How many concurrent users? Messages per day?",
+          "What's the average message size and how does it break down between text, metadata, and media references?"
+        ],
+        "deepen": [
+          "WhatsApp: 2B users, ~500M DAU, 100B messages/day. That's 200 messages/user/day or ~1.15M messages/sec. Average message: 200 bytes text + 100 bytes metadata = 300 bytes. Text bandwidth: 345MB/sec. With 3x replication, 1GB/sec of storage writes. What's your database write throughput requirement?",
+          "Concurrent connections: 500M DAU doesn't mean 500M concurrent. Assume 10% are concurrently connected = 50M WebSocket connections. At 2M per server, you need 25 gateway servers. But during peak (New Year midnight), concurrent connections spike to 30% = 150M. Can you autoscale gateway servers?",
+          "Media: 10% of messages contain images (average 100KB). At 100B messages/day, that's 10B images/day = 1PB/day of media storage. Over 1 year with no deletion, that's 365PB. What's your storage tiering and lifecycle policy?"
+        ],
+        "challenge": [
+          "Your numbers assume global averages. In reality, group chats in India (WhatsApp's largest market) generate 10x more messages than average. How do you plan capacity for geographic hotspots?"
+        ],
+        "anti_bs": [
+          "You said '100 billion messages per day.' Show me: DAU x messages per user per day. Is 200 messages/day per active user realistic? What does the distribution look like — is it heavily skewed?"
+        ]
+      },
+      "common_mistakes": ["Confusing DAU with concurrent users", "Not separating text and media in storage estimates", "Not planning for peak hours and geographic variations"]
+    }
+  }
+}

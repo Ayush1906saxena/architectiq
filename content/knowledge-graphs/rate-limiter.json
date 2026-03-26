@@ -1,0 +1,368 @@
+{
+  "problem": "rate-limiter",
+  "title": "Design a Rate Limiter",
+  "concept_rubric_map": {
+    "token_bucket": "requirements_gathering",
+    "sliding_window": "requirements_gathering",
+    "fixed_window": "requirements_gathering",
+    "leaky_bucket": "requirements_gathering",
+    "redis_implementation": "database_design",
+    "distributed_rate_limiting": "scalability",
+    "race_conditions": "failure_handling",
+    "lua_scripts": "database_design",
+    "api_gateway_placement": "api_design",
+    "per_user_limiting": "api_design",
+    "response_headers": "api_design",
+    "graceful_degradation": "failure_handling",
+    "monitoring": "communication",
+    "multi_region": "scalability",
+    "fail_open_closed": "failure_handling"
+  },
+  "concepts": {
+    "token_bucket": {
+      "name": "Token Bucket Algorithm",
+      "category": "algorithms",
+      "rubric_area": "requirements_gathering",
+      "keywords": ["token", "bucket", "refill", "rate", "burst", "capacity", "token bucket"],
+      "probes": {
+        "verify": [
+          "Walk me through the token bucket algorithm. How does it handle burst traffic?",
+          "How do you set bucket size vs. refill rate? If you allow 100 req/sec with burst of 200, what are the parameters?"
+        ],
+        "deepen": [
+          "Stripe uses token bucket for their API. At 100 requests/sec refill and a bucket of 500 tokens, a client can burst 500 requests instantly then sustain 100/sec. How do you prevent that burst from overwhelming a single backend server?",
+          "If your refill rate is 100 tokens/sec and you check every 10ms, you add 1 token per check. What if a request arrives at 5ms — do you add a fractional token? How do you handle sub-interval precision?"
+        ],
+        "challenge": [
+          "A teammate says token bucket is always better than sliding window because it allows bursts. But your SLA guarantees p99 latency under 50ms — can you afford bursts?"
+        ],
+        "anti_bs": [
+          "You said 'token bucket.' How exactly do you store the token count and last refill timestamp? What happens if two requests arrive simultaneously and both read the same token count?"
+        ]
+      },
+      "common_mistakes": ["Not distinguishing burst size from sustained rate", "Ignoring clock precision for token refill", "Not explaining how tokens are atomically decremented"]
+    },
+    "sliding_window": {
+      "name": "Sliding Window Algorithm",
+      "category": "algorithms",
+      "rubric_area": "requirements_gathering",
+      "keywords": ["sliding window", "log", "counter", "timestamp", "window", "sorted set"],
+      "probes": {
+        "verify": [
+          "How does the sliding window log algorithm work? What data structure do you use?",
+          "What's the difference between sliding window log and sliding window counter?"
+        ],
+        "deepen": [
+          "Sliding window log stores every request timestamp. At 10,000 req/sec per user, that's 600K entries per minute per user in a Redis sorted set. With 1M active users, what's your memory footprint?",
+          "The sliding window counter approach uses weighted averages between the current and previous window. If the previous window had 80 requests and the current window is 30% through with 25 requests, what's the estimated count? Walk me through the math."
+        ],
+        "challenge": [
+          "Cloudflare uses a sliding window counter approach because the log approach is too memory-intensive at their scale (25M requests/sec). At what scale does the log approach break down for you?"
+        ],
+        "anti_bs": [
+          "You said 'sliding window' — which variant? The log, the counter, or the hybrid? Each has very different memory and accuracy trade-offs."
+        ]
+      },
+      "common_mistakes": ["Not considering memory cost of storing every timestamp", "Confusing sliding window log with sliding window counter", "Not addressing accuracy trade-offs of counter approach"]
+    },
+    "fixed_window": {
+      "name": "Fixed Window Algorithm",
+      "category": "algorithms",
+      "rubric_area": "requirements_gathering",
+      "keywords": ["fixed window", "window", "counter", "reset", "boundary", "simple"],
+      "probes": {
+        "verify": [
+          "How does the fixed window counter work? What happens at window boundaries?",
+          "If the limit is 100 req/min and a user sends 99 requests at 0:59 and 100 at 1:00, how many get through?"
+        ],
+        "deepen": [
+          "The boundary problem means a user can send 2x the rate limit in a 1-second span across a window boundary. For a payment API limited to 10 req/sec, that means 20 charges could go through in 1 second. Is that acceptable?",
+          "GitHub's API uses fixed windows (5,000 req/hour). They accept the boundary spike because the window is large. At what window size does the boundary problem become negligible?"
+        ],
+        "challenge": [
+          "Fixed window is the simplest to implement — just an atomic counter with TTL. Your teammate argues the boundary spike is a theoretical problem and not worth the complexity of sliding window. How do you respond?"
+        ],
+        "anti_bs": [
+          "You mentioned fixed window is 'simple.' Show me the exact Redis commands you'd use — key naming, increment, and TTL setting."
+        ]
+      },
+      "common_mistakes": ["Not addressing the boundary spike problem", "Not explaining when simplicity outweighs accuracy", "Incorrect TTL handling causing counters that never expire"]
+    },
+    "leaky_bucket": {
+      "name": "Leaky Bucket Algorithm",
+      "category": "algorithms",
+      "rubric_area": "requirements_gathering",
+      "keywords": ["leaky bucket", "queue", "constant rate", "outflow", "fifo", "smooth"],
+      "probes": {
+        "verify": [
+          "How does the leaky bucket differ from token bucket? When would you choose one over the other?",
+          "What happens to excess requests in a leaky bucket — are they queued or dropped?"
+        ],
+        "deepen": [
+          "NGINX uses leaky bucket for request smoothing (limit_req directive with burst parameter). If you set rate=10r/s and burst=20, incoming requests beyond 10/sec queue up to 20 deep. What's the max latency a queued request experiences?",
+          "Leaky bucket provides a perfectly smooth outflow rate. But your backend autoscaler needs bursty traffic to trigger scale-up events. How does leaky bucket interact with autoscaling?"
+        ],
+        "challenge": [
+          "Shopify moved from leaky bucket to token bucket for their API because merchants complained about queued requests timing out during flash sales. What's the fundamental limitation of leaky bucket for bursty workloads?"
+        ],
+        "anti_bs": [
+          "You said leaky bucket 'smooths traffic.' What exactly is the data structure? Is it a queue? Where is it stored? What happens when the queue is full?"
+        ]
+      },
+      "common_mistakes": ["Confusing leaky bucket with token bucket", "Not addressing queue overflow behavior", "Not considering latency added by queuing"]
+    },
+    "redis_implementation": {
+      "name": "Redis Implementation",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["redis", "incr", "expire", "ttl", "sorted set", "hash", "key", "memory"],
+      "probes": {
+        "verify": [
+          "How would you implement your chosen algorithm in Redis? Walk me through the key structure and commands.",
+          "What Redis data type do you use for token bucket state? For sliding window log?"
+        ],
+        "deepen": [
+          "A Redis string key with a counter takes ~56 bytes of overhead. At 10M unique users with per-user limiting, that's 560MB just for key overhead. Add the actual data and you're at ~1GB. Is a single Redis instance sufficient?",
+          "Redis INCR + EXPIRE is not atomic across both commands. If the process crashes between INCR and EXPIRE, you have a counter without a TTL that never resets. How do you fix this?"
+        ],
+        "challenge": [
+          "A teammate says 'just use Redis Cluster with 6 nodes.' But Redis Cluster doesn't support multi-key transactions across hash slots. How does that affect your Lua script approach?"
+        ],
+        "anti_bs": [
+          "You said 'store it in Redis.' What's the key format? user:123:rate:1709856000? What's the value type? How do you handle key expiration?"
+        ]
+      },
+      "common_mistakes": ["Non-atomic INCR and EXPIRE", "Not sizing Redis memory requirements", "Not considering Redis Cluster limitations for multi-key operations"]
+    },
+    "distributed_rate_limiting": {
+      "name": "Distributed Rate Limiting",
+      "category": "scaling",
+      "rubric_area": "scalability",
+      "keywords": ["distributed", "consistent", "synchronization", "centralized", "local", "global", "sync"],
+      "probes": {
+        "verify": [
+          "If you have 10 API servers behind a load balancer, how do you ensure a user's rate limit is enforced globally?",
+          "What's the trade-off between local rate limiting per server vs. centralized rate limiting?"
+        ],
+        "deepen": [
+          "With local rate limiting and 10 servers, a user could send 10x the limit if requests are evenly distributed. Sticky sessions fix this but create hotspots. What's the right balance?",
+          "Google's rate limiter uses a two-tier approach: local token buckets synced with a global service every few seconds. During sync gaps, each server can over-admit. At 1M req/sec across 100 servers, what's the maximum over-admission per sync interval?"
+        ],
+        "challenge": [
+          "Every centralized rate limiter adds network latency per request — typically 1-5ms for a Redis round trip. At p99 SLA of 50ms, that's 2-10% of your budget. How do you minimize this overhead?"
+        ],
+        "anti_bs": [
+          "You said 'centralized Redis for rate limiting.' What happens when that Redis instance is unreachable? Do all requests pass through or get rejected?"
+        ]
+      },
+      "common_mistakes": ["Not accounting for request distribution across servers", "Single centralized store as bottleneck", "Not considering network latency of centralized checks"]
+    },
+    "race_conditions": {
+      "name": "Race Conditions",
+      "category": "failure",
+      "rubric_area": "failure_handling",
+      "keywords": ["race condition", "concurrent", "atomic", "lock", "cas", "compare and swap", "optimistic"],
+      "probes": {
+        "verify": [
+          "Two requests from the same user arrive simultaneously at different servers. Both read the counter as 99 (limit: 100). Both increment to 100 and allow. Now you've allowed 101 requests. How do you prevent this?",
+          "What's the difference between optimistic and pessimistic locking for rate limiting?"
+        ],
+        "deepen": [
+          "Redis WATCH/MULTI/EXEC provides optimistic locking, but under high contention (popular API keys hitting 1000+ req/sec), the retry rate can spike to 30-40%. At what contention level does optimistic locking become worse than pessimistic?",
+          "CAS (compare-and-swap) loops retry on conflict. If 50 concurrent requests compete, you could get 49 retries on the first round, 48 on the second. What's the worst-case latency for the last request?"
+        ],
+        "challenge": [
+          "Your teammate says 'a few extra requests over the limit don't matter — rate limiting is approximate anyway.' When is strict accuracy critical? Think payment processing, security throttling."
+        ],
+        "anti_bs": [
+          "You said 'use atomic operations.' Which specific atomic operation? INCR? CAS? Lua script? Each has different guarantees."
+        ]
+      },
+      "common_mistakes": ["Read-then-write without atomicity", "Not considering contention under high concurrency", "Assuming Redis operations are automatically safe from races"]
+    },
+    "lua_scripts": {
+      "name": "Lua Scripts in Redis",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["lua", "eval", "evalsha", "script", "atomic", "redis.call", "single thread"],
+      "probes": {
+        "verify": [
+          "Why use Lua scripts in Redis for rate limiting instead of multiple commands?",
+          "Walk me through a Lua script that implements token bucket atomically."
+        ],
+        "deepen": [
+          "A Lua script in Redis blocks the single thread. If your script takes 1ms and you have 100K req/sec, that's 100 seconds of blocked time per second — Redis can't keep up. What's the maximum acceptable script execution time?",
+          "Redis EVALSHA caches scripts by SHA1 hash. If you deploy a new script version, clients still have the old SHA cached. How do you handle the NOSCRIPT error gracefully?"
+        ],
+        "challenge": [
+          "Redis 7.0 introduced Functions as a replacement for EVAL scripts. Functions are preloaded and persist across restarts. Would you migrate from Lua EVAL to Functions? What's the operational benefit?"
+        ],
+        "anti_bs": [
+          "You said 'Lua script for atomicity.' Write the actual script — KEYS, ARGV, redis.call commands. Not pseudocode."
+        ]
+      },
+      "common_mistakes": ["Long-running Lua scripts blocking Redis", "Not using EVALSHA for script caching", "Not handling NOSCRIPT errors"]
+    },
+    "api_gateway_placement": {
+      "name": "API Gateway Placement",
+      "category": "architecture",
+      "rubric_area": "api_design",
+      "keywords": ["api gateway", "middleware", "kong", "envoy", "nginx", "sidecar", "edge", "placement"],
+      "probes": {
+        "verify": [
+          "Where in the request path does rate limiting live? At the API gateway, as middleware, or in the application?",
+          "What's the trade-off between rate limiting at the edge (CDN/gateway) vs. at the application layer?"
+        ],
+        "deepen": [
+          "Kong can do rate limiting at the gateway using its rate-limiting plugin backed by Redis. But application-specific limits (e.g., 10 file uploads/day for free users) require business logic. How do you layer gateway-level and application-level limiting?",
+          "Envoy proxy supports local rate limiting (per-instance) and global rate limiting (via an external gRPC service). When would you use local vs. global in a service mesh?"
+        ],
+        "challenge": [
+          "Your CDN provider offers edge rate limiting at 200+ PoPs globally with sub-millisecond latency. Your Redis-based limiter adds 2-5ms. Why would you ever NOT use the CDN approach?"
+        ],
+        "anti_bs": [
+          "You said 'rate limit at the API gateway.' Which gateway? How does it communicate with your rate limit backend? What protocol — HTTP, gRPC, or shared Redis?"
+        ]
+      },
+      "common_mistakes": ["Not distinguishing between edge, gateway, and application-level limiting", "Placing all limiting logic in one layer", "Not considering that different limits need different enforcement points"]
+    },
+    "per_user_limiting": {
+      "name": "Per-User and Per-API Limiting",
+      "category": "api",
+      "rubric_area": "api_design",
+      "keywords": ["per user", "per ip", "per api", "tier", "plan", "quota", "key", "identity"],
+      "probes": {
+        "verify": [
+          "How do you identify the client? API key, user ID, IP address? What are the trade-offs?",
+          "Should different API endpoints have different limits? How do you configure that?"
+        ],
+        "deepen": [
+          "IP-based limiting fails behind NAT — an office of 500 users shares one IP. Cloudflare sees 20% of their traffic from IPs shared by 100+ users. How do you handle this?",
+          "You have 3 pricing tiers: Free (100 req/hr), Pro (10K req/hr), Enterprise (1M req/hr). How do you dynamically apply different limits without redeploying?"
+        ],
+        "challenge": [
+          "A single Enterprise customer is sending 500K req/hr to your /search endpoint, which is computationally expensive, and 500K to /status, which is cheap. Should endpoint-level limits exist on top of global limits?"
+        ],
+        "anti_bs": [
+          "You said 'limit by API key.' How do you look up the key's rate limit tier? Is it in the rate limiter itself or a separate service? What's the latency of that lookup?"
+        ]
+      },
+      "common_mistakes": ["Using only IP-based limiting", "Not supporting per-endpoint limits", "Hardcoding rate limit values instead of making them configurable"]
+    },
+    "response_headers": {
+      "name": "Rate Limit Response Headers",
+      "category": "api",
+      "rubric_area": "api_design",
+      "keywords": ["429", "retry-after", "x-ratelimit", "header", "remaining", "reset", "too many requests"],
+      "probes": {
+        "verify": [
+          "What HTTP status code do you return when a client is rate-limited? What headers do you include?",
+          "Walk me through the standard rate limit response headers: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset."
+        ],
+        "deepen": [
+          "The IETF draft RFC 6585 standardizes 429 Too Many Requests. But some APIs return 503 Service Unavailable instead. When would you return 503 over 429?",
+          "Retry-After can be a delta-seconds or an HTTP-date. GitHub uses delta-seconds, AWS uses HTTP-date. If your servers' clocks are skewed by 2 seconds, which format is safer for the client?"
+        ],
+        "challenge": [
+          "Some clients ignore Retry-After and retry immediately in a tight loop, amplifying the problem. How do you protect against clients that don't respect your rate limit responses?"
+        ],
+        "anti_bs": [
+          "You said 'return 429.' What's in the response body? Just the status code or a JSON body with details — which limit was hit, when it resets, how to upgrade?"
+        ]
+      },
+      "common_mistakes": ["Not including Retry-After header", "Not distinguishing between 429 and 503", "Not providing remaining quota in response headers"]
+    },
+    "graceful_degradation": {
+      "name": "Graceful Degradation",
+      "category": "failure",
+      "rubric_area": "failure_handling",
+      "keywords": ["degrade", "fallback", "circuit breaker", "throttle", "priority", "shed", "load shedding"],
+      "probes": {
+        "verify": [
+          "When your system is under heavy load, how do you degrade gracefully instead of failing completely?",
+          "What's the difference between rate limiting and load shedding?"
+        ],
+        "deepen": [
+          "Google's Doorman implements adaptive rate limiting: when backend latency exceeds p99 thresholds, it automatically reduces the rate limit. How would you implement a feedback loop between backend health and rate limits?",
+          "You have 3 client tiers: internal services (critical), paying customers (important), free users (best-effort). During a traffic spike, how do you implement priority-based shedding?"
+        ],
+        "challenge": [
+          "Your rate limiter itself becomes the bottleneck during a DDoS attack — 10M req/sec hitting Redis. How do you rate-limit the rate limiter?"
+        ],
+        "anti_bs": [
+          "You said 'graceful degradation.' Give me the specific trigger conditions, the actions taken, and the recovery criteria."
+        ]
+      },
+      "common_mistakes": ["No priority differentiation between client types", "Rate limiter itself becoming a single point of failure", "No feedback loop from backend health to rate limits"]
+    },
+    "monitoring": {
+      "name": "Monitoring and Observability",
+      "category": "operations",
+      "rubric_area": "communication",
+      "keywords": ["monitor", "metric", "alert", "dashboard", "log", "observability", "prometheus", "grafana"],
+      "probes": {
+        "verify": [
+          "What metrics would you track for your rate limiter? How do you know it's working correctly?",
+          "How do you distinguish between legitimate traffic being rate-limited and an actual attack?"
+        ],
+        "deepen": [
+          "Key metrics: rejection rate, p50/p99 latency of rate limit checks, Redis memory usage, per-client rejection counts. At 100K checks/sec, emitting a metric per check generates 100K data points/sec. How do you aggregate without overwhelming your monitoring system?",
+          "A customer reports they're being rate-limited but claims they're under their limit. How do you debug this? What logs and metrics do you need?"
+        ],
+        "challenge": [
+          "Your monitoring shows 5% of requests are being rate-limited, but your support team reports zero complaints. Is 5% acceptable? How do you set alert thresholds?"
+        ],
+        "anti_bs": [
+          "You said 'add monitoring.' What specific metrics? What alerting thresholds? What dashboard would an on-call engineer see at 3 AM?"
+        ]
+      },
+      "common_mistakes": ["Not monitoring the rate limiter's own health", "No per-client rejection visibility", "Alert fatigue from overly sensitive thresholds"]
+    },
+    "multi_region": {
+      "name": "Multi-Region Rate Limiting",
+      "category": "scaling",
+      "rubric_area": "scalability",
+      "keywords": ["multi-region", "cross-region", "global", "geo", "replication", "sync", "eventual consistency"],
+      "probes": {
+        "verify": [
+          "If your API is deployed in US-East, EU-West, and AP-Southeast, how do you enforce a global rate limit?",
+          "Should each region have its own rate limit budget, or should it be globally shared?"
+        ],
+        "deepen": [
+          "Cross-region Redis replication has 50-200ms latency. If a user's limit is 100 req/min globally, and they send 60 requests to US-East and 60 to EU-West within the replication lag window, they get 120 through. How do you handle this?",
+          "Stripe allocates per-region budgets: if the global limit is 100 req/sec, US gets 40, EU gets 35, Asia gets 25. When US traffic drops, that unused capacity is wasted. How do you implement dynamic budget reallocation?"
+        ],
+        "challenge": [
+          "A simpler approach: just divide the global limit by the number of regions. 100/3 = 33 per region. A user in one region can never exceed 33 req/min even if they're the only user. Is this acceptable?"
+        ],
+        "anti_bs": [
+          "You said 'sync across regions.' What exactly do you sync, how often, and what protocol? Redis cross-region replication, custom gossip, or something else?"
+        ]
+      },
+      "common_mistakes": ["Not addressing replication lag allowing over-limit requests", "Static per-region budgets wasting capacity", "Assuming global consistency is achievable at low latency"]
+    },
+    "fail_open_closed": {
+      "name": "Fail-Open vs Fail-Closed",
+      "category": "failure",
+      "rubric_area": "failure_handling",
+      "keywords": ["fail open", "fail closed", "unavailable", "default", "allow", "deny", "circuit breaker"],
+      "probes": {
+        "verify": [
+          "If your rate limiting service (Redis) goes down, do you allow all requests through (fail-open) or reject all requests (fail-closed)?",
+          "What factors determine whether you choose fail-open or fail-closed?"
+        ],
+        "deepen": [
+          "Stripe fails open on rate limiter failures because rejecting legitimate payment requests costs merchants revenue. AWS WAF fails closed because allowing unthrottled traffic could cause cascading failures. What's the right choice for your system?",
+          "If you fail open and the outage lasts 5 minutes, a single client could send 50x their normal traffic. How do you protect backends during a fail-open window?"
+        ],
+        "challenge": [
+          "A teammate argues for fail-closed: 'Better to reject some good requests than let a DDoS through.' Your PM argues for fail-open: 'We can't block paying customers.' How do you resolve this?"
+        ],
+        "anti_bs": [
+          "You said 'fail-open.' That means during a Redis outage, there's zero rate limiting. What prevents a single client from sending 1M requests/sec and taking down your entire backend?"
+        ]
+      },
+      "common_mistakes": ["Not explicitly choosing fail-open vs fail-closed", "Not having a fallback mechanism during rate limiter failures", "Not considering the cascading failure risk of fail-open"]
+    }
+  }
+}

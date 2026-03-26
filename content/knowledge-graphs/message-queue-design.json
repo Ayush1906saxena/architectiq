@@ -1,0 +1,368 @@
+{
+  "problem": "message-queue-design",
+  "title": "Design a Message Queue",
+  "concept_rubric_map": {
+    "append_only_log": "database_design",
+    "topic_partition": "database_design",
+    "producer_acks": "failure_handling",
+    "consumer_groups": "scalability",
+    "offset_management": "database_design",
+    "isr_replication": "failure_handling",
+    "leader_election": "failure_handling",
+    "segment_files": "database_design",
+    "retention_policy": "caching_strategy",
+    "compaction": "caching_strategy",
+    "exactly_once": "failure_handling",
+    "idempotent_producer": "failure_handling",
+    "consumer_rebalancing": "scalability",
+    "backpressure": "scalability",
+    "capacity_estimation": "capacity_estimation"
+  },
+  "concepts": {
+    "append_only_log": {
+      "name": "Append-Only Log",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["append", "log", "sequential", "write", "immutable", "commit log", "offset", "disk"],
+      "probes": {
+        "verify": [
+          "Why is an append-only log the fundamental data structure for a message queue? What properties does it give you?",
+          "How does sequential disk I/O make append-only logs performant? What throughput can you achieve?"
+        ],
+        "deepen": [
+          "Sequential writes to disk can achieve 600MB/s on a modern SSD. Random writes get maybe 100MB/s. How does your log structure exploit this?",
+          "Your log is append-only and immutable. How do you handle message deletion? You can't remove a message from the middle of the log."
+        ],
+        "challenge": [
+          "A B-tree based database also provides ordered writes. Why not use a regular database as the message store instead of a raw append-only log?"
+        ],
+        "anti_bs": [
+          "You said 'write messages to a log.' What's the on-disk format? How are messages serialized? What metadata is stored alongside each message — offset, timestamp, key, headers?"
+        ]
+      },
+      "common_mistakes": ["Not leveraging sequential I/O for performance", "Trying to support random deletes in an append-only log", "Not understanding why append-only outperforms random writes"]
+    },
+    "topic_partition": {
+      "name": "Topics and Partitions",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["topic", "partition", "key", "hash", "ordering", "parallel", "throughput", "shard"],
+      "probes": {
+        "verify": [
+          "What is the relationship between topics and partitions? Why do you need partitions?",
+          "How do you decide the number of partitions for a topic?"
+        ],
+        "deepen": [
+          "A topic has 12 partitions. Messages with key 'user-123' always go to partition 7 (hash-based). But partition 7 gets 10x more traffic than others because of a hot key. How do you handle this?",
+          "You have 12 partitions and ordering is guaranteed within a partition. But your consumer needs global ordering across all partitions. How do you achieve this?"
+        ],
+        "challenge": [
+          "You created a topic with 6 partitions. Traffic grew 10x and you need 60 partitions. But increasing partitions breaks key-based ordering guarantees. How do you handle this migration?"
+        ],
+        "anti_bs": [
+          "You said 'partition the topic.' By what key? How does the partitioner work — hash mod N, range-based, or custom? What happens when a message has no key?"
+        ]
+      },
+      "common_mistakes": ["Too few partitions limiting parallelism", "Too many partitions increasing metadata overhead", "Not considering hot partition problem"]
+    },
+    "producer_acks": {
+      "name": "Producer Acknowledgments",
+      "category": "failure",
+      "rubric_area": "failure_handling",
+      "keywords": ["ack", "acknowledgment", "producer", "fire and forget", "leader", "all", "durability", "latency"],
+      "probes": {
+        "verify": [
+          "What acknowledgment modes does your message queue support? What are the trade-offs between acks=0, acks=1, and acks=all?",
+          "When does the producer consider a message 'successfully sent'?"
+        ],
+        "deepen": [
+          "With acks=all, the producer waits for all in-sync replicas to acknowledge. If one replica is slow, it blocks the producer. How do you handle a slow replica without sacrificing durability?",
+          "acks=1 means only the leader acknowledges. If the leader crashes right after acknowledging but before replicating, the message is lost. When is this acceptable?"
+        ],
+        "challenge": [
+          "A financial system requires zero message loss (acks=all) but also needs sub-10ms latency. These goals conflict. How do you satisfy both?"
+        ],
+        "anti_bs": [
+          "You said 'the producer sends messages.' Does it wait for acknowledgment? From whom — the broker, the leader, all replicas? What happens on timeout?"
+        ]
+      },
+      "common_mistakes": ["Using acks=0 or acks=1 for critical data without understanding the risk", "Not handling producer timeouts", "Not configuring min.insync.replicas with acks=all"]
+    },
+    "consumer_groups": {
+      "name": "Consumer Groups",
+      "category": "scaling",
+      "rubric_area": "scalability",
+      "keywords": ["consumer group", "group", "subscribe", "parallel", "partition assignment", "fan-out", "broadcast"],
+      "probes": {
+        "verify": [
+          "What is a consumer group? How does it enable parallel consumption?",
+          "What's the relationship between the number of partitions and the number of consumers in a group?"
+        ],
+        "deepen": [
+          "A topic has 12 partitions and a consumer group has 15 consumers. What happens to the 3 extra consumers?",
+          "Two consumer groups subscribe to the same topic — Group A for real-time processing, Group B for analytics. How does the message queue deliver messages to both groups independently?"
+        ],
+        "challenge": [
+          "A consumer in the group is slow — it takes 10 seconds to process each message while others take 100ms. This consumer falls behind. How do you detect and handle this?"
+        ],
+        "anti_bs": [
+          "You said 'use consumer groups for scaling.' How are partitions assigned to consumers? What algorithm — range, round-robin, or sticky? What happens when a consumer joins or leaves?"
+        ]
+      },
+      "common_mistakes": ["More consumers than partitions leaving consumers idle", "Not understanding that partition is the unit of parallelism", "Not monitoring consumer lag"]
+    },
+    "offset_management": {
+      "name": "Offset Management",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["offset", "commit", "position", "checkpoint", "auto commit", "manual commit", "seek", "replay"],
+      "probes": {
+        "verify": [
+          "What is a consumer offset? How does the consumer track which messages it has processed?",
+          "What's the difference between auto-commit and manual offset commit?"
+        ],
+        "deepen": [
+          "Auto-commit commits offsets every 5 seconds. If the consumer crashes 3 seconds after the last commit, it reprocesses 3 seconds of messages on restart. How do you handle this?",
+          "A consumer commits offset 1000 but crashes before processing messages 998-1000. On restart, it starts from 1001 — messages 998-1000 are lost. How do you prevent this?"
+        ],
+        "challenge": [
+          "Manual commit after processing each message is safest but adds latency. Auto-commit is fast but risks reprocessing or loss. Is there a middle ground?"
+        ],
+        "anti_bs": [
+          "You said 'track offsets.' Where are they stored — in the message queue itself, in ZooKeeper, or in an external database? What's the commit frequency?"
+        ]
+      },
+      "common_mistakes": ["Committing offset before processing (risking message loss)", "Auto-commit causing duplicate processing after crash", "Not understanding at-least-once vs at-most-once semantics"]
+    },
+    "isr_replication": {
+      "name": "In-Sync Replica (ISR) Replication",
+      "category": "failure",
+      "rubric_area": "failure_handling",
+      "keywords": ["isr", "in-sync", "replica", "replication", "follower", "lag", "high watermark", "durability"],
+      "probes": {
+        "verify": [
+          "What is an in-sync replica (ISR)? How does it differ from a regular replica?",
+          "What is the high watermark and how does it relate to consumer visibility?"
+        ],
+        "deepen": [
+          "A replica falls behind the leader by 10 seconds due to network issues. It gets removed from the ISR. What happens to acks=all producers? What if min.insync.replicas is 2 and only 1 replica remains in ISR?",
+          "The leader has messages up to offset 1000. Replica A has up to 995, Replica B up to 998. The high watermark is 995. A consumer can only read up to 995. Why is this important?"
+        ],
+        "challenge": [
+          "Synchronous replication (acks=all) ensures durability but limits throughput to the speed of the slowest ISR member. How do you balance durability vs. throughput?"
+        ],
+        "anti_bs": [
+          "You said 'replicate for durability.' How many replicas? Synchronous or asynchronous? What's the ISR threshold for removing a lagging replica?"
+        ]
+      },
+      "common_mistakes": ["Not configuring min.insync.replicas", "Not understanding high watermark and consumer visibility", "Not monitoring ISR shrinkage"]
+    },
+    "leader_election": {
+      "name": "Leader Election",
+      "category": "failure",
+      "rubric_area": "failure_handling",
+      "keywords": ["leader", "election", "controller", "failover", "zookeeper", "raft", "consensus", "partition leader"],
+      "probes": {
+        "verify": [
+          "Each partition has a leader that handles reads and writes. What happens when the leader broker crashes? How is a new leader elected?",
+          "Who triggers leader election — the brokers themselves, a controller node, or an external coordination service?"
+        ],
+        "deepen": [
+          "During leader election, the partition is unavailable for writes. How long does election typically take, and how does this affect producers?",
+          "Unclean leader election: the only available replica is out-of-sync (missing recent messages). Do you elect it as leader (accepting data loss) or keep the partition offline?"
+        ],
+        "challenge": [
+          "Your cluster has 100 brokers and one controller. The controller crashes. Now you need to elect a new controller AND re-elect leaders for all partitions that were on the crashed broker. How do you avoid a cascading failure?"
+        ],
+        "anti_bs": [
+          "You said 'elect a new leader.' Using what algorithm? How does the system detect that the old leader is dead? What's the detection timeout?"
+        ]
+      },
+      "common_mistakes": ["Not configuring unclean leader election policy", "Not understanding the impact of leader election on availability", "Single controller as a point of failure"]
+    },
+    "segment_files": {
+      "name": "Log Segment Files",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["segment", "file", "roll", "index", "binary", "mmap", "zero-copy", "sendfile"],
+      "probes": {
+        "verify": [
+          "Why is the log divided into segment files instead of a single ever-growing file?",
+          "What triggers a segment roll — file size, time, or both?"
+        ],
+        "deepen": [
+          "Each segment has an associated index file mapping offsets to byte positions. How does a consumer seek to offset 5,000,000 efficiently? Walk me through the index lookup.",
+          "Zero-copy transfer: the broker sends data from disk to the network socket without copying through user space. How does sendfile() work, and why is it critical for throughput?"
+        ],
+        "challenge": [
+          "Your segment files are 1GB each and you have 10,000 partitions. That's 10,000 open file handles minimum. How does the OS handle this, and what limits might you hit?"
+        ],
+        "anti_bs": [
+          "You said 'store messages on disk.' In what format? How are segments organized? What's the segment size, and how do you look up a message by offset?"
+        ]
+      },
+      "common_mistakes": ["Segment size too large causing slow recovery", "Not understanding zero-copy and its performance impact", "Not considering file descriptor limits"]
+    },
+    "retention_policy": {
+      "name": "Retention Policy",
+      "category": "caching",
+      "rubric_area": "caching_strategy",
+      "keywords": ["retention", "ttl", "delete", "expire", "cleanup", "disk space", "time-based", "size-based"],
+      "probes": {
+        "verify": [
+          "How long do you keep messages? What determines when messages are deleted?",
+          "What's the difference between time-based and size-based retention?"
+        ],
+        "deepen": [
+          "You set retention to 7 days, but a consumer group was offline for 8 days. They come back and their offset points to deleted data. How do you handle this?",
+          "A topic with 50 partitions and 7-day retention stores 500GB of data. Suddenly a producer starts sending 10x the normal volume. Your disk fills up before 7 days. What happens?"
+        ],
+        "challenge": [
+          "Some events (like financial transactions) must be retained for 7 years by regulation. But most events need only 3 days. How do you handle different retention requirements on the same cluster?"
+        ],
+        "anti_bs": [
+          "You said 'retain messages for N days.' What happens to the disk space? Is deletion immediate or lazy? How does the broker reclaim space — delete whole segments or individual messages?"
+        ]
+      },
+      "common_mistakes": ["Not monitoring disk usage vs retention", "Consumers losing data because retention expired before consumption", "Not understanding that deletion happens at segment granularity"]
+    },
+    "compaction": {
+      "name": "Log Compaction",
+      "category": "caching",
+      "rubric_area": "caching_strategy",
+      "keywords": ["compact", "compaction", "key", "tombstone", "snapshot", "changelog", "dedup", "latest value"],
+      "probes": {
+        "verify": [
+          "What is log compaction and how does it differ from time-based retention?",
+          "When would you use log compaction instead of regular retention?"
+        ],
+        "deepen": [
+          "Compaction keeps the latest value for each key. But during compaction, the broker reads and rewrites segments — that's heavy I/O. How do you prevent compaction from impacting live read/write performance?",
+          "A tombstone (null value) marks a key for deletion during compaction. But what if a consumer reads the tombstone and doesn't understand it? How do you handle the delete.retention.ms window?"
+        ],
+        "challenge": [
+          "Your changelog topic uses compaction. A bug in a producer writes garbage values for 10,000 keys. After compaction, the garbage is the 'latest' value and the good data is gone. How do you recover?"
+        ],
+        "anti_bs": [
+          "You said 'use log compaction.' For what use case? How does the compaction thread work? What's the compaction lag, and how much extra disk space do you need during compaction?"
+        ]
+      },
+      "common_mistakes": ["Not understanding when compaction vs retention is appropriate", "Not reserving disk space for compaction process", "Not handling tombstones properly"]
+    },
+    "exactly_once": {
+      "name": "Exactly-Once Semantics",
+      "category": "failure",
+      "rubric_area": "failure_handling",
+      "keywords": ["exactly once", "eos", "transaction", "atomic", "consume-transform-produce", "idempotent", "dedup"],
+      "probes": {
+        "verify": [
+          "What are the three delivery semantics — at-most-once, at-least-once, exactly-once? How does your system achieve exactly-once?",
+          "Is true exactly-once delivery possible, or is it exactly-once processing? What's the difference?"
+        ],
+        "deepen": [
+          "Exactly-once in Kafka uses transactions: consume from topic A, process, produce to topic B, commit offsets — all atomically. Walk me through how this works and what happens if the consumer crashes mid-transaction.",
+          "Exactly-once between your message queue and an external database requires two-phase commit or outbox pattern. The external system doesn't support transactions with your queue. How do you achieve end-to-end exactly-once?"
+        ],
+        "challenge": [
+          "A purist says 'exactly-once is impossible in a distributed system due to the Two Generals Problem.' How do you respond? What does 'exactly-once' really mean in practice?"
+        ],
+        "anti_bs": [
+          "You said 'guarantee exactly-once.' Between which components? End-to-end or just within the queue? What mechanisms make it work — transactions, idempotent producers, or both?"
+        ]
+      },
+      "common_mistakes": ["Claiming end-to-end exactly-once without qualifying scope", "Not understanding that exactly-once requires idempotent consumers or transactions", "Confusing delivery guarantee with processing guarantee"]
+    },
+    "idempotent_producer": {
+      "name": "Idempotent Producer",
+      "category": "failure",
+      "rubric_area": "failure_handling",
+      "keywords": ["idempotent", "producer id", "sequence number", "dedup", "duplicate", "retry", "pid", "epoch"],
+      "probes": {
+        "verify": [
+          "What is an idempotent producer? How does it prevent duplicate messages on retry?",
+          "How does the broker detect that a retried message is a duplicate?"
+        ],
+        "deepen": [
+          "The broker assigns a Producer ID (PID) and tracks sequence numbers per partition. If the producer crashes and restarts, it gets a new PID. How does this affect exactly-once guarantees?",
+          "The broker keeps a window of recent sequence numbers for dedup. How large is this window? What happens if the producer skips a sequence number?"
+        ],
+        "challenge": [
+          "Idempotent producers prevent duplicates within a single producer session. But if two producers send the same logical message (e.g., same order event), the broker can't dedup across producers. How do you handle application-level dedup?"
+        ],
+        "anti_bs": [
+          "You said 'make the producer idempotent.' How? What protocol-level mechanism does the broker use to detect and discard duplicates?"
+        ]
+      },
+      "common_mistakes": ["Thinking idempotent producer handles cross-session dedup", "Not understanding PID and epoch semantics", "Not enabling idempotency for critical producers"]
+    },
+    "consumer_rebalancing": {
+      "name": "Consumer Rebalancing",
+      "category": "scaling",
+      "rubric_area": "scalability",
+      "keywords": ["rebalance", "partition assignment", "join group", "leave group", "cooperative", "eager", "sticky", "stop the world"],
+      "probes": {
+        "verify": [
+          "What triggers a consumer rebalance? What happens during a rebalance?",
+          "During a rebalance, is the consumer group still processing messages?"
+        ],
+        "deepen": [
+          "Eager rebalancing: all consumers stop, revoke all partitions, and reassign. This causes a 'stop-the-world' pause. How long does it last for a group with 100 consumers and 500 partitions?",
+          "Cooperative (incremental) rebalancing only moves affected partitions. How does it work, and why is it better than eager rebalancing?"
+        ],
+        "challenge": [
+          "A consumer is slow due to GC pauses and keeps triggering rebalances (heartbeat timeout). Each rebalance disrupts the entire group. How do you prevent one bad consumer from destabilizing the group?"
+        ],
+        "anti_bs": [
+          "You said 'the group rebalances.' What assignment strategy do you use? How do you minimize the number of partition movements during rebalance?"
+        ]
+      },
+      "common_mistakes": ["Not understanding the impact of eager rebalancing", "Not tuning heartbeat and session timeouts", "Not using sticky or cooperative assignment strategy"]
+    },
+    "backpressure": {
+      "name": "Backpressure Handling",
+      "category": "scaling",
+      "rubric_area": "scalability",
+      "keywords": ["backpressure", "slow consumer", "buffer", "overflow", "throttle", "rate limit", "flow control", "queue depth"],
+      "probes": {
+        "verify": [
+          "What happens when a consumer can't keep up with the production rate? How does your system handle backpressure?",
+          "Does your message queue apply backpressure on the producer, buffer in the broker, or let the consumer fall behind?"
+        ],
+        "deepen": [
+          "The producer sends 100K messages/sec. The consumer processes 10K messages/sec. After 1 hour, there are 324 million unconsumed messages. How much memory/disk does this consume, and what's the impact?",
+          "Producer-side backpressure: the broker rejects new messages when the queue is full. But the producer might lose important messages. How do you handle this without data loss?"
+        ],
+        "challenge": [
+          "In Kafka, consumers pull messages. There's no explicit backpressure — slow consumers just have increasing lag. In RabbitMQ, the broker pushes and can apply credit-based flow control. Which model is better and why?"
+        ],
+        "anti_bs": [
+          "You said 'handle backpressure.' How specifically? What's the buffer size limit? What happens when the buffer is full — block the producer, drop messages, or spill to disk?"
+        ]
+      },
+      "common_mistakes": ["No monitoring for consumer lag", "Unbounded buffers leading to OOM", "Not distinguishing between pull-based and push-based backpressure models"]
+    },
+    "capacity_estimation": {
+      "name": "Capacity Estimation",
+      "category": "requirements",
+      "rubric_area": "capacity_estimation",
+      "keywords": ["throughput", "messages per second", "bandwidth", "storage", "disk", "network", "broker", "partition"],
+      "probes": {
+        "verify": [
+          "How many messages per second does your message queue need to handle? What's the average message size?",
+          "Walk me through the math — messages/sec × message size × replication factor × retention period = total storage."
+        ],
+        "deepen": [
+          "At 1 million messages/sec with 1KB average size, that's 1GB/sec of write throughput. With replication factor 3, it's 3GB/sec. How many brokers do you need if each broker handles 500MB/sec?",
+          "7-day retention at 1GB/sec ingest = 604 TB of raw data, times 3 replicas = 1.8 PB. How many disks do you need, and what's the cost?"
+        ],
+        "challenge": [
+          "Your capacity plan assumes steady-state throughput. But event-driven systems have bursts — a flash sale might produce 10x normal volume for 30 minutes. How do you size for bursts vs. average?"
+        ],
+        "anti_bs": [
+          "You said 'handle millions of messages.' Per second or per day? What's the message size? Show me the storage and network bandwidth calculation."
+        ]
+      },
+      "common_mistakes": ["Not accounting for replication in storage and bandwidth calculations", "Not considering burst traffic", "Forgetting network bandwidth as a bottleneck alongside disk"]
+    }
+  }
+}

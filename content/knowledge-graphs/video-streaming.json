@@ -1,0 +1,383 @@
+{
+  "problem": "video-streaming",
+  "title": "Design a Video Streaming Platform",
+  "concept_rubric_map": {
+    "chunked_upload": "api_design",
+    "transcoding_pipeline": "scalability",
+    "adaptive_bitrate": "requirements_gathering",
+    "hls_dash": "api_design",
+    "cdn_architecture": "caching_strategy",
+    "cache_warming": "caching_strategy",
+    "video_metadata": "database_design",
+    "thumbnail_generation": "scalability",
+    "recommendation_engine": "database_design",
+    "view_counting": "database_design",
+    "live_streaming": "scalability",
+    "storage_tiering": "caching_strategy",
+    "content_fingerprint": "failure_handling",
+    "capacity_estimation": "capacity_estimation",
+    "api_design": "api_design"
+  },
+  "concepts": {
+    "chunked_upload": {
+      "name": "Chunked Video Upload",
+      "category": "upload",
+      "rubric_area": "api_design",
+      "keywords": ["upload", "chunk", "resumable", "multipart", "tus", "presigned", "large file"],
+      "probes": {
+        "verify": [
+          "How do you handle uploading a 5GB video file? Walk me through the upload protocol.",
+          "What happens if the upload fails at 80%? Does the user have to restart from the beginning?"
+        ],
+        "deepen": [
+          "YouTube uses resumable uploads: the client uploads in 8MB chunks, and the server tracks progress. If the connection drops at chunk 625 of 640 (for a 5GB file), the client resumes at chunk 625. What metadata do you store server-side to track partial uploads?",
+          "Concurrent uploads: a popular creator uploads 10 videos simultaneously, each 2GB. That's 20GB of concurrent upload bandwidth. With 100K creators uploading per hour, what's your total ingest bandwidth? How do you prioritize uploads?",
+          "Pre-signed S3 URLs let clients upload directly to object storage, bypassing your API servers. But you lose the ability to validate the file mid-upload. How do you validate file type, size, and content when using direct-to-S3 uploads?"
+        ],
+        "challenge": [
+          "Your teammate says 'use the tus protocol for resumable uploads — it's an open standard.' tus uses HTTP PATCH for chunk uploads and HEAD to check upload progress. But S3 uses its own multipart upload API. How do you bridge tus with S3?"
+        ],
+        "anti_bs": [
+          "You said 'chunked upload.' What's the chunk size? How does the server acknowledge each chunk? What protocol do you use — custom REST, tus, or S3 multipart?"
+        ]
+      },
+      "common_mistakes": ["Not implementing resumable uploads for large files", "Routing upload traffic through API servers instead of direct-to-storage", "Not validating file type and size before processing"]
+    },
+    "transcoding_pipeline": {
+      "name": "Video Transcoding Pipeline",
+      "category": "processing",
+      "rubric_area": "scalability",
+      "keywords": ["transcode", "encode", "codec", "h264", "h265", "vp9", "av1", "resolution", "pipeline", "ffmpeg", "bitrate"],
+      "probes": {
+        "verify": [
+          "After a video is uploaded, how do you transcode it into multiple resolutions and formats?",
+          "What codecs do you support? Why would you offer H.264, H.265, VP9, and AV1?"
+        ],
+        "deepen": [
+          "YouTube transcodes each video into ~6 resolutions (144p to 4K) x 3 codecs (H.264, VP9, AV1) = 18 variants. A 10-minute 4K source video takes ~30 minutes to transcode to all variants on an 8-core machine. At 500 hours of video uploaded per minute, you need 500 x 60 x 30 / 10 = 90,000 CPU-hours per minute. How do you provision this?",
+          "Netflix splits each video into segments (2-10 seconds each) and transcodes segments in parallel across hundreds of workers. A 2-hour movie with 4-second segments = 1,800 segments x 18 variants = 32,400 transcoding jobs. How do you orchestrate this DAG of jobs?",
+          "Transcoding is CPU-intensive but predictable. GPU transcoding (NVENC) is 10x faster but more expensive. At $0.50/hr for CPU vs. $3/hr for GPU, but GPU finishes 10x faster, GPU costs $0.30 per job vs. $0.50 for CPU. When does GPU transcoding make economic sense?"
+        ],
+        "challenge": [
+          "AV1 provides 30% better compression than H.265 but encoding is 100x slower. Netflix pre-encodes their library in AV1 because videos are watched millions of times — the bandwidth savings justify the encoding cost. For user-generated content watched <100 times on average, is AV1 worth it?"
+        ],
+        "anti_bs": [
+          "You said 'transcode to multiple resolutions.' How many resolutions? What bitrates? What's the encoding preset — fast (lower quality) or slow (higher quality)? What's the transcoding time per minute of video?"
+        ]
+      },
+      "common_mistakes": ["Not parallelizing transcoding by segment", "Not offering multiple codecs for device compatibility", "Underestimating the compute cost of transcoding at scale"]
+    },
+    "adaptive_bitrate": {
+      "name": "Adaptive Bitrate Streaming",
+      "category": "playback",
+      "rubric_area": "requirements_gathering",
+      "keywords": ["adaptive bitrate", "abr", "quality", "bandwidth", "buffer", "switching", "resolution"],
+      "probes": {
+        "verify": [
+          "How does the player adjust video quality based on the viewer's network conditions?",
+          "What is adaptive bitrate streaming and why is it essential for user experience?"
+        ],
+        "deepen": [
+          "ABR algorithms: buffer-based (BBA) switches quality based on buffer fullness — if buffer > 30 seconds, increase quality; if < 10 seconds, decrease. Throughput-based estimates available bandwidth from download speed of recent chunks. Netflix uses a hybrid. Which factors does your algorithm consider?",
+          "The bitrate ladder: 360p at 400kbps, 480p at 800kbps, 720p at 2.5Mbps, 1080p at 5Mbps, 4K at 15Mbps. The step from 720p to 1080p doubles the bandwidth. If a user fluctuates between 3-5Mbps, they'll oscillate between 720p and 1080p every few seconds. How do you prevent quality oscillation?",
+          "Netflix's per-title encoding: a cartoon needs less bitrate than an action movie at the same resolution. They analyze each title and create a custom bitrate ladder. A cartoon at 1080p might need only 3Mbps while an action movie needs 8Mbps. How does this affect your encoding pipeline?"
+        ],
+        "challenge": [
+          "Your teammate says 'just offer 3 quality levels — low, medium, high — and let the user choose manually.' This eliminates ABR complexity entirely. When is manual quality selection acceptable? Mobile-only apps? Low-bandwidth markets?"
+        ],
+        "anti_bs": [
+          "You said 'adaptive bitrate streaming.' What algorithm determines when to switch quality? How many seconds of buffer do you maintain? What's the maximum quality switch frequency you allow?"
+        ]
+      },
+      "common_mistakes": ["Not preventing quality oscillation on variable networks", "Using a fixed bitrate ladder instead of per-content optimization", "Not considering buffer state in quality decisions"]
+    },
+    "hls_dash": {
+      "name": "HLS and DASH Protocols",
+      "category": "playback",
+      "rubric_area": "api_design",
+      "keywords": ["hls", "dash", "manifest", "m3u8", "mpd", "segment", "playlist", "protocol"],
+      "probes": {
+        "verify": [
+          "What streaming protocol do you use — HLS, DASH, or both? Why?",
+          "Walk me through how a video player starts playing a video: manifest fetch, segment download, buffering."
+        ],
+        "deepen": [
+          "HLS uses .m3u8 manifests and .ts segments (or .fmp4 with CMAF). A 2-hour movie with 6-second segments = 1,200 segments per quality level x 6 quality levels = 7,200 segment files. How do you organize and serve these files?",
+          "DASH (Dynamic Adaptive Streaming over HTTP) uses an MPD manifest. Unlike HLS, DASH supports segment templates — the player computes segment URLs mathematically without a per-segment manifest entry. How does this reduce manifest size?",
+          "Latency: standard HLS has 15-30 second latency (3 x segment duration for buffer). Low-Latency HLS (LL-HLS) uses partial segments (200ms) and preload hints to achieve 2-3 second latency. What infrastructure changes does LL-HLS require?"
+        ],
+        "challenge": [
+          "Apple mandates HLS for iOS. Google prefers DASH for Android/Chrome. You could use CMAF (Common Media Application Format) with fMP4 segments compatible with both HLS and DASH. Does CMAF actually unify the formats, or do you still need separate manifests?"
+        ],
+        "anti_bs": [
+          "You said 'use HLS.' What's the segment duration? Do you use .ts or .fmp4 segments? What's in the master playlist vs. the media playlist? Show me the manifest structure."
+        ]
+      },
+      "common_mistakes": ["Not supporting both HLS and DASH for cross-platform compatibility", "Segment duration too long (high latency) or too short (too many HTTP requests)", "Not considering low-latency streaming requirements"]
+    },
+    "cdn_architecture": {
+      "name": "CDN Architecture",
+      "category": "delivery",
+      "rubric_area": "caching_strategy",
+      "keywords": ["cdn", "edge", "pop", "origin", "cache", "cloudfront", "akamai", "distribution"],
+      "probes": {
+        "verify": [
+          "How do you serve video content to users worldwide with low latency?",
+          "Walk me through the CDN architecture: origin server, edge servers, cache hierarchy."
+        ],
+        "deepen": [
+          "Netflix's Open Connect: they deploy custom CDN appliances (OCA) directly in ISP networks. Each OCA has 100TB of SSD storage. At 15% of global internet traffic, Netflix serves 100+ Gbps from each OCA. How does this differ from using a commercial CDN like CloudFront?",
+          "CDN cache hit ratio: popular videos (top 1%) have 99%+ hit rates. The long tail (bottom 80%) has <10% hit rates. If 80% of your catalog is rarely watched, those requests go back to origin. What's your origin capacity to handle cache misses?",
+          "Multi-tier CDN: L1 (edge, 200 PoPs, 1TB each), L2 (regional, 20 PoPs, 100TB each), L3 (origin). A cache miss at L1 goes to L2 before origin. This reduces origin load by 90%. But it adds 10-30ms latency for L1 misses. What's the overall cache hit ratio across tiers?"
+        ],
+        "challenge": [
+          "Your teammate says 'just use CloudFront — it has 400+ edge locations.' CloudFront charges $0.085/GB for the first 10TB. At 1PB/day of video delivery, that's $85,000/day or $2.55M/month. At what scale does building your own CDN become cheaper?"
+        ],
+        "anti_bs": [
+          "You said 'serve through CDN.' How do you decide what to cache at the edge? What's the eviction policy? How do you handle cache purges when a video is taken down for copyright?"
+        ]
+      },
+      "common_mistakes": ["Not considering CDN costs at scale", "Not implementing a multi-tier cache hierarchy", "Not handling cache purges for deleted/blocked content"]
+    },
+    "cache_warming": {
+      "name": "Cache Warming Strategy",
+      "category": "caching",
+      "rubric_area": "caching_strategy",
+      "keywords": ["warm", "prefetch", "preload", "predictive", "populate", "cold start", "cache miss"],
+      "probes": {
+        "verify": [
+          "When a new video is published or a cold CDN node starts serving, how do you pre-populate the cache?",
+          "What's the difference between reactive caching (cache on first request) and proactive cache warming?"
+        ],
+        "deepen": [
+          "A popular creator with 50M subscribers publishes a new video. Within the first hour, 5M viewers watch it. Without cache warming, the first viewer in each of 200 CDN PoPs triggers an origin fetch — 200 origin requests for the same content simultaneously. How do you push content to edge nodes before publication?",
+          "Netflix predictively warms their CDN overnight during off-peak hours based on what subscribers are likely to watch the next day. Their recommendation model predicts viewing with 80% accuracy. If you pre-warm the wrong content, you waste 20% of CDN storage. What's the cost of that waste?",
+          "Cache warming for live events: a Super Bowl live stream will have 100M concurrent viewers. You need the stream available on all 200+ edge PoPs simultaneously. How do you distribute a live stream to all PoPs with sub-second consistency?"
+        ],
+        "challenge": [
+          "Proactive cache warming requires predicting what will be popular — which is hard for user-generated content. A cat video can go viral unpredictably. Is reactive caching with a multi-tier CDN sufficient, or do you need prediction?"
+        ],
+        "anti_bs": [
+          "You said 'pre-warm the cache.' How specifically? Push-based (origin pushes to edges) or pull-based (edges prefetch)? What triggers the warm — publication event, subscriber count, or prediction model?"
+        ]
+      },
+      "common_mistakes": ["Not warming cache before viral content release", "Not implementing predictive warming for known popular content", "Warming too aggressively and wasting CDN storage on unpopular content"]
+    },
+    "video_metadata": {
+      "name": "Video Metadata Storage",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["metadata", "title", "description", "tags", "category", "schema", "database", "denormalize"],
+      "probes": {
+        "verify": [
+          "How do you store video metadata — title, description, tags, resolution, duration, upload date?",
+          "What database do you use for metadata and what's the schema?"
+        ],
+        "deepen": [
+          "YouTube has 800M+ videos. Each video's metadata includes title, description, tags, category, channel_id, upload_date, duration, view_count, like_count, comment_count, thumbnails, available_resolutions, captions, and privacy settings. At ~2KB per video, that's 1.6TB of metadata. How do you shard this?",
+          "Access patterns: (1) get video by ID (detail page), (2) list videos by channel ordered by date, (3) search videos by keywords, (4) get trending videos. Each pattern suggests different indexes. What indexes do you create?",
+          "Denormalization: the video detail page shows video metadata + channel info (name, avatar, subscriber count) + related videos. You could join 3 tables or denormalize channel info into the video record. With 800M videos, denormalized channel info updates (channel name change) must propagate to all their videos. How do you handle this?"
+        ],
+        "challenge": [
+          "Your teammate says 'use a document store like MongoDB for metadata — it's schema-flexible and handles reads well.' But your search use case needs Elasticsearch anyway. Do you need MongoDB if Elasticsearch can be your primary metadata store for reads?"
+        ],
+        "anti_bs": [
+          "You said 'store metadata in a database.' Which one? What's the primary key? How do you handle the view_count field that updates millions of times per day for popular videos — is it in the same record or separated?"
+        ]
+      },
+      "common_mistakes": ["Storing rapidly changing counters (views, likes) in the same table as static metadata", "Not creating indexes for all access patterns", "Not separating hot metadata from cold metadata"]
+    },
+    "thumbnail_generation": {
+      "name": "Thumbnail Generation",
+      "category": "processing",
+      "rubric_area": "scalability",
+      "keywords": ["thumbnail", "preview", "sprite", "seek", "scrubbing", "poster", "frame"],
+      "probes": {
+        "verify": [
+          "How do you generate thumbnails for videos? Static poster images, animated previews, or seek bar sprites?",
+          "When in the processing pipeline does thumbnail generation happen?"
+        ],
+        "deepen": [
+          "YouTube generates thumbnail sprites for the seek bar: one frame every 2 seconds for a 10-minute video = 300 frames. Packed into 10x10 sprite sheets at 160x90px each, that's 3 sprite images per video. With 500 hours of video uploaded per minute, that's ~3M thumbnails generated per hour. What's the compute cost?",
+          "Animated previews (hover-to-preview): YouTube extracts a 3-second clip from the video's most visually interesting segment. This requires scene detection ML + video clipping. At 500 hours/min of uploads, can you afford ML inference on every video?",
+          "Thumbnail selection: YouTube's ML model selects the most engaging frame from the video as the default thumbnail. The model is trained on click-through rate data. A good thumbnail can increase CTR by 30%. How do you A/B test thumbnail effectiveness?"
+        ],
+        "challenge": [
+          "Your teammate says 'let the uploader choose a thumbnail from a few auto-generated options.' This is simpler than ML-based selection. But 30% of uploaders never customize their thumbnail. For those, the auto-generated choice needs to be good. What's the quality bar for auto-generation?"
+        ],
+        "anti_bs": [
+          "You said 'generate thumbnails.' At what stage? What resolution? How many per video? Where are they stored? How are they served — same CDN as video or separate?"
+        ]
+      },
+      "common_mistakes": ["Not generating seek bar sprites for scrubbing", "Not optimizing thumbnail size for fast loading", "Running thumbnail generation synchronously blocking the upload pipeline"]
+    },
+    "recommendation_engine": {
+      "name": "Recommendation Engine",
+      "category": "features",
+      "rubric_area": "database_design",
+      "keywords": ["recommendation", "suggest", "related", "collaborative filtering", "content-based", "ml", "personalized"],
+      "probes": {
+        "verify": [
+          "How do you recommend videos to users? What signals do you use?",
+          "What's the difference between collaborative filtering and content-based filtering?"
+        ],
+        "deepen": [
+          "YouTube's recommendation system drives 70% of all watch time. It uses a two-stage pipeline: (1) candidate generation selects ~1,000 videos from a corpus of 800M using user history and collaborative filtering, (2) ranking scores those 1,000 using deep learning with features like watch time, engagement, freshness. How do you serve this at 2B requests/day?",
+          "Cold start: a new video has no watch history. A new user has no preference data. How do you recommend for new videos and new users? YouTube uses metadata similarity (title, tags, channel) for new videos.",
+          "The recommendation system can create filter bubbles: a user watches 3 conspiracy theory videos and gets recommended 100 more. YouTube added 'borderline content' demotion in their ranking model. How do you balance engagement optimization with content quality?"
+        ],
+        "challenge": [
+          "Pre-computing recommendations offline (batch pipeline every 6 hours) misses trending content. Real-time recommendations require online inference with <50ms latency. At 23K timeline reads/sec, can you afford real-time ML inference for every request?"
+        ],
+        "anti_bs": [
+          "You said 'collaborative filtering.' On what matrix? Users x Videos? That's 2B x 800M — impossibly large. How do you reduce the dimensionality? What embedding size? What algorithm — matrix factorization, deep learning, or both?"
+        ]
+      },
+      "common_mistakes": ["Not addressing the cold start problem", "Not considering the latency of real-time recommendation inference", "Not building a two-stage pipeline (candidate generation + ranking)"]
+    },
+    "view_counting": {
+      "name": "View Counting at Scale",
+      "category": "features",
+      "rubric_area": "database_design",
+      "keywords": ["view count", "counter", "increment", "aggregate", "real-time", "approximate", "exact"],
+      "probes": {
+        "verify": [
+          "How do you count video views accurately at scale? Is the count real-time or eventually consistent?",
+          "What constitutes a 'view'? Just loading the page, or watching for a minimum duration?"
+        ],
+        "deepen": [
+          "A viral video gets 10M views/hour = ~2,800 increments/sec to a single counter. If the counter is in a SQL database, that's 2,800 writes/sec to a single row — a massive hotspot. How do you distribute the counter?",
+          "YouTube froze view counts at 301 for videos that went viral, while they verified view legitimacy. They batch-process view events, deduplicate (same user watching 10 times counts once per day), and filter bot traffic. What pipeline processes this?",
+          "Counter sharding: split the view counter across 100 shards. Each shard gets ~28 writes/sec. Reads aggregate all 100 shards — adding 10-50ms latency. The displayed count is eventually consistent (maybe 5 minutes stale). Is 5-minute staleness acceptable for view counts?"
+        ],
+        "challenge": [
+          "Your teammate says 'use Redis INCR for real-time view counts.' At 2,800 INCR/sec per hot key, Redis handles it. But you lose the count if Redis restarts. Do you persist every increment to the database synchronously?"
+        ],
+        "anti_bs": [
+          "You said 'increment a counter.' Where? What database/cache? How do you handle a single video getting millions of increments? Is it a single row, sharded counter, or append-only log?"
+        ]
+      },
+      "common_mistakes": ["Single-row counter creating a write hotspot", "Not deduplicating views from the same user", "Not filtering bot/fraudulent views"]
+    },
+    "live_streaming": {
+      "name": "Live Streaming Architecture",
+      "category": "streaming",
+      "rubric_area": "scalability",
+      "keywords": ["live", "stream", "rtmp", "webrtc", "latency", "ingest", "broadcast", "real-time"],
+      "probes": {
+        "verify": [
+          "How does live streaming differ architecturally from video-on-demand?",
+          "Walk me through the live streaming pipeline: ingest, transcode, distribute, play."
+        ],
+        "deepen": [
+          "Ingest: streamers send RTMP to your ingest servers. RTMP is TCP-based with ~1-3 second latency. Twitch has 7+ million unique streamers. At peak, 100K concurrent streams each at 6Mbps (1080p60) = 600Gbps ingest bandwidth. How many ingest servers do you need?",
+          "Live transcoding must be real-time: a 1-second segment of 4K video must transcode in <1 second. H.264 real-time encoding at 4K requires dedicated hardware encoders (GPU or FPGA). With 100K concurrent streams x 6 resolution variants each, you need 600K concurrent encoding pipelines. What's the infrastructure cost?",
+          "YouTube Live has 5-15 second latency with standard HLS. Twitch achieves 2-5 seconds with Low-Latency HLS. WebRTC can deliver sub-second latency but doesn't scale beyond ~1,000 viewers per stream without a Selective Forwarding Unit (SFU). What latency target do you design for?"
+        ],
+        "challenge": [
+          "A single streamer with 500K concurrent viewers: each viewer requests a new segment every 2 seconds. That's 250K requests/sec for one stream. If all viewers are in one region, a single CDN PoP handles 250K req/sec. How do you handle this thundering herd at the edge?"
+        ],
+        "anti_bs": [
+          "You said 'live streaming with low latency.' Define 'low latency' — is it 2 seconds, 5 seconds, or sub-second? Each target requires fundamentally different protocols and architecture."
+        ]
+      },
+      "common_mistakes": ["Not distinguishing latency requirements for different live streaming use cases", "Not planning for real-time transcoding compute requirements", "Not handling thundering herd at CDN edge for popular streams"]
+    },
+    "storage_tiering": {
+      "name": "Storage Tiering",
+      "category": "storage",
+      "rubric_area": "caching_strategy",
+      "keywords": ["tier", "hot", "warm", "cold", "archive", "glacier", "lifecycle", "s3", "storage class"],
+      "probes": {
+        "verify": [
+          "How do you manage storage costs for videos that range from viral (billions of views) to rarely watched?",
+          "What storage tiers do you use and what's the cost per GB for each?"
+        ],
+        "deepen": [
+          "YouTube stores 500 hours of video per minute. Assuming 30 days of retention for all resolutions: 500 hrs/min x 1440 min/day x 30 days = 21.6M hours of video. At 1GB/hr average across all resolutions, that's 21.6PB for 30 days. S3 Standard at $0.023/GB = $497K/month. S3 Glacier at $0.004/GB = $86K/month. How much do you save by tiering?",
+          "Access pattern tiering: videos uploaded in the last 7 days get 80% of all views. After 30 days, viewership drops by 90%. After 1 year, <1% of total views. How do you move video data through tiers automatically?",
+          "Retrieval latency: S3 Standard is instant, S3 Infrequent Access adds a per-request fee, S3 Glacier Deep Archive takes 12 hours to retrieve. If a 3-year-old video suddenly goes viral (someone shares it on Twitter), how do you serve it quickly from Glacier?"
+        ],
+        "challenge": [
+          "Your teammate says 'delete videos older than 2 years that have <100 views to save storage.' That frees up 60% of storage. But those videos might have sentimental value to uploaders. How do you balance cost savings with user expectations?"
+        ],
+        "anti_bs": [
+          "You said 'store old videos in cheaper storage.' What triggers the tier transition? Views per day threshold? Time since upload? What happens to the CDN cache for a video that moves to cold storage?"
+        ]
+      },
+      "common_mistakes": ["Not implementing automatic lifecycle policies", "Not considering retrieval latency when content goes viral again", "Applying one-size-fits-all storage without tiering"]
+    },
+    "content_fingerprint": {
+      "name": "Content Fingerprinting and Copyright",
+      "category": "safety",
+      "rubric_area": "failure_handling",
+      "keywords": ["fingerprint", "content id", "copyright", "hash", "duplicate", "dmca", "perceptual hash", "matching"],
+      "probes": {
+        "verify": [
+          "How do you detect copyrighted content in uploaded videos?",
+          "What's the difference between exact duplicate detection (hash-based) and content fingerprinting (perceptual)?"
+        ],
+        "deepen": [
+          "YouTube's Content ID has 100M+ reference files from 9,000+ content partners. Every uploaded video is fingerprinted (audio + visual) and compared against this database. With 500 hours of video uploaded per minute and each hour producing ~1,000 fingerprint segments, that's 500K comparisons per minute against 100M references. What's the matching algorithm?",
+          "Perceptual hashing: pHash generates a 64-bit hash from visual content that's robust to resizing, compression, and minor edits. But a video with changed aspect ratio, added borders, or flipped horizontally has a different pHash. How do you handle adversarial transformations?",
+          "False positive rate: at 500 hours/min, even a 0.1% false positive rate means 30 seconds of video falsely flagged per minute. Over a day, that's 720 minutes of wrongly blocked content. What's your appeals process and how quickly can you review false positives?"
+        ],
+        "challenge": [
+          "Building a Content ID system costs hundreds of millions. Audible Magic provides fingerprinting as a service at ~$0.001 per audio comparison. With 500 hours/min, that's $30/min or $43K/day. Build vs. buy?"
+        ],
+        "anti_bs": [
+          "You said 'fingerprint the content.' What type of fingerprint — audio, visual, or both? What algorithm? What's the comparison complexity against the reference database?"
+        ]
+      },
+      "common_mistakes": ["Not supporting both audio and visual fingerprinting", "Not handling adversarial transformations (cropping, mirroring)", "Not providing an appeals process for false positives"]
+    },
+    "capacity_estimation": {
+      "name": "Capacity Estimation",
+      "category": "requirements",
+      "rubric_area": "capacity_estimation",
+      "keywords": ["capacity", "storage", "bandwidth", "qps", "hours per minute", "petabyte", "upload", "stream"],
+      "probes": {
+        "verify": [
+          "Walk me through your capacity estimation. How many video uploads per day? How many concurrent viewers?",
+          "What's the storage breakdown between video files, metadata, thumbnails, and search indexes?"
+        ],
+        "deepen": [
+          "YouTube: 500 hours uploaded/min, 1B hours watched/day. Upload storage: 500 hrs/min x 1GB/hr (compressed) x 6 resolutions = 3TB/min = 4.3PB/day. Viewing bandwidth: 1B hours/day x ~2.5Mbps average = 2.5 Pbps average bandwidth. What's the peak bandwidth during prime time?",
+          "Transcoding compute: 500 hrs/min x 6 resolutions x 30 min transcoding per resolution-hour = 90,000 CPU-hours per minute. At $0.04/CPU-hour (spot instances), that's $3,600/min or $5.2M/day just for transcoding. How do you optimize this cost?",
+          "CDN bandwidth: 1B hours/day at 2.5Mbps = 2.5Pbps. Assuming 90% CDN cache hit rate and $0.02/GB: egress is 2.5 Pbps x 86,400 sec / 8 bits x 0.9 = ~24.3 PB/day from CDN. Cost: 24.3 PB x 1M GB/PB x $0.02/GB = $486K/day. What's your monthly CDN bill?"
+        ],
+        "challenge": [
+          "Your estimates are based on averages, but video streaming has extreme peaks. Netflix reports 3x average bandwidth during prime time (7-10 PM). Your infrastructure must handle peak, not average. How does this 3x multiplier affect your capacity planning?"
+        ],
+        "anti_bs": [
+          "You said 'petabytes of storage.' Break it down: raw uploads, transcoded variants, thumbnails, metadata. What percentage is each? Where are the biggest cost drivers?"
+        ]
+      },
+      "common_mistakes": ["Not separating upload storage from delivery bandwidth estimates", "Not accounting for transcoding compute costs", "Using average bandwidth instead of peak for capacity planning"]
+    },
+    "api_design": {
+      "name": "API Design",
+      "category": "api",
+      "rubric_area": "api_design",
+      "keywords": ["api", "rest", "graphql", "endpoint", "upload", "stream", "playlist", "video"],
+      "probes": {
+        "verify": [
+          "What are the core API endpoints for your video platform? Walk me through upload, stream, and search APIs.",
+          "How does authentication and authorization work for private videos and channel management?"
+        ],
+        "deepen": [
+          "Upload API: POST /videos/upload returns an upload_url. The client sends chunks to that URL. When complete, POST /videos/{id}/publish triggers transcoding. How do you handle the async nature — webhook, polling, or WebSocket for transcoding status?",
+          "Streaming API: GET /videos/{id}/manifest returns the HLS/DASH manifest. The player then requests individual segments. Should the manifest URL be signed (time-limited) to prevent unauthorized sharing? What's the token expiry time?",
+          "Playlist API: GET /playlists/{id}/videos supports pagination. A playlist can have 5,000 videos. Do you return video metadata inline or just IDs? Inline means larger payloads but fewer round trips. IDs mean smaller payloads but N+1 fetches."
+        ],
+        "challenge": [
+          "YouTube's Data API v3 uses a 'fields' parameter for partial responses: GET /videos?id=xyz&fields=snippet(title,description),statistics(viewCount). This reduces payload by 80% for mobile clients. Is this better than adopting GraphQL?"
+        ],
+        "anti_bs": [
+          "You said 'REST API for video management.' What's the authentication method — API keys, OAuth 2.0, JWT? How do you version the API? What are the rate limits for each endpoint?"
+        ]
+      },
+      "common_mistakes": ["Not implementing signed URLs for video streams", "Not providing partial response support for mobile clients", "Synchronous upload API that blocks until transcoding completes"]
+    }
+  }
+}

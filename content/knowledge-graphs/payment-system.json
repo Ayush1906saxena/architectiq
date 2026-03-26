@@ -1,0 +1,368 @@
+{
+  "problem": "payment-system",
+  "title": "Design a Payment System",
+  "concept_rubric_map": {
+    "payment_lifecycle": "requirements_gathering",
+    "idempotency_keys": "failure_handling",
+    "double_entry": "database_design",
+    "authorization_capture": "requirements_gathering",
+    "settlement": "requirements_gathering",
+    "fraud_detection": "scalability",
+    "rule_engine": "scalability",
+    "pci_compliance": "requirements_gathering",
+    "tokenization": "database_design",
+    "reconciliation": "failure_handling",
+    "refund_handling": "api_design",
+    "webhooks": "communication",
+    "multi_currency": "database_design",
+    "retry_strategy": "failure_handling",
+    "capacity_estimation": "capacity_estimation"
+  },
+  "concepts": {
+    "payment_lifecycle": {
+      "name": "Payment Lifecycle",
+      "category": "requirements",
+      "rubric_area": "requirements_gathering",
+      "keywords": ["payment", "flow", "lifecycle", "state", "pending", "authorized", "captured", "settled", "failed", "refunded"],
+      "probes": {
+        "verify": [
+          "Walk me through the lifecycle of a payment — from the user clicking 'Pay' to money arriving in the merchant's account.",
+          "What are all the possible states a payment can be in? Draw the state machine."
+        ],
+        "deepen": [
+          "A payment is in 'authorized' state. The merchant never captures it. What happens? Does the authorization expire? After how long?",
+          "Can a payment go from 'captured' back to 'authorized'? What about partial captures — authorizing $100 but capturing only $60?"
+        ],
+        "challenge": [
+          "Your state machine has 8 states and 15 transitions. How do you ensure no invalid state transitions happen in a concurrent, distributed system?"
+        ],
+        "anti_bs": [
+          "You said 'process the payment.' Walk me through each step: what services are called, in what order, and what happens if any step fails?"
+        ]
+      },
+      "common_mistakes": ["Not handling authorization expiry", "Missing partial capture support", "No state machine validation for transitions"]
+    },
+    "idempotency_keys": {
+      "name": "Idempotency Keys",
+      "category": "failure",
+      "rubric_area": "failure_handling",
+      "keywords": ["idempotency", "idempotent", "key", "duplicate", "retry", "exactly once", "dedup", "uuid"],
+      "probes": {
+        "verify": [
+          "What happens if a payment request is sent twice due to a network retry? How do you prevent double-charging?",
+          "What is an idempotency key and how does it work in your payment system?"
+        ],
+        "deepen": [
+          "The client sends a payment with idempotency key X. Your system processes it but the response is lost. The client retries with the same key X. How do you return the same response without reprocessing?",
+          "How long do you store idempotency keys? Forever? What if a key is reused after 30 days — is it a retry or a new payment?"
+        ],
+        "challenge": [
+          "Idempotency keys work for client retries. But what about internal retries — your service calls the bank, times out, and retries? The bank doesn't support idempotency keys. How do you handle this?"
+        ],
+        "anti_bs": [
+          "You said 'use idempotency keys.' Where do you store them? In the same database transaction as the payment? What's the key format — UUID, hash of request body, or client-provided?"
+        ]
+      },
+      "common_mistakes": ["Not storing the response with the idempotency key", "No TTL on idempotency keys", "Not handling idempotency for internal service-to-service calls"]
+    },
+    "double_entry": {
+      "name": "Double-Entry Bookkeeping",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["double entry", "ledger", "debit", "credit", "account", "balance", "journal", "audit", "accounting"],
+      "probes": {
+        "verify": [
+          "Why is double-entry bookkeeping important for a payment system? How does it work?",
+          "For a $100 payment from buyer to seller, what are the debit and credit entries?"
+        ],
+        "deepen": [
+          "Your ledger records every transaction as debit+credit. How do you compute an account balance? Summing all entries is O(n). How do you make balance lookups O(1)?",
+          "A refund of $30 on a $100 payment. Show me the ledger entries. How does this differ from a chargeback?"
+        ],
+        "challenge": [
+          "Double-entry is great for auditing but adds write amplification — every transaction creates at least 2 rows. At 100K transactions/sec, that's 200K inserts/sec. How do you handle this at scale?"
+        ],
+        "anti_bs": [
+          "You mentioned a ledger. Is it append-only? Can entries be modified or deleted? What's the schema — transaction_id, account_id, amount, type (debit/credit), timestamp?"
+        ]
+      },
+      "common_mistakes": ["Not using double-entry and risking inconsistent balances", "Mutable ledger entries (should be append-only)", "Computing balance by scanning all entries instead of caching"]
+    },
+    "authorization_capture": {
+      "name": "Authorization and Capture",
+      "category": "requirements",
+      "rubric_area": "requirements_gathering",
+      "keywords": ["authorize", "capture", "hold", "two-phase", "pre-auth", "void", "card network", "issuer"],
+      "probes": {
+        "verify": [
+          "What's the difference between authorization and capture? Why are they separate steps?",
+          "Walk me through the flow: merchant → payment gateway → card network → issuing bank. What happens at each step during authorization?"
+        ],
+        "deepen": [
+          "A hotel authorizes $500 at check-in. The guest's final bill is $450. How do you capture $450 and release the remaining $50 hold?",
+          "Authorizations expire after 7 days (varies by card network). How does your system handle an expired authorization that the merchant tries to capture?"
+        ],
+        "challenge": [
+          "Some businesses (e.g., gas stations) don't know the final amount at authorization time. They authorize $1, then capture $45. How does this 'auth and incremental capture' work?"
+        ],
+        "anti_bs": [
+          "You said 'authorize the card.' What data do you send to the card network? What response codes indicate success, decline, or insufficient funds?"
+        ]
+      },
+      "common_mistakes": ["Not handling partial captures", "Ignoring authorization expiry", "Not supporting void of authorization"]
+    },
+    "settlement": {
+      "name": "Settlement Process",
+      "category": "requirements",
+      "rubric_area": "requirements_gathering",
+      "keywords": ["settle", "settlement", "batch", "clearing", "payout", "merchant", "t+1", "t+2", "net settlement"],
+      "probes": {
+        "verify": [
+          "When does money actually move from the buyer's bank to the seller's bank? What is settlement?",
+          "What's the typical settlement timeline? Same day, T+1, T+2?"
+        ],
+        "deepen": [
+          "You process 1 million transactions per day. Do you settle each individually or batch them? What's the trade-off?",
+          "Net settlement means you aggregate all transactions between two parties and settle the difference. A merchant sells $10,000 and refunds $2,000 — you settle $8,000. How do you compute this correctly across time zones?"
+        ],
+        "challenge": [
+          "A merchant wants real-time settlement. Traditionally, settlement is batched daily. What architectural changes are needed for real-time or near-real-time settlement?"
+        ],
+        "anti_bs": [
+          "You said 'settle the payment.' With whom? The acquiring bank, the card network, or the merchant? Walk me through who owes whom and when money actually moves."
+        ]
+      },
+      "common_mistakes": ["Confusing capture with settlement", "Not handling settlement failures and retries", "Ignoring timezone issues in batch settlement"]
+    },
+    "fraud_detection": {
+      "name": "Fraud Detection",
+      "category": "scaling",
+      "rubric_area": "scalability",
+      "keywords": ["fraud", "risk", "score", "suspicious", "velocity", "pattern", "machine learning", "rule", "block"],
+      "probes": {
+        "verify": [
+          "How does your payment system detect fraudulent transactions?",
+          "Where in the payment flow does fraud detection happen — before authorization, after, or both?"
+        ],
+        "deepen": [
+          "Your fraud detection runs inline before authorization and adds 50ms of latency. At 10K transactions/sec, that's significant. How do you keep fraud checks fast?",
+          "A new fraud pattern emerges — stolen cards being used for small purchases ($1-5) to test validity. Your ML model wasn't trained on this. How quickly can you respond?"
+        ],
+        "challenge": [
+          "Every false positive (blocking a legitimate transaction) costs you revenue and customer trust. Every false negative (allowing fraud) costs you chargebacks. How do you tune the threshold?"
+        ],
+        "anti_bs": [
+          "You said 'add fraud detection.' Rule-based or ML-based? What features do you use — transaction amount, location, velocity, device fingerprint? Be specific."
+        ]
+      },
+      "common_mistakes": ["Fraud checks adding too much latency to the payment flow", "No mechanism to quickly update fraud rules", "Not tracking false positive rate"]
+    },
+    "rule_engine": {
+      "name": "Rule Engine",
+      "category": "scaling",
+      "rubric_area": "scalability",
+      "keywords": ["rule", "engine", "policy", "condition", "action", "dynamic", "configuration", "threshold", "velocity check"],
+      "probes": {
+        "verify": [
+          "How do you implement payment rules — velocity checks, amount limits, geographic restrictions?",
+          "Can business teams update rules without deploying code? How?"
+        ],
+        "deepen": [
+          "Your rule engine evaluates 50 rules per transaction at 10K transactions/sec. That's 500K rule evaluations/sec. How do you make this performant?",
+          "Rules can conflict — Rule A says 'allow' and Rule B says 'block.' What's the conflict resolution strategy? Priority-based, most-restrictive-wins, or something else?"
+        ],
+        "challenge": [
+          "A hot-deployed rule has a bug — it blocks all transactions from a major country. How do you detect this and roll back quickly?"
+        ],
+        "anti_bs": [
+          "You said 'use a rule engine.' What's the rule format? How are rules stored and evaluated? What's the execution model — sequential, parallel, or decision tree?"
+        ]
+      },
+      "common_mistakes": ["Hard-coded rules requiring code deployment to change", "No rule conflict resolution", "No rollback mechanism for bad rules"]
+    },
+    "pci_compliance": {
+      "name": "PCI Compliance",
+      "category": "requirements",
+      "rubric_area": "requirements_gathering",
+      "keywords": ["pci", "dss", "compliance", "cardholder", "data", "scope", "audit", "encrypt", "secure"],
+      "probes": {
+        "verify": [
+          "What is PCI DSS and how does it affect your system architecture?",
+          "Which parts of your system are in PCI scope? How do you minimize scope?"
+        ],
+        "deepen": [
+          "Your main application handles payment tokens but never sees raw card numbers. Does it still need PCI certification? How do you prove this to auditors?",
+          "PCI requires encrypting cardholder data at rest and in transit. What encryption standards do you use, and how do you manage encryption keys?"
+        ],
+        "challenge": [
+          "A startup uses Stripe and never touches card data. They claim they don't need PCI compliance. Are they right? What level of PCI compliance still applies?"
+        ],
+        "anti_bs": [
+          "You said 'ensure PCI compliance.' What PCI level? What specific controls — encryption, access logging, network segmentation? How do you handle key rotation?"
+        ]
+      },
+      "common_mistakes": ["Thinking PCI doesn't apply when using third-party processors", "Storing raw card numbers instead of tokens", "Not segmenting PCI-scoped systems from the rest of the network"]
+    },
+    "tokenization": {
+      "name": "Card Tokenization",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["token", "tokenize", "vault", "card", "pan", "mask", "reference", "secure storage"],
+      "probes": {
+        "verify": [
+          "How do you store card details securely? What is tokenization?",
+          "Where does tokenization happen — in your system or at the payment processor?"
+        ],
+        "deepen": [
+          "A token maps to a card number stored in a secure vault. If the vault is compromised, all tokens are usable. How do you protect the vault?",
+          "Network tokens (issued by Visa/Mastercard) vs. gateway tokens (issued by Stripe/Braintree). What's the difference, and which do you use?"
+        ],
+        "challenge": [
+          "A customer has the same card tokenized by 3 different merchants. Each has a different token. The card is reissued with a new number. How do you update all tokens?"
+        ],
+        "anti_bs": [
+          "You said 'tokenize the card.' Who issues the token? Where is the mapping stored? Is the token format-preserving (same length as PAN) or opaque?"
+        ]
+      },
+      "common_mistakes": ["Storing raw PAN instead of tokens", "Not handling card updates and reissues", "Token vault as a single point of failure"]
+    },
+    "reconciliation": {
+      "name": "Reconciliation",
+      "category": "failure",
+      "rubric_area": "failure_handling",
+      "keywords": ["reconcile", "reconciliation", "mismatch", "discrepancy", "ledger", "bank statement", "audit", "match"],
+      "probes": {
+        "verify": [
+          "What is reconciliation and why is it critical for a payment system?",
+          "How do you reconcile your internal ledger with the bank's records?"
+        ],
+        "deepen": [
+          "Your ledger shows a $100 charge but the bank's settlement report shows $99.70 (after interchange fees). How do you reconcile the 30-cent difference?",
+          "You process 1 million transactions/day. Reconciliation finds 50 mismatches. What's your process for investigating and resolving each one?"
+        ],
+        "challenge": [
+          "Real-time reconciliation vs. end-of-day batch reconciliation. What are the trade-offs, and when would you need real-time?"
+        ],
+        "anti_bs": [
+          "You said 'reconcile transactions.' How frequently? What data sources do you compare? What happens when a mismatch is found — auto-resolve or manual review?"
+        ]
+      },
+      "common_mistakes": ["No automated reconciliation process", "Not accounting for interchange and processing fees", "No process for resolving mismatches"]
+    },
+    "refund_handling": {
+      "name": "Refund Handling",
+      "category": "api",
+      "rubric_area": "api_design",
+      "keywords": ["refund", "partial refund", "void", "reversal", "chargeback", "return", "credit"],
+      "probes": {
+        "verify": [
+          "How does your system handle refunds? What's the difference between a void, a refund, and a chargeback?",
+          "Walk me through the API for issuing a full refund and a partial refund."
+        ],
+        "deepen": [
+          "A customer paid $100. You refund $30. They dispute the remaining $70 as a chargeback. Now your system has processed -$30 (refund) and -$70 (chargeback) — total $100. How do you ensure you don't double-refund?",
+          "The original payment was made 90 days ago. The card has expired. How do you process the refund to a card that no longer exists?"
+        ],
+        "challenge": [
+          "Refund processing takes 5-10 business days to appear on the customer's statement. They call support saying the refund hasn't arrived. How does your system track refund status?"
+        ],
+        "anti_bs": [
+          "You said 'issue a refund.' Is it a credit back to the original payment method? Through the same card network flow? What if the original transaction was settled vs. still in authorized state?"
+        ]
+      },
+      "common_mistakes": ["Not preventing refund amount exceeding original charge", "Not distinguishing void vs refund based on settlement status", "No refund status tracking"]
+    },
+    "webhooks": {
+      "name": "Webhook Notifications",
+      "category": "communication",
+      "rubric_area": "communication",
+      "keywords": ["webhook", "callback", "notification", "event", "async", "retry", "delivery", "endpoint"],
+      "probes": {
+        "verify": [
+          "How do you notify merchants of payment events (successful charge, refund, chargeback)?",
+          "What webhook events does your system emit? What's the payload structure?"
+        ],
+        "deepen": [
+          "Your webhook to a merchant's endpoint fails (5xx response). How do you retry? What's the backoff strategy? How many retries before you give up?",
+          "Webhook events can arrive out of order — 'payment.captured' might arrive before 'payment.authorized' due to network delays. How should merchants handle this?"
+        ],
+        "challenge": [
+          "A merchant's webhook endpoint is down for 6 hours. You've been queuing events. When it comes back, you have 50,000 events to deliver. Do you send them all at once? How do you avoid overwhelming the merchant?"
+        ],
+        "anti_bs": [
+          "You said 'send webhooks.' How do you guarantee delivery? What if the merchant's server is slow? How do you authenticate the webhook so the merchant knows it's from you and not spoofed?"
+        ]
+      },
+      "common_mistakes": ["No retry mechanism for failed webhooks", "No webhook signature verification", "Not handling out-of-order event delivery"]
+    },
+    "multi_currency": {
+      "name": "Multi-Currency Support",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["currency", "exchange rate", "conversion", "forex", "multi-currency", "base currency", "settlement currency"],
+      "probes": {
+        "verify": [
+          "How does your system handle payments in different currencies?",
+          "When a US customer pays a UK merchant, who bears the currency conversion cost? When does conversion happen?"
+        ],
+        "deepen": [
+          "Exchange rates fluctuate. A customer is quoted $100 for a £80 item. By the time settlement happens 2 days later, the rate has changed. Who absorbs the difference?",
+          "Your ledger records amounts. Do you store amounts in the original currency, a base currency, or both? What about currencies with different decimal precision (JPY has 0 decimals, BHD has 3)?"
+        ],
+        "challenge": [
+          "A merchant in Brazil receives payments in 15 currencies and wants settlement in BRL. Managing 15 exchange rates with daily fluctuations is complex. How do you minimize forex risk?"
+        ],
+        "anti_bs": [
+          "You said 'support multiple currencies.' How do you store the exchange rate used for each transaction? Where do you source rates? How often do you update them?"
+        ]
+      },
+      "common_mistakes": ["Not storing the exchange rate at transaction time", "Using floating point for money amounts", "Not handling currency-specific decimal precision"]
+    },
+    "retry_strategy": {
+      "name": "Retry Strategy",
+      "category": "failure",
+      "rubric_area": "failure_handling",
+      "keywords": ["retry", "backoff", "exponential", "jitter", "timeout", "circuit breaker", "dead letter", "queue"],
+      "probes": {
+        "verify": [
+          "When a payment API call to the bank fails, how do you retry? What's your retry strategy?",
+          "What types of failures are retryable vs. non-retryable? How do you distinguish them?"
+        ],
+        "deepen": [
+          "Exponential backoff with jitter: retry at 1s, 2s, 4s, 8s + random jitter. Why is jitter important? What happens without it when 1000 clients retry simultaneously?",
+          "After 5 retries, the payment still fails. Do you give up? What happens to the payment — is it in a limbo state?"
+        ],
+        "challenge": [
+          "A downstream bank API is partially failing — 50% of requests succeed. Your retries are adding load, making the failure worse (retry storm). How do you implement a circuit breaker?"
+        ],
+        "anti_bs": [
+          "You said 'retry on failure.' How many times? With what delay? How do you ensure the retry doesn't create a duplicate payment? What's your circuit breaker threshold?"
+        ]
+      },
+      "common_mistakes": ["Retrying non-idempotent operations without idempotency keys", "No exponential backoff causing retry storms", "No circuit breaker for cascading failures"]
+    },
+    "capacity_estimation": {
+      "name": "Capacity Estimation",
+      "category": "requirements",
+      "rubric_area": "capacity_estimation",
+      "keywords": ["tps", "transactions per second", "peak", "storage", "latency", "throughput", "million", "billion"],
+      "probes": {
+        "verify": [
+          "How many transactions per second does your payment system handle? Walk me through the estimation.",
+          "What's the expected latency for a payment API call — from request to authorization response?"
+        ],
+        "deepen": [
+          "At 10,000 TPS with double-entry bookkeeping, you're doing 20,000 ledger inserts/sec. Your relational database handles 15,000 inserts/sec. What's your plan?",
+          "Black Friday: traffic spikes to 50,000 TPS for 2 hours. Your system is provisioned for 15,000 TPS. How do you handle the burst?"
+        ],
+        "challenge": [
+          "Payment systems have strict latency SLAs — authorization must complete in under 500ms. At 10K TPS, how do you ensure p99 latency stays under 500ms?"
+        ],
+        "anti_bs": [
+          "You said 'handle millions of transactions.' Per day or per second? What's the peak-to-average ratio? Show me the math for storage growth over 5 years."
+        ]
+      },
+      "common_mistakes": ["Not estimating ledger storage growth", "Ignoring peak-to-average traffic ratio", "Not accounting for latency SLAs"]
+    }
+  }
+}

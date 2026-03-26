@@ -1,0 +1,381 @@
+{
+  "problem": "key-value-store",
+  "title": "Design a Distributed Key-Value Store",
+  "concept_rubric_map": {
+    "hash_map_storage": "database_design",
+    "consistent_hashing": "scalability",
+    "replication_quorum": "database_design",
+    "vector_clocks": "database_design",
+    "gossip_protocol": "scalability",
+    "merkle_trees": "failure_handling",
+    "wal_persistence": "database_design",
+    "read_repair": "failure_handling",
+    "hinted_handoff": "failure_handling",
+    "client_routing": "api_design",
+    "conflict_resolution": "database_design",
+    "compaction": "scalability",
+    "bloom_filters": "caching_strategy",
+    "tunable_consistency": "requirements_gathering",
+    "capacity_estimation": "capacity_estimation"
+  },
+  "concepts": {
+    "hash_map_storage": {
+      "name": "Hash Map Storage Engine",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["hash map", "hash table", "in-memory", "bitcask", "log-structured", "memtable", "sstable", "lsm"],
+      "probes": {
+        "verify": [
+          "How do you store key-value pairs on disk? Walk me through your storage engine design.",
+          "What's the difference between a hash index approach (Bitcask) and an LSM-tree approach (LevelDB/RocksDB)?"
+        ],
+        "deepen": [
+          "Bitcask keeps all keys in memory with pointers to disk offsets. At 1 billion keys with 64-byte keys and 16-byte pointers, that's ~80GB of RAM just for the index. When does this approach break?",
+          "LSM-trees buffer writes in a memtable, then flush to sorted SSTables. A read might check the memtable, then each SSTable level. With 7 levels, that's potentially 7 disk reads. How do you optimize read latency?"
+        ],
+        "challenge": [
+          "DynamoDB uses a B-tree variant. Cassandra uses LSM-trees. Your teammate says B-trees are better because they have O(1) reads vs. LSM's O(log N). Is that accurate? When does LSM win?"
+        ],
+        "anti_bs": [
+          "You said 'hash map for storage.' Is it purely in-memory? If so, what happens on restart? If it's persisted, how exactly is the hash map serialized to disk?"
+        ]
+      },
+      "common_mistakes": ["Assuming all keys fit in memory", "Not distinguishing between read-optimized and write-optimized storage engines", "Ignoring the cost of compaction in LSM-trees"]
+    },
+    "consistent_hashing": {
+      "name": "Consistent Hashing",
+      "category": "scaling",
+      "rubric_area": "scalability",
+      "keywords": ["consistent hash", "hash ring", "virtual node", "vnode", "partition", "rebalance", "minimal disruption"],
+      "probes": {
+        "verify": [
+          "How do you distribute keys across multiple nodes? Why consistent hashing over simple modulo?",
+          "What are virtual nodes and why are they necessary?"
+        ],
+        "deepen": [
+          "With 5 physical nodes and 100 virtual nodes each, you have 500 points on the ring. When you add a 6th node, what percentage of keys need to move? Show the math.",
+          "DynamoDB uses consistent hashing with virtual nodes sized proportional to instance capacity. A node with 2x CPU gets 2x virtual nodes. How do you handle heterogeneous hardware in your ring?",
+          "If a node fails and its virtual nodes are reassigned, the neighboring nodes suddenly receive extra load. With 3 replicas and 100 vnodes, how many neighbor nodes absorb the load?"
+        ],
+        "challenge": [
+          "Google's Spanner doesn't use consistent hashing — it uses range-based partitioning with automatic splitting. What does range partitioning give you that consistent hashing doesn't?"
+        ],
+        "anti_bs": [
+          "You said 'consistent hashing.' What hash function do you use? MD5, SHA-256, MurmurHash? How many virtual nodes per physical node? What's the concrete mapping from key to node?"
+        ]
+      },
+      "common_mistakes": ["Not using virtual nodes leading to uneven distribution", "Ignoring hotspots from popular keys", "Not planning for heterogeneous node capacities"]
+    },
+    "replication_quorum": {
+      "name": "Replication and Quorum",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["replication", "quorum", "W", "R", "N", "replica", "majority", "write", "read", "consistency"],
+      "probes": {
+        "verify": [
+          "How many replicas do you maintain for each key? How do reads and writes coordinate across replicas?",
+          "Explain the W + R > N quorum condition. With N=3, what are your W and R values?"
+        ],
+        "deepen": [
+          "With N=3, W=2, R=2: a write succeeds after 2 acks, a read queries 2 replicas. The 3rd replica is stale. If the 2 read replicas include the stale one, you get an inconsistent read until the stale replica catches up. What's the inconsistency window?",
+          "Cassandra defaults to LOCAL_QUORUM: quorum within the local datacenter only. With 3 DCs, a write to DC1 returns before DC2 and DC3 have the data. If DC1 goes down immediately after, is the write lost?",
+          "At N=5, W=3, R=3: you tolerate 2 node failures for both reads and writes. But every write now has 5 network calls (3 must succeed). At 100K writes/sec, that's 500K replica writes/sec. What's the network bandwidth requirement?"
+        ],
+        "challenge": [
+          "Your teammate says 'just set W=1 for fast writes and R=N for strong reads.' That gives you W+R>N. What's the failure mode of this configuration?"
+        ],
+        "anti_bs": [
+          "You said 'replicate to 3 nodes.' What happens when only 1 of the 3 acknowledges the write? Does the write succeed or fail? Be specific about your W value."
+        ]
+      },
+      "common_mistakes": ["Not explaining the W+R>N relationship", "Ignoring the latency impact of higher quorum values", "Not considering sloppy quorum vs strict quorum"]
+    },
+    "vector_clocks": {
+      "name": "Vector Clocks",
+      "category": "consistency",
+      "rubric_area": "database_design",
+      "keywords": ["vector clock", "version", "causality", "concurrent", "lamport", "timestamp", "conflict"],
+      "probes": {
+        "verify": [
+          "How do you track causality between writes to the same key across multiple nodes?",
+          "Walk me through a scenario where two concurrent writes happen and how vector clocks detect the conflict."
+        ],
+        "deepen": [
+          "DynamoDB originally used vector clocks but switched to last-writer-wins with client-provided timestamps. Vector clocks grew unbounded — with 100 nodes writing to a hot key, the clock had 100 entries per version. How do you prune vector clocks without losing causality information?",
+          "Two clients read version [A:1, B:1] simultaneously. Client 1 writes via node A producing [A:2, B:1]. Client 2 writes via node B producing [A:1, B:2]. Neither dominates the other. How does your system surface this conflict to the application?"
+        ],
+        "challenge": [
+          "Cassandra uses last-writer-wins (LWW) with wall-clock timestamps instead of vector clocks. It's simpler but can silently lose writes if clocks are skewed. Is LWW acceptable for a shopping cart use case?"
+        ],
+        "anti_bs": [
+          "You said 'vector clocks for conflict detection.' When a conflict is detected, who resolves it — the server or the client? What's the resolution strategy — merge, LWW, or application-specific?"
+        ]
+      },
+      "common_mistakes": ["Not addressing vector clock size growth", "Confusing vector clocks with Lamport timestamps", "Not explaining who resolves detected conflicts"]
+    },
+    "gossip_protocol": {
+      "name": "Gossip Protocol",
+      "category": "scaling",
+      "rubric_area": "scalability",
+      "keywords": ["gossip", "membership", "failure detection", "heartbeat", "phi accrual", "seed node", "protocol"],
+      "probes": {
+        "verify": [
+          "How do nodes discover each other and detect failures? Walk me through your failure detection mechanism.",
+          "What is the gossip protocol and how does it propagate membership changes?"
+        ],
+        "deepen": [
+          "In gossip, each node contacts a random peer every second with its membership table. With 100 nodes, a membership change propagates to all nodes in O(log N) rounds — about 7 seconds. Is that fast enough for failure detection?",
+          "Cassandra uses a Phi Accrual failure detector instead of simple heartbeat timeouts. If node B's heartbeats to node A arrive at intervals of [1.0s, 1.1s, 0.9s, 1.0s] and then there's a 3-second gap, what's the suspicion level and should you mark it as down?",
+          "With 1,000 nodes gossiping, each round produces O(N) messages per node. That's 1M messages per round across the cluster. How do you prevent gossip itself from consuming significant bandwidth?"
+        ],
+        "challenge": [
+          "etcd and ZooKeeper use consensus-based membership (Raft/ZAB) instead of gossip. They provide strong consistency for membership but limit cluster size to ~7 nodes. At what cluster size does gossip become necessary over consensus?"
+        ],
+        "anti_bs": [
+          "You said 'gossip protocol for failure detection.' How often do nodes gossip? What information is exchanged? What's the false positive rate for marking a live node as dead?"
+        ]
+      },
+      "common_mistakes": ["Not distinguishing between gossip for membership vs. data propagation", "Not addressing false positive failure detection", "Not considering gossip overhead at large cluster sizes"]
+    },
+    "merkle_trees": {
+      "name": "Merkle Trees for Anti-Entropy",
+      "category": "consistency",
+      "rubric_area": "failure_handling",
+      "keywords": ["merkle tree", "anti-entropy", "hash tree", "sync", "repair", "divergence", "replica sync"],
+      "probes": {
+        "verify": [
+          "After a node recovers from failure, how do you detect which keys are out of sync with other replicas?",
+          "What is a Merkle tree and how does it help with replica synchronization?"
+        ],
+        "deepen": [
+          "Cassandra builds a Merkle tree per table per range. With 256 partitions and 50 tables, that's 12,800 Merkle trees per node. Each tree computation scans the entire data range. How often can you afford to rebuild them?",
+          "A Merkle tree with 1M leaf nodes (key ranges) has a depth of 20. Comparing two trees requires exchanging at most 20 hashes to identify a divergent subtree. With 1,000 divergent keys out of 1M, how many hash comparisons do you need?",
+          "During a tree comparison, new writes are happening. Your Merkle tree is already stale. How do you handle concurrent writes during anti-entropy repair?"
+        ],
+        "challenge": [
+          "Building Merkle trees is expensive — Cassandra's repair process is notorious for being resource-intensive. Some operators disable it entirely. What's the alternative if you don't use Merkle trees for anti-entropy?"
+        ],
+        "anti_bs": [
+          "You said 'Merkle tree for detecting inconsistencies.' What's at the leaf level — individual keys or key ranges? How deep is the tree? When do you rebuild it?"
+        ]
+      },
+      "common_mistakes": ["Not considering the cost of building Merkle trees", "Not handling concurrent writes during repair", "Confusing Merkle trees with hash rings"]
+    },
+    "wal_persistence": {
+      "name": "Write-Ahead Log Persistence",
+      "category": "storage",
+      "rubric_area": "database_design",
+      "keywords": ["wal", "write-ahead log", "commit log", "durability", "fsync", "crash recovery", "journal"],
+      "probes": {
+        "verify": [
+          "How do you ensure writes survive a crash? Walk me through your persistence strategy.",
+          "What is a write-ahead log and when do you fsync it?"
+        ],
+        "deepen": [
+          "fsync after every write guarantees durability but limits throughput. On an SSD, fsync takes ~0.1ms. At 100K writes/sec, sequential WAL writes take 10 seconds/sec — impossible. How do you batch fsyncs?",
+          "PostgreSQL uses WAL with configurable fsync intervals (synchronous_commit). Setting it to 'off' risks losing the last ~600ms of writes on crash. For a KV store with N=3 replicas, is that acceptable?",
+          "Your WAL grows unbounded. RocksDB checkpoints the WAL against SSTable flushes. When a memtable is flushed to an SSTable, the corresponding WAL entries are garbage collected. How do you determine which WAL entries are safe to delete?"
+        ],
+        "challenge": [
+          "Redis' AOF (append-only file) is essentially a WAL. With appendfsync=everysec, you can lose 1 second of data. With appendfsync=always, throughput drops 90%. Which do you choose for a KV store that claims durability?"
+        ],
+        "anti_bs": [
+          "You said 'write-ahead log for durability.' How large does the WAL get before you truncate it? What triggers truncation? What happens if the WAL is corrupted halfway?"
+        ]
+      },
+      "common_mistakes": ["Not discussing fsync trade-offs", "WAL growing unbounded without truncation", "Not explaining crash recovery procedure"]
+    },
+    "read_repair": {
+      "name": "Read Repair",
+      "category": "consistency",
+      "rubric_area": "failure_handling",
+      "keywords": ["read repair", "stale", "inconsistent", "repair", "background", "digest", "full read"],
+      "probes": {
+        "verify": [
+          "When a read discovers stale data on one replica, how do you repair it?",
+          "What's the difference between foreground read repair and background read repair?"
+        ],
+        "deepen": [
+          "Cassandra performs read repair on every quorum read by comparing digests. The coordinator reads full data from one replica and digests from others. If digests mismatch, it fetches full data from all and repairs. With 10KB values and R=3, what's the extra network cost?",
+          "Read repair only fixes keys that are actually read. If a key is written once and never read for 6 months, the stale replica stays stale forever. What percentage of your keyspace is 'cold' and never gets repaired?",
+          "During read repair, the coordinator writes the correct value back to stale replicas. But what if the coordinator crashes mid-repair? You now have an inconsistent repair state."
+        ],
+        "challenge": [
+          "Disabling read repair in Cassandra reduces read latency by 10-20% because you skip the digest comparison. If you rely solely on anti-entropy repair (Merkle trees) running every 24 hours, what's the maximum inconsistency window?"
+        ],
+        "anti_bs": [
+          "You said 'read repair.' How do you determine which replica has the correct version? Last-write-wins timestamp? Vector clock? What if two replicas have conflicting writes?"
+        ]
+      },
+      "common_mistakes": ["Not repairing cold data that's never read", "Not addressing coordinator failure during repair", "Assuming read repair is free — it adds latency"]
+    },
+    "hinted_handoff": {
+      "name": "Hinted Handoff",
+      "category": "failure",
+      "rubric_area": "failure_handling",
+      "keywords": ["hinted handoff", "hint", "temporary failure", "sloppy quorum", "handoff", "recover"],
+      "probes": {
+        "verify": [
+          "When a replica node is temporarily down, how do you ensure writes meant for it aren't lost?",
+          "What is hinted handoff and how does it work?"
+        ],
+        "deepen": [
+          "Hinted handoff stores writes on a healthy node until the failed node recovers. If node B is down for 2 hours at 10K writes/sec, that's 72M hints stored on other nodes. How much extra storage does that require?",
+          "Cassandra limits hint storage to 256MB per node and drops hints after 3 hours by default. If a node is down for 4 hours, the hints for hour 1 are lost. What repairs those keys?",
+          "Sloppy quorum: with hinted handoff, a write to nodes [A, B, C] where B is down goes to [A, C, D] with D holding a hint for B. The quorum is met but with a different node set. Does this still satisfy W+R>N consistency guarantees?"
+        ],
+        "challenge": [
+          "Your teammate says 'hinted handoff is unnecessary if we have anti-entropy repair.' But repair runs every 24 hours. What's the inconsistency window without hinted handoff?"
+        ],
+        "anti_bs": [
+          "You said 'hinted handoff for availability.' Where are hints stored — in memory or on disk? How long do you keep them? What triggers hint replay?"
+        ]
+      },
+      "common_mistakes": ["Not limiting hint storage size", "Not understanding sloppy quorum implications", "Relying solely on hinted handoff for long outages"]
+    },
+    "client_routing": {
+      "name": "Client Routing and Coordination",
+      "category": "api",
+      "rubric_area": "api_design",
+      "keywords": ["client", "coordinator", "routing", "partition", "smart client", "proxy", "load balancer"],
+      "probes": {
+        "verify": [
+          "How does a client know which node holds a given key? Walk me through the request routing.",
+          "What's the difference between a coordinator-based approach and a smart client approach?"
+        ],
+        "deepen": [
+          "DynamoDB uses a request router that maintains a partition map. When partitions are split or moved, the router's map becomes stale. Clients get a redirect to the correct partition. What's the latency cost of a redirect?",
+          "Cassandra's smart driver maintains a local copy of the token ring. When the ring changes (node added/removed), the driver updates asynchronously. During that window, requests may go to wrong nodes. How long is this window?",
+          "With 100 nodes and consistent hashing, a coordinator receiving a request must forward it to the correct 3 replicas. That's an extra network hop. At p99, this adds 2-5ms. How do you eliminate this hop?"
+        ],
+        "challenge": [
+          "Redis Cluster uses smart clients that know the hash slot mapping. On a MOVED redirect, the client updates its local map. But during resharding, clients get many ASK redirects. How does this affect tail latency?"
+        ],
+        "anti_bs": [
+          "You said 'route to the correct node.' How does the client get the initial partition map? How often is it refreshed? What happens on a stale route?"
+        ]
+      },
+      "common_mistakes": ["Not addressing stale routing information", "Not considering the extra hop through a coordinator", "Ignoring partition map update propagation delay"]
+    },
+    "conflict_resolution": {
+      "name": "Conflict Resolution",
+      "category": "consistency",
+      "rubric_area": "database_design",
+      "keywords": ["conflict", "merge", "last writer wins", "lww", "crdt", "sibling", "resolution", "concurrent"],
+      "probes": {
+        "verify": [
+          "When two clients write to the same key simultaneously on different replicas, how do you resolve the conflict?",
+          "What are the main conflict resolution strategies: LWW, application-level, CRDTs?"
+        ],
+        "deepen": [
+          "Last-writer-wins (LWW) uses wall-clock timestamps. If server A's clock is 100ms ahead of server B's, server A's writes always win even if they happened earlier in real time. NTP synchronizes clocks to ~10ms. Is 10ms skew acceptable for your use case?",
+          "Amazon's shopping cart (original Dynamo paper) used application-level merge: conflicting cart versions are merged by union. Customer adds item A on phone, item B on laptop — merged cart has both. What if the conflict is 'added item A' vs 'deleted item A'?",
+          "CRDTs (Conflict-free Replicated Data Types) guarantee automatic merge without conflicts. A G-Counter CRDT for view counts works across replicas. But a CRDT register for a user's email has a clear last-writer semantics. When do CRDTs help vs. not?"
+        ],
+        "challenge": [
+          "Riak allowed application-level conflict resolution but most developers just picked LWW because merge logic is hard. Is it pragmatic to default to LWW and only implement custom merge for specific data types?"
+        ],
+        "anti_bs": [
+          "You said 'resolve conflicts.' How exactly? If I write {'name': 'Alice'} on node A and {'name': 'Bob'} on node B at the same time, what value does a subsequent read return?"
+        ]
+      },
+      "common_mistakes": ["Defaulting to LWW without understanding data loss risk", "Not considering clock skew impact on LWW", "Not distinguishing between conflict detection and resolution"]
+    },
+    "compaction": {
+      "name": "Compaction Strategy",
+      "category": "storage",
+      "rubric_area": "scalability",
+      "keywords": ["compaction", "merge", "sstable", "tombstone", "garbage collection", "size-tiered", "leveled"],
+      "probes": {
+        "verify": [
+          "As your LSM-tree accumulates SSTables, how do you merge them? What's your compaction strategy?",
+          "What's the difference between size-tiered and leveled compaction?"
+        ],
+        "deepen": [
+          "Size-tiered compaction merges N similarly-sized SSTables into one. With 4 SSTables of 1GB each, compaction temporarily needs 4GB input + 4GB output = 8GB of disk I/O. At 100K writes/sec producing 50MB/sec of SSTables, how often does compaction trigger?",
+          "Leveled compaction (used by LevelDB/RocksDB) limits each level to 10x the previous. Level 0: 256MB, Level 1: 2.56GB, Level 2: 25.6GB. A read checks at most one SSTable per level. With 5 levels, what's the maximum data size and read amplification?",
+          "Tombstones (delete markers) can't be removed until compaction confirms no older version exists in lower levels. A tombstone for a frequently deleted key might persist across 5 levels. What's the space overhead?"
+        ],
+        "challenge": [
+          "Cassandra's compaction can consume 50% of disk I/O during major compactions, affecting read/write latency. How do you throttle compaction to prevent performance degradation?"
+        ],
+        "anti_bs": [
+          "You said 'compact the data.' What triggers compaction? How many files are merged at once? What's the write amplification factor?"
+        ]
+      },
+      "common_mistakes": ["Not accounting for temporary disk space during compaction", "Ignoring write amplification", "Not throttling compaction I/O"]
+    },
+    "bloom_filters": {
+      "name": "Bloom Filters",
+      "category": "optimization",
+      "rubric_area": "caching_strategy",
+      "keywords": ["bloom filter", "false positive", "hash", "probabilistic", "membership", "filter", "bit array"],
+      "probes": {
+        "verify": [
+          "How do you avoid unnecessary disk reads for keys that don't exist in an SSTable?",
+          "What is a Bloom filter and what's the trade-off between size and false positive rate?"
+        ],
+        "deepen": [
+          "A Bloom filter with 10 bits per key and 7 hash functions has a 0.82% false positive rate. With 1M keys per SSTable and 100 SSTables, what's your total Bloom filter memory usage?",
+          "At a 1% false positive rate, 1 in 100 reads for non-existent keys results in an unnecessary disk read. At 50K reads/sec with 30% being misses, that's 150 unnecessary disk reads/sec. Is that acceptable?",
+          "LevelDB uses separate Bloom filters per SSTable. When an SSTable is compacted away, its Bloom filter is discarded. How do you handle Bloom filter updates during concurrent compaction and reads?"
+        ],
+        "challenge": [
+          "Your teammate says 'use a Cuckoo filter instead — it supports deletion and has better space efficiency at low false positive rates.' When does a Cuckoo filter outperform a Bloom filter?"
+        ],
+        "anti_bs": [
+          "You said 'Bloom filter to skip disk reads.' How many hash functions? How many bits per key? What's your target false positive rate? Don't just say 'low.'"
+        ]
+      },
+      "common_mistakes": ["Not sizing the Bloom filter appropriately", "Forgetting Bloom filters have false positives but never false negatives", "Not considering memory overhead of Bloom filters at scale"]
+    },
+    "tunable_consistency": {
+      "name": "Tunable Consistency",
+      "category": "requirements",
+      "rubric_area": "requirements_gathering",
+      "keywords": ["tunable", "consistency level", "eventual", "strong", "quorum", "one", "all", "consistency"],
+      "probes": {
+        "verify": [
+          "Should your KV store support different consistency levels per request? What levels would you offer?",
+          "What does eventual consistency mean in practice? How stale can reads be?"
+        ],
+        "deepen": [
+          "Cassandra offers ONE, QUORUM, ALL, LOCAL_QUORUM, EACH_QUORUM. A banking application uses QUORUM for balance reads/writes. A social media timeline uses ONE for fast reads. How does your API expose consistency level selection?",
+          "With tunable consistency, a client could accidentally set R=1 on a critical read and get stale data. Stripe solved this by enforcing minimum consistency levels per table. How do you prevent misconfiguration?",
+          "Strong consistency (R+W>N) increases tail latency because you wait for the slowest quorum member. At N=3, W=2: if two replicas respond in 1ms but the second-fastest takes 50ms, your write latency is 50ms. How do you handle slow replicas?"
+        ],
+        "challenge": [
+          "Your PM says 'make everything strongly consistent — users expect reads-after-writes.' But strong consistency requires W=2, R=2 with N=3, reducing availability from 2 node failures to 1. How do you explain this trade-off?"
+        ],
+        "anti_bs": [
+          "You said 'tunable consistency.' Can a client set W=1, R=1 with N=3? That gives no consistency guarantee at all. Do you allow it or enforce minimums?"
+        ]
+      },
+      "common_mistakes": ["Not explaining the CAP theorem trade-off", "Allowing unsafe consistency level combinations", "Not discussing read-your-own-writes consistency"]
+    },
+    "capacity_estimation": {
+      "name": "Capacity Estimation",
+      "category": "requirements",
+      "rubric_area": "capacity_estimation",
+      "keywords": ["capacity", "storage", "throughput", "qps", "bandwidth", "million", "billion", "terabyte"],
+      "probes": {
+        "verify": [
+          "Walk me through your capacity estimation. How much data are we storing? What's the read/write QPS?",
+          "What's the average key size and value size? How does that affect your storage and network estimates?"
+        ],
+        "deepen": [
+          "With 100M key-value pairs, average key 128 bytes, average value 10KB: raw data is ~1TB. With 3 replicas, that's 3TB. With LSM write amplification of 10x, your actual disk writes are 30TB over the data lifetime. How many SSDs do you need?",
+          "At 50K reads/sec and 10K writes/sec with 10KB values: read bandwidth is 500MB/sec, write bandwidth is 100MB/sec. With replication factor 3, writes triple to 300MB/sec. Can a single 10Gbps NIC handle this?",
+          "Your cluster has 10 nodes, each with 1TB SSD. At 80% utilization that's 8TB usable. With 3x replication and 2x compaction overhead, effective capacity is 8TB / 6 = 1.3TB of unique data. Is that enough for 5 years of growth?"
+        ],
+        "challenge": [
+          "Your numbers assume uniform key distribution. In practice, 1% of keys receive 50% of reads (Zipf distribution). How does this hotspot affect your capacity planning?"
+        ],
+        "anti_bs": [
+          "You said 'terabytes of storage.' Show me the math: number of keys x average size x replication factor x compaction overhead."
+        ]
+      },
+      "common_mistakes": ["Not accounting for replication in storage estimates", "Forgetting compaction write amplification", "Not calculating network bandwidth requirements"]
+    }
+  }
+}
