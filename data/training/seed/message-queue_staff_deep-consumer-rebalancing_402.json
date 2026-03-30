@@ -1,0 +1,119 @@
+{
+  "metadata": {
+    "problem_id": "message-queue",
+    "level": "staff",
+    "candidate_profile": "deep-consumer-rebalancing",
+    "total_exchanges": 18,
+    "generation_id": "seed_402"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We've been designing a distributed message queue. Let's go deep on consumer rebalancing. Start with the eager rebalance protocol — what is it and what's wrong with it?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "eager_rebalance" }
+    },
+    {
+      "role": "candidate",
+      "content": "The eager rebalance protocol (also called the 'stop-the-world' protocol) is the original Kafka consumer group rebalancing mechanism. When any change occurs in the consumer group — a consumer joins, leaves, crashes, or a topic's partition count changes — the group coordinator triggers a full rebalance. The protocol: Step 1: the coordinator sends a 'revoke all partitions' signal to every consumer in the group. Every consumer must stop processing, commit its offsets, and release all its partition assignments. Step 2: all consumers send a JoinGroup request, indicating they're ready for new assignments. Step 3: the group leader (one of the consumers, typically the first to join) receives the full list of consumers and partitions, runs the assignment algorithm, and sends the result back to the coordinator. Step 4: the coordinator distributes the new assignments to each consumer. Step 5: consumers start fetching from their newly assigned partitions. The fundamental problem: during steps 1-4, no consumer is processing any messages. The entire group is paused. For a group with 100 consumers processing 1000 partitions, this pause can last 10-30 seconds depending on how long the slowest consumer takes to commit offsets and rejoin. At 100K messages per second, that's 1-3 million messages of consumer lag accumulated during a single rebalance. And it gets worse: if a consumer is slow to rejoin (network hiccup, long GC pause), it triggers a session timeout and another rebalance, creating a cascading 'rebalance storm.'",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["eager_rebalance", "stop_the_world", "rebalance_protocol_steps", "rebalance_pause", "cascading_rebalance"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned rebalance storms. Can you elaborate on how they happen and why they're so destructive?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "rebalance_storm" }
+    },
+    {
+      "role": "candidate",
+      "content": "A rebalance storm is a positive feedback loop where each rebalance triggers more rebalances. Here's a concrete scenario: Consumer C1 experiences a 15-second GC pause. It misses its heartbeat to the coordinator (session.timeout.ms defaults to 10 seconds in older Kafka versions). The coordinator declares C1 dead and triggers a rebalance. All 100 consumers stop processing and start the rejoin protocol. During the 20-second rebalance window, C1 finishes its GC and tries to rejoin, but it's too late — it sends a heartbeat with a stale generation ID, which the coordinator rejects. C1 now needs to do a fresh JoinGroup, which triggers another rebalance. Meanwhile, C2 was processing a batch of messages when the first rebalance hit. It takes 12 seconds to finish processing and commit offsets before it can rejoin. But the coordinator's rebalance timeout (max.poll.interval.ms) expires while C2 is finishing up. C2 is now considered dead — another rebalance is triggered. This cascades: each rebalance kicks out more slow consumers, each kicked consumer triggers another rebalance. I've seen production systems where a rebalance storm lasted 20+ minutes with continuous stop-the-world pauses, during which the consumer group processed zero messages. The accumulated lag took hours to drain. The destructiveness compounds because: (a) during the storm, produced messages pile up, increasing the cold-start processing time when stability is finally restored, (b) if the system has latency SLOs, the entire downstream pipeline is degraded, and (c) operators trying to fix the problem by restarting consumers actually make it worse by triggering more rebalances.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rebalance_storm", "positive_feedback_loop", "gc_pause_trigger", "generation_id_rejection", "cascading_timeouts", "operator_anti_pattern"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the sticky assignor help?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "sticky_assignor" }
+    },
+    {
+      "role": "candidate",
+      "content": "The sticky assignor (StickyAssignor, introduced in KIP-54) addresses the reassignment churn of eager rebalancing. With the default RangeAssignor or RoundRobinAssignor, when a rebalance occurs, partitions are assigned from scratch with no memory of previous assignments. A consumer that was happily processing partitions P1, P5, P9 might get reassigned P2, P6, P10 — completely different partitions. It has to drop all its local state (caches, batched data) and rebuild for the new partitions. The sticky assignor remembers the previous assignment and tries to preserve it. On a rebalance, it computes the new assignment that minimizes partition movements while maintaining balance. If consumer C3 drops out of a 10-consumer group, the sticky assignor only reassigns C3's partitions to other consumers — the other 9 consumers keep their existing partitions. This reduces the state rebuilding cost from O(total partitions) to O(departed consumer's partitions). However, the sticky assignor still uses the eager protocol — all consumers still revoke all partitions during the rebalance, wait for the new assignment, and then resume. The 'stickiness' means they likely get the same partitions back, but the pause still happens. It's a significant improvement for state-heavy consumers (like Kafka Streams applications that maintain local RocksDB stores), because rebuilding state from the changelog topic takes minutes. But it doesn't solve the stop-the-world pause problem — that requires the cooperative protocol.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sticky_assignor", "assignment_stability", "state_rebuilding_cost", "partition_movement_minimization", "eager_protocol_limitation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about static group membership. How does it reduce rebalance frequency?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "static_membership" }
+    },
+    {
+      "role": "candidate",
+      "content": "Static group membership (KIP-345, Kafka 2.3+) assigns a persistent identity to each consumer via the group.instance.id configuration. Without static membership, when a consumer restarts (deployment, crash recovery), it gets a new member ID, and the coordinator treats it as a brand new consumer joining — triggering a rebalance. With static membership, the consumer's group.instance.id persists across restarts. When the consumer disconnects, the coordinator doesn't immediately trigger a rebalance — it waits for session.timeout.ms (which can be set much higher with static membership, like 5-10 minutes, because we know the consumer will come back with the same ID). When the consumer restarts with the same group.instance.id, it silently rejoins and picks up its previous partition assignments without triggering a rebalance for the entire group. This is transformative for rolling deployments. Without static membership, deploying new code to 100 consumer instances triggers 100 rebalances (one per restart). With static membership and a 5-minute session timeout, each consumer restarts in under 30 seconds, rejoins with its previous assignment, and no rebalance occurs. The group is briefly running at reduced parallelism (one consumer down at a time) but never pauses entirely. The tradeoff: if a consumer truly crashes and never comes back, you wait the full session timeout before its partitions are reassigned. With a 5-minute timeout, that's 5 minutes of unprocessed partitions. You need to tune the timeout based on your deployment restart time plus a safety margin.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["static_membership", "group_instance_id", "deployment_rebalance_elimination", "session_timeout_tuning", "reduced_parallelism_tradeoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now walk me through the cooperative incremental rebalancing protocol. How does it fundamentally differ from eager?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "incremental_rebalancing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Cooperative incremental rebalancing (KIP-429, Kafka 2.4+) eliminates the stop-the-world pause by splitting the rebalance into two phases. Phase 1 — Revoke only what's needed: Instead of revoking all partitions from all consumers, the new protocol computes which partitions need to move and only revokes those specific partitions from their current owners. Consumers that aren't losing any partitions continue processing without interruption. For example, if consumer C3 dies and its 10 partitions need redistribution among 9 remaining consumers, only 10 partitions are revoked — the other 990 partitions continue being processed. Phase 2 — Assign revoked partitions: After the revoked partitions are returned, a second rebalance is triggered (automatically), and the freed partitions are assigned to their new owners. The key insight: this is a two-step rebalance, but only the affected partitions are paused between steps. The rest of the group processes uninterrupted. In practice, the gap between phase 1 and phase 2 is a few seconds. So instead of all 1000 partitions being paused for 20 seconds (eager protocol), only 10 partitions are paused for ~5 seconds. The throughput impact goes from 100% → 0% to 1% → 0%. The migration path: you can't switch from eager to cooperative atomically. Kafka requires a two-step upgrade — first set partition.assignment.strategy to [cooperative-sticky, range] (both protocols), do a rolling restart, then change to [cooperative-sticky] only, and do another rolling restart. This is because during the transition, some consumers speak eager and some speak cooperative.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["incremental_rebalancing", "two_phase_protocol", "targeted_revocation", "minimal_throughput_impact", "migration_path", "protocol_coexistence"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you implement rebalance listener hooks — and what should application code do in those hooks?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "rebalance_listener" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ConsumerRebalanceListener interface has two (or three, with cooperative) callbacks: onPartitionsRevoked(), onPartitionsAssigned(), and in the cooperative protocol, onPartitionsLost(). In onPartitionsRevoked(): this is called before partitions are taken away. Critical actions: (1) flush any in-memory batches that haven't been written to the downstream system — if you're batching 1000 messages before writing to a database, flush the current batch now or you'll lose those messages when the partition moves to another consumer; (2) commit offsets for the partitions being revoked — call consumer.commitSync() with the exact offsets for each revoked partition, not commitSync() with no arguments which commits all partitions; (3) close any per-partition resources like file handles or database cursors. In onPartitionsAssigned(): this is called after new partitions are assigned. Actions: (1) initialize per-partition state — if you maintain a local cache or processing state per partition, set it up now; (2) optionally seek to a specific offset if you need to resume from a checkpoint other than the committed offset (e.g., for exactly-once processing with an external offset store); (3) log the assignment for operational visibility. In onPartitionsLost() (cooperative only): called when partitions are involuntarily lost (consumer kicked from the group due to timeout). Unlike revoked, you cannot commit offsets because the partitions may already be assigned to another consumer. Just clean up local state and log the loss. A critical anti-pattern: never do slow work in the rebalance callbacks. If your onPartitionsRevoked() takes 30 seconds to flush a batch, you're holding up the entire rebalance. Set max.poll.interval.ms high enough to accommodate your callback time, or better yet, keep callbacks fast by writing state to a fast local store rather than a remote database.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rebalance_listener", "on_partitions_revoked", "on_partitions_assigned", "on_partitions_lost", "offset_commit_in_callback", "state_cleanup", "callback_performance"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Beyond the built-in assignors, what other partition assignment strategies exist? When would you write a custom one?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "partition_assignment_strategies" }
+    },
+    {
+      "role": "candidate",
+      "content": "The built-in assignors: RangeAssignor partitions contiguous ranges per topic — consumer 0 gets partitions 0-3, consumer 1 gets 4-7. Simple but creates imbalance when consuming multiple topics. RoundRobinAssignor distributes all partitions across consumers in round-robin — more balanced. StickyAssignor does round-robin but preserves previous assignments. CooperativeStickyAssignor adds cooperative protocol support. Custom assignors are warranted in several scenarios. Rack-aware assignment: in a multi-datacenter deployment, assign partitions to consumers in the same datacenter as the partition's leader broker. This minimizes cross-datacenter network traffic. The custom assignor reads each consumer's rack ID (from client.rack config) and each partition's leader broker's rack, and co-locates them. Weighted assignment: if consumers have different processing capacities (some on bigger machines), assign more partitions to beefier consumers. The custom assignor reads a weight annotation from each consumer's subscription metadata and distributes proportionally. Affinity-based assignment: if processing a partition requires loading a large state (ML model, lookup table) specific to the partition's key range, assign partitions to consumers that have already warmed up that state. This is essential for Kafka Streams applications with large local state stores — reassigning a partition means the new consumer has to rebuild gigabytes of state from the changelog. To implement a custom assignor: extend AbstractPartitionAssignor, override the assign() method, and register it in the consumer config. The assign() method receives the cluster metadata and each consumer's subscription (including custom userData bytes you can populate), and returns a mapping of consumer to partition list. I'd write thorough tests with edge cases: empty group, single consumer, more consumers than partitions, and uneven topic partition counts.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["partition_assignment_strategies", "rack_aware_assignment", "weighted_assignment", "affinity_based_assignment", "custom_assignor_implementation", "state_rebuilding_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last topic: how do you monitor rebalance frequency and diagnose rebalance issues in production?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "rebalance_monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rebalance monitoring is critical because rebalances are often silent killers — they increase latency and reduce throughput without obvious error signals. Key metrics to track: Rebalance frequency (kafka.consumer:type=consumer-coordinator-metrics, name=rebalance-rate-per-hour). Healthy is 0-2 per hour. Over 5 per hour indicates instability. Rebalance latency (name=rebalance-latency-avg and rebalance-latency-max). How long each rebalance takes. Track the max — a single slow rebalance is what hurts. Last rebalance timestamp and reason. Kafka broker logs include the reason for each rebalance (member joined, member left, member timeout). Parse and surface these. Assigned partitions per consumer — visualize the distribution over time. During a rebalance storm, you'll see partitions churning between consumers. Consumer lag per partition — a spike in lag immediately after a rebalance confirms the impact. For diagnosis: when investigating a rebalance, I'd check: (1) which member triggered it — the broker's GroupCoordinator log shows the member ID and the reason; (2) the consumer's application logs for GC pauses, slow polls, or exception stacktraces around the rebalance time; (3) the time between the consumer's last poll() call and the rebalance trigger — if it exceeds max.poll.interval.ms, the consumer was processing too slowly; (4) network metrics between the consumer and the coordinator broker for packet loss or latency spikes. Operational dashboards: I'd build a Grafana dashboard with panels for rebalance events (vertical annotations on the timeline), consumer group lag (stacked area by partition), assigned partition count per consumer (should be stable), and consumer poll rate (polls per second — should be consistent). An alert fires if: rebalances exceed 5/hour, any single rebalance takes over 60 seconds, or lag increases by more than 1 minute immediately after a rebalance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rebalance_monitoring", "jmx_metrics", "rebalance_diagnosis", "broker_coordinator_logs", "lag_correlation", "grafana_dashboard", "alerting_thresholds"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thorough deep dive on consumer rebalancing. You covered the evolution from eager to cooperative and the operational reality. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 79,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 6,
+      "api_design": 7,
+      "database_design": 6,
+      "caching_strategy": 5,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Clear explanation of the evolution from eager to cooperative rebalancing with concrete throughput impact analysis",
+      "Practical rebalance storm diagnosis with real-world cascading failure scenario",
+      "Strong coverage of custom assignor use cases and implementation approach"
+    ],
+    "weaknesses": [
+      "Did not discuss the message queue's broader architecture — storage, replication, or producer-side concerns",
+      "Capacity estimation and requirements gathering were not part of this focused deep dive"
+    ]
+  }
+}

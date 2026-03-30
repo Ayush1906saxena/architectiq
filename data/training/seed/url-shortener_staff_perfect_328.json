@@ -1,0 +1,131 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "staff",
+    "candidate_profile": "perfect",
+    "total_exchanges": 24,
+    "generation_id": "seed_328"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service like bit.ly, but at massive scale and with multi-region deployment. What questions do you have before we begin?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I have several questions to frame the design. What's the expected scale — new URLs per day and read-to-write ratio? Do we need multi-region active-active or active-passive? What's the latency target for redirects? Do we need analytics (click tracking, geographic data)? Is URL expiration required? And should we support custom aliases alongside auto-generated codes?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "read_write_ratio", "multi_region", "latency", "analytics", "url_expiration"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "200 million new URLs per day, 200:1 read-to-write ratio. Active-active across 3 regions (US, EU, Asia). Redirect latency under 10ms at p50, 50ms at p99. Yes to analytics, TTL, and custom aliases. This is a Staff-level design, so I want to see depth on distributed systems tradeoffs.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with capacity math. 200M URLs/day = ~2,300 writes/sec. With a 200:1 ratio, that's 460,000 reads/sec. For storage: average URL is 200 bytes for the destination, plus metadata — call it 500 bytes per record. That's 100GB/day, 36.5TB/year, about 180TB over 5 years. For the short code: with base62 encoding (a-z, A-Z, 0-9), a 7-character code gives us 62^7 ≈ 3.5 trillion possible codes. At 200M/day, that's 73 billion per year — we won't exhaust the keyspace for decades. For caching: applying the 80/20 rule, 20% of URLs get 80% of traffic. 20% of 200M daily URLs = 40M hot URLs at 500 bytes = 20GB of cache per region. Very manageable for a Redis cluster.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation", "base62_encoding", "cache_sizing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid math. How do you generate the short codes in a multi-region active-active setup without coordination between regions?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "id_generation" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use Snowflake-style IDs adapted for multi-region. The 64-bit ID is composed of: 41 bits timestamp (milliseconds, good for ~69 years), 5 bits region ID (supports 32 regions), 10 bits machine ID (1024 machines per region), and 8 bits sequence (256 IDs per millisecond per machine). Each region generates IDs independently with no cross-region coordination — the region ID bits guarantee uniqueness. Then I base62-encode the Snowflake ID to get the short code. A 64-bit integer in base62 is 11 characters — we can truncate to 7 by using only the lower 42 bits (gives ~4.4 trillion codes, still enough). The key property: IDs are time-sorted and globally unique without any centralized coordinator. For custom aliases, those bypass the generator entirely — we just check uniqueness against the database with a unique constraint. Custom aliases go into the same storage but with a flag marking them as custom.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["snowflake_id", "multi_region_id", "base62_encoding", "custom_aliases", "coordination_free"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the database layer. How do you shard and replicate across three regions?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use PostgreSQL, sharded by hash prefix of the short code. With 64 logical shards, each shard holds about 2.8 billion records over 5 years. The physical topology: each region has a complete copy of all 64 shards. Within a region, each shard is a Postgres instance with a synchronous standby for local HA. Cross-region replication is asynchronous — writes in US replicate to EU and Asia with a lag of 100-500ms. For reads, each region serves from its local copy — no cross-region calls, achieving the 10ms p50 target. For writes, the critical question is conflict handling. Since we're active-active, two regions could theoretically generate a conflicting custom alias simultaneously. For auto-generated codes, the Snowflake ID guarantees no conflicts. For custom aliases, I'd use a designated primary region per hash prefix — custom alias writes for shard 17 always go to, say, the US region, which is the authority for that shard. Other regions proxy custom alias writes to the primary. This avoids cross-region write conflicts while keeping reads fully local.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["postgresql", "sharding_strategy", "multi_region_replication", "async_replication", "conflict_avoidance", "shard_ownership"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the caching layer work across regions?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each region has its own independent Redis Cluster — no cross-region cache communication. The Redis cluster uses consistent hashing to distribute keys across nodes. When a redirect request arrives: check the local Redis cluster first. On cache miss, query the local Postgres shard, populate the cache, and return. Cache entries have a TTL equal to the URL's expiration time, capped at 24 hours. For cache warming: when a new URL is created, after writing to Postgres, we proactively write to the local Redis cluster. This avoids the initial cold-miss spike for URLs that are likely to be accessed immediately after creation (which is common — users test their short URLs right away). For cache invalidation: when a URL is deleted or expires, we publish an invalidation event to a Kafka topic. Each region's cache invalidation consumer reads the topic and deletes the key from its local Redis. There's a brief window (seconds) where the cache is stale, but for a URL shortener this is acceptable — a deleted URL might still redirect for a few seconds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_cluster", "consistent_hashing", "cache_warming", "cache_invalidation", "kafka", "stale_cache_tolerance"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned 460K reads per second. Can you achieve the 10ms p50 latency target?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cdn_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "460K reads/sec globally, split across 3 regions — roughly 150K per region. With a high cache hit rate (90%+ for popular URLs), most reads are served from Redis in under 1ms. But to hit 10ms p50 including network latency from the user, we need the redirect endpoint to be geographically close. I'd put a CDN layer in front using Cloudflare or CloudFront. Here's the key insight: for URLs that are accessed frequently, we can serve the 301 redirect directly from the CDN edge. The CDN caches the redirect response keyed by the short URL path. For the first request, it's a cache miss — the CDN calls our origin, gets the 301, caches it. Subsequent requests are served from the edge at <5ms. I'd use 301 (permanent redirect) for the CDN layer since we want browsers and the CDN to cache aggressively. For analytics, we switch to 302 (temporary) when analytics is enabled, which forces every request through our servers. Alternatively, we use 301 with CDN logging — most CDNs provide access logs that we can ingest for analytics, getting the best of both worlds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_redirect", "edge_caching", "301_vs_302", "latency_optimization", "cdn_logging"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you build the analytics pipeline without impacting redirect latency?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "analytics" }
+    },
+    {
+      "role": "candidate",
+      "content": "The analytics pipeline is completely decoupled from the redirect path. Two data sources feed it. Source 1: CDN access logs. The CDN produces logs with every request — short URL, timestamp, client IP, user agent, geo. These logs are batched (every 1-5 minutes) and shipped to our analytics pipeline via S3 or direct stream. Source 2: for non-CDN requests that hit our origin, the redirect service publishes an event to Kafka: {short_code, timestamp, ip, user_agent, referer, geo}. This publish is fire-and-forget — if Kafka is down, we drop the event rather than slow the redirect. The pipeline: Kafka consumers (Flink or Spark Streaming) aggregate the events — click counts per URL per hour, geographic distribution, referrer breakdown, device types. Aggregated data is written to ClickHouse, which is optimized for analytical queries on time-series data. The merchant dashboard queries ClickHouse for analytics. For real-time click counts (displayed on the URL info page), we also maintain a Redis counter per URL that's incremented atomically on each event. This gives us instant counts without querying ClickHouse.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["analytics_pipeline", "cdn_logs", "kafka", "flink", "clickhouse", "real_time_counters", "fire_and_forget"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What failure scenarios worry you most, and how do you handle them?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three scenarios keep me up at night. First, entire region failure. Our DNS-based load balancing (Route 53 with health checks) detects the downed region within 30-60 seconds and routes traffic to the surviving regions. Because each region has a full data copy, reads continue without interruption. Writes that were in-flight in the failed region may be lost (the async replication lag window). We accept this — at most a few hundred milliseconds of writes — and the URL creation can be retried. Second, Redis cluster failure within a region. I'd use the circuit breaker pattern: if Redis is unreachable, fall back to direct Postgres reads. With read replicas, Postgres can handle the burst temporarily. We might breach the 10ms p50 target during this period (Postgres reads are ~5-10ms), but the service stays up. Third, cascading failures from a thundering herd. If the CDN cache is purged (misconfiguration or TTL expiry on popular URLs), millions of requests could hit our origin simultaneously. I'd use request coalescing at the origin — when multiple requests for the same URL arrive during a cache miss, only one actually queries the database. The others wait for the first to complete and share the result. This collapses the thundering herd.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["region_failure", "dns_failover", "circuit_breaker", "thundering_herd", "request_coalescing", "cascading_failures"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Anything else you'd add to this system?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several production concerns. First, abuse prevention — a rate limiter on URL creation to prevent spammers from generating millions of URLs for phishing. Plus integration with Google Safe Browsing to check destination URLs against a malware/phishing database before creating the short URL. Second, URL preview — a service that asynchronously fetches the destination page's Open Graph metadata (title, description, thumbnail) and caches it, so platforms like Slack can show rich link previews. Third, a TTL cleanup job that runs continuously, scanning for expired URLs and tombstoning them (marking deleted rather than physically removing, to prevent recycling a short code that might still be cached somewhere). Fourth, observability — distributed tracing across the redirect path (CDN -> gateway -> cache -> DB) so we can pinpoint latency issues. SLO dashboards tracking p50 and p99 redirect latency per region, with automatic alerting when we breach targets.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["abuse_prevention", "safe_browsing", "link_preview", "ttl_cleanup", "distributed_tracing", "slo_dashboards"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. Your multi-region active-active design with Snowflake IDs, CDN edge redirects, and the analytics pipeline were particularly impressive. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 89,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 10,
+      "api_design": 9,
+      "database_design": 10,
+      "caching_strategy": 10,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional capacity estimation — covered QPS, storage, keyspace, and cache sizing with precise numbers",
+      "Multi-region active-active design with Snowflake IDs that avoid cross-region coordination",
+      "CDN edge redirect strategy with intelligent 301/302 selection for caching vs analytics",
+      "Kafka-based async analytics pipeline with dual data sources (CDN logs + origin events)",
+      "Thoughtful failure handling including request coalescing for thundering herd prevention"
+    ],
+    "weaknesses": [
+      "Could have discussed database migration strategy for adding new shards over time",
+      "Didn't address how to handle URL updates (changing the destination of an existing short URL)"
+    ]
+  }
+}

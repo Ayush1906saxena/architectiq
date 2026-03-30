@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "staff",
+    "candidate_profile": "interviewer-asks-about-experience",
+    "total_exchanges": 22,
+    "generation_id": "seed_083"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We're going to design a payment processing system — think Stripe-like infrastructure. Before we start, have you built something like this before?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes, actually. At my previous company, I was the tech lead for our internal payment platform that processed about $2 billion in annual volume. We handled credit card payments, ACH transfers, and wallet-to-wallet transfers across three countries. I dealt with PCI compliance, idempotency at scale, and a nasty distributed transaction bug that cost us about $50K before we caught it. Happy to bring that experience into this design.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payment_processing", "pci_compliance", "idempotency", "distributed_transactions"], "depth": "applied", "has_reasoning": false, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's great context. Tell me about that distributed transaction bug — what happened and what did you learn?",
+      "annotation": { "action": "probe", "phase": "requirements", "target_concept": "distributed_transactions" }
+    },
+    {
+      "role": "candidate",
+      "content": "We had a race condition in our payment capture flow. When a user double-clicked the pay button, two requests hit different servers simultaneously. Both checked the order status — both saw 'pending' — and both initiated a charge to the payment provider. The payment provider processed both because they were different request IDs. We'd debit the customer twice. The fix was two-fold: client-side idempotency keys generated before the first request, and server-side idempotency enforcement using a database unique constraint on (idempotency_key, merchant_id). If the second request hits, it sees the constraint violation and returns the result of the first request.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency", "race_condition", "distributed_transactions"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great war story. Let's use that experience. Design a payment system from scratch — what requirements would you push for?",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Based on what I've learned the hard way: first, every write operation must be idempotent — no exceptions. Second, the system needs to handle at least 10,000 transactions per second with room to scale to 100K. Third, exactly-once payment semantics — charge the customer exactly once even with retries and failures. Fourth, full audit trail — every state change is logged immutably. Fifth, PCI DSS compliance — card data never touches our application servers; we use tokenization. Sixth, multi-currency support from day one — retrofitting it later is a nightmare. And seventh, reconciliation — we need to match our records against payment provider statements daily.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency", "exactly_once", "audit_trail", "pci_compliance", "tokenization", "reconciliation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned tokenization from experience. Walk me through how card data flows in your design.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "tokenization" }
+    },
+    {
+      "role": "candidate",
+      "content": "The card number never enters our system boundary. The client — web or mobile — uses a payment SDK (like Stripe Elements) that sends card data directly to a PCI-compliant vault service. The vault returns a token — an opaque string representing the card. Our application servers only ever see this token. When we need to charge the card, we send the token to the payment provider's API, which resolves it back to the actual card number in their PCI environment. This keeps our entire backend out of PCI scope — we only need SAQ-A compliance instead of full SAQ-D, which is a massive operational and cost savings. At my previous company, staying out of PCI scope saved us roughly $500K per year in audit and infrastructure costs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tokenization", "pci_compliance", "payment_processing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's really practical. Now give me the high-level architecture — the full payment flow from checkout to settlement.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "payment_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "The payment lifecycle has distinct phases. Phase 1 — Payment Intent: merchant creates a payment intent via our API with amount, currency, and customer token. We store this as a pending record. Phase 2 — Authorization: we send an auth request to the card network through our payment provider. This puts a hold on the customer's funds but doesn't move money. Phase 3 — Capture: the merchant confirms the charge (maybe after shipping goods). We send a capture request to convert the hold into an actual charge. Phase 4 — Settlement: end of day, the payment provider batches all captured transactions and initiates fund transfer to the merchant's bank. This takes 1-3 business days. Each phase is a state transition in our payment state machine: created -> authorized -> captured -> settled. We also handle refunds and disputes as additional states.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payment_flow", "state_machine", "authorization", "capture", "settlement"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about that state machine. How do you implement it to prevent invalid transitions and ensure consistency?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "state_machine" }
+    },
+    {
+      "role": "candidate",
+      "content": "The state machine is the heart of the system. In the database, each payment has a status column with a CHECK constraint limiting valid values. State transitions are done in a single database transaction: BEGIN, SELECT the payment with FOR UPDATE (row-level lock), validate the transition is legal (e.g., you can only capture an authorized payment), update the status, insert an entry into the payment_events audit table, COMMIT. If anything fails, the transaction rolls back and the payment stays in its previous state. The valid transitions are defined in application code as an explicit map: {created: [authorized, cancelled], authorized: [captured, voided, auth_expired], captured: [settled, refunded, partially_refunded]}. Any transition not in the map is rejected. From experience — we also store the previous state in the events table. When something goes wrong at 3 AM, that audit trail is gold.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["state_machine", "database_transactions", "audit_trail", "row_locking"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What database are you using here and why?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "PostgreSQL, without question. Payments require ACID transactions — you cannot have eventual consistency when money is involved. A customer must never be charged without a corresponding record, and a record must never exist without a corresponding charge. PostgreSQL gives us strong consistency, row-level locking, and mature tooling for sharding (Citus) when we outgrow a single instance. At my previous company, we evaluated NoSQL options for performance and it was a non-starter — the complexity of implementing transaction-like guarantees in application code was not worth the throughput gains. At 10K TPS, a well-tuned Postgres with connection pooling (PgBouncer) handles the load fine.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "acid_transactions", "connection_pooling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How did you handle the case at your previous company when the payment provider was down? You send a capture request and it times out.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "external_service_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "This was one of our most painful operational issues. Our initial approach was to retry immediately, but that caused duplicate charges when the provider had processed the request but the response was lost. Here's what we learned: the payment stays in 'capture_pending' state. A background reconciliation worker retries with the same idempotency key after a backoff period — 30 seconds, then 1 minute, then 5 minutes. The payment provider's idempotency logic ensures the retry either completes the original charge or returns the existing result. If after 24 hours it's still pending, we alert the on-call team for manual review. We also check the provider's status endpoint before retrying — no point hammering a downed service. The key lesson: in payments, ambiguity is the enemy. You must eventually know if the charge happened or not. Never leave a payment in an unknown state forever.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency", "retry_strategy", "reconciliation", "external_service_failure"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the reconciliation process you mentioned? How does that work in practice?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "reconciliation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Daily automated reconciliation. Every morning, we download the settlement file from the payment provider — a CSV or API endpoint listing every transaction they processed. We compare it against our internal records. Three scenarios: match (our record matches theirs — all good), our record exists but not in their file (we think we charged but they didn't process it — potential lost revenue), their record exists but not in ours (they charged but we have no record — potential double charge). Each discrepancy generates a reconciliation ticket. At my company, we started with about a 0.1% mismatch rate and got it down to 0.01% by fixing timing issues and improving idempotency. The remaining 0.01% was mostly edge cases around midnight UTC and timezone boundaries in settlement batches.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["reconciliation", "settlement", "monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "This is really practical knowledge. Let's talk about scaling. You said 10K TPS now, 100K TPS future. What changes?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "scalability" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 10K TPS, a single Postgres primary with read replicas and PgBouncer works. At 100K TPS, we shard. I'd shard by merchant_id — all payments for a merchant live on the same shard, which keeps the state machine transactions local. Application-level routing using a shard map in Redis. We'd need about 10-20 shards at 100K TPS. The app server tier scales horizontally — stateless services behind a load balancer. For the payment provider communication, we'd need connection pooling to their API — most providers rate-limit per IP, so we'd use a pool of outbound proxy servers. Kafka handles async work — notifications, analytics, reconciliation events — keeping the hot path slim.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_strategy", "scalability", "connection_pooling", "kafka"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about fraud detection? Where does that fit in the flow?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "fraud_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fraud check happens between payment intent creation and authorization — it's a gate. When a payment intent is created, we synchronously call a fraud scoring service. This service uses rules (velocity checks — too many transactions too quickly, unusual amounts, geographic anomalies) and an ML model trained on historical chargeback data. If the score is above a threshold, we block the payment or require additional verification like 3D Secure. The fraud service needs to respond in under 100ms to not impact user experience. At my company, we started with simple rules and added ML later — the rules alone caught 80% of fraud. The ML model added another 15%. The remaining 5% was sophisticated fraud that required human review.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fraud_detection", "ml_scoring", "latency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running out of time. What would you say is the single most important lesson from building payment systems?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Idempotency is everything. Every operation that touches money must be safely retryable. Network failures, timeouts, duplicate requests — they all happen constantly at scale. If your system isn't idempotent end-to-end, you will either lose money or overcharge customers. It's not just a technical concern — it's a trust concern. The second lesson is: when in doubt, do nothing. If you can't determine whether a charge went through, don't retry blindly — investigate. It's better to delay a payment than to double-charge a customer.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency", "payment_processing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. Your production experience really showed throughout this interview. The war stories weren't just interesting — they informed better design decisions at every step. Thanks for a great conversation.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 75,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 6,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 5,
+      "scalability": 7,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Real production experience with payment systems informed every design decision",
+      "Excellent understanding of idempotency and exactly-once semantics in distributed payments",
+      "Practical knowledge of reconciliation, PCI compliance, and fraud detection"
+    ],
+    "weaknesses": [
+      "Capacity estimation was light — didn't calculate storage requirements or network bandwidth",
+      "No discussion of caching strategy or read optimization",
+      "Multi-region and disaster recovery for payment data was not addressed"
+    ]
+  }
+}

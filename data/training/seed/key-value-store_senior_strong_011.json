@@ -1,0 +1,161 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_011"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed key-value store — think DynamoDB or Riak. It should be highly available, partition tolerant, and support configurable consistency. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Good. First, what's the expected data size — total keys, average key size, average value size? Second, what are the access patterns — mostly reads, writes, or balanced? Third, should we support range queries or just point lookups? And finally, what's the latency target?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_size", "access_patterns", "range_queries", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10 billion keys, average key 32 bytes, average value 1KB. Balanced reads and writes, about 200K ops per second. Point lookups only. Latency under 10ms at p99. Let's start.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me estimate the storage first. 10 billion keys * (32 bytes + 1KB) is approximately 10TB of raw data. With a replication factor of 3, that's 30TB total. Spread across a cluster, each node might hold 1-2TB, so we need around 15-30 nodes. For throughput, 200K ops/sec across 20 nodes is 10K ops/sec per node — feasible for SSDs. Now let me walk through the architecture.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "replication_factor", "cluster_sizing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Go ahead.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The core architecture uses consistent hashing to partition data across nodes. Each key is hashed to a position on a ring, and the node responsible for that range of the ring stores the key. To handle node failures and hot spots, we use virtual nodes — each physical node owns multiple positions on the ring. For replication, each key is stored on N consecutive nodes clockwise on the ring — with N=3, that gives us fault tolerance of up to 2 node failures. The client can talk to any node, which acts as a coordinator for that request.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing", "virtual_nodes", "replication", "coordinator_node"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned configurable consistency. How does that work?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "quorum" }
+    },
+    {
+      "role": "candidate",
+      "content": "Using quorum-based consistency. With N replicas, the client specifies W (write quorum) and R (read quorum) per request. For strong consistency: W + R > N. For example, with N=3, W=2, R=2 — any read quorum of 2 overlaps with any write quorum of 2, guaranteeing the read sees the latest write. For eventual consistency: W=1, R=1 — fastest but the read might see stale data. For write-heavy workloads: W=1, R=3. For read-heavy: W=3, R=1. The system is flexible — the application chooses the trade-off per request based on its needs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["quorum", "configurable_consistency", "strong_consistency", "eventual_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "With eventual consistency (W=1, R=1), two concurrent writes to the same key can land on different replicas. How do you resolve the conflict?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "conflict_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where conflict resolution strategies come in. The simplest is last-write-wins using timestamps — each write carries a timestamp, and the value with the latest timestamp wins during read repair or anti-entropy. But timestamps have problems — clock skew means 'latest' might not be causally latest. A better approach is vector clocks. Each node maintains a logical clock. The vector clock for a value is a set of (node_id, counter) pairs that track which nodes have written the value and how many times. When a read sees conflicting versions, the vector clocks can determine if one version causally supersedes the other, or if they're truly concurrent. If they're concurrent, the conflict is kicked up to the application to resolve — like in DynamoDB, which returns both versions to the client.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["last_write_wins", "vector_clocks", "causal_ordering", "application_level_resolution"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through a concrete example. Node A and Node B both accept writes to key K concurrently. How do the vector clocks evolve?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "vector_clocks" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Initial state: K has value V0 with vector clock [A:1, B:0]. Client 1 writes to Node A: K = V1, vector clock becomes [A:2, B:0]. Concurrently, Client 2 writes to Node B (starting from V0): K = V2, vector clock becomes [A:1, B:1]. Now when we try to reconcile: comparing [A:2, B:0] and [A:1, B:1] — neither dominates the other (A:2 > A:1 but B:0 < B:1). So these are truly concurrent writes. During read repair, the coordinator sees both versions, can't automatically resolve, and returns both to the client as siblings. The client application merges them — for a shopping cart, that might mean taking the union of items.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["vector_clocks", "concurrent_writes", "read_repair", "sibling_resolution"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Vector clocks grow in size with the number of nodes that touch a key. With 20 nodes, a vector clock could be 20 entries. How do you manage this?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "vector_clock_pruning" }
+    },
+    {
+      "role": "candidate",
+      "content": "In practice, not all nodes touch every key — only the N=3 replicas do. So the vector clock for most keys is 3 entries. But with virtual nodes and rebalancing over time, older entries from former replica nodes can accumulate. Dynamo paper addresses this with clock truncation — you prune the oldest entry when the vector clock exceeds a size limit. This introduces a small risk of incorrectly resolving a conflict, but in practice it's rare. An alternative is what DynamoDB actually does in production — they simplified away from vector clocks entirely and just use last-write-wins with synchronized clocks across their fleet. For our design, I'd keep vector clocks with a max size of, say, 10 entries with pruning.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["vector_clock_pruning", "clock_truncation", "practical_simplification"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the storage engine on each node. How are writes and reads handled locally?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "storage_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use an LSM-tree (Log-Structured Merge-tree) storage engine, similar to what's in LevelDB or RocksDB. Writes go to an in-memory buffer called a memtable — this is a sorted data structure like a red-black tree. Once the memtable reaches a threshold (say 64MB), it's flushed to disk as an SSTable — a sorted, immutable file. Reads check the memtable first, then SSTables from newest to oldest. To avoid checking every SSTable, each one has a Bloom filter — a probabilistic data structure that quickly tells us if a key is definitely NOT in that SSTable. For our 10ms p99 latency target, most reads should hit the memtable or the most recent SSTable, and Bloom filters ensure we rarely read unnecessary SSTables.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lsm_tree", "memtable", "sstable", "bloom_filter", "read_path"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "SSTables accumulate over time. How do you manage that?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Compaction. A background process periodically merges SSTables, removing deleted keys (tombstones) and keeping only the latest version of each key. There are two main strategies: size-tiered compaction groups SSTables of similar sizes and merges them — good for write-heavy workloads because it's less I/O intensive. Leveled compaction organizes SSTables into levels where each level has a size limit — level N is 10x the size of level N-1. It guarantees that each key exists in at most one SSTable per level, which makes reads faster but generates more write amplification. For our balanced workload, I'd start with leveled compaction since our p99 read latency is tight at 10ms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["compaction", "size_tiered", "leveled_compaction", "write_amplification"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's discuss failure handling. Node 3 crashes. What happens?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "node_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "With replication factor 3, the data on Node 3 still exists on 2 other nodes. Reads and writes continue with the surviving replicas. The system detects the failure through gossip protocol — nodes periodically exchange heartbeats, and if Node 3 misses several heartbeats, it's marked as failed. Writes that were supposed to go to Node 3 get redirected to a temporary node via hinted handoff — the hint stores the write and replays it to Node 3 when it comes back. If Node 3 is down for an extended period, we trigger a repair process. The surviving replicas compare their data using Merkle trees — hash trees over key ranges. Where the hashes differ, we sync the actual data. This is efficient because it only transfers the delta.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gossip_protocol", "hinted_handoff", "anti_entropy", "merkle_tree"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Node 3 is gone permanently — disk failure, data is lost. How do you restore it?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "data_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "We bring up a replacement node. The consistent hashing ring assigns it the same virtual node positions as the old Node 3. The replacement needs to rebuild its data from the surviving replicas. This is a full streaming repair — the other replicas stream their data for the key ranges that the new node is responsible for. During this time, the cluster is running with reduced redundancy for those key ranges — only 2 replicas instead of 3. Reads and writes still work because W=2, R=2 only requires 2 of 3 replicas. But if another node fails during the rebuild, we're at risk. To mitigate this, we can temporarily increase the write quorum to W=3 for affected key ranges (writing to a temporary standby node), or we can prioritize the rebuild to complete faster by allocating more network and disk bandwidth.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["streaming_repair", "reduced_redundancy", "rebuild_priority"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost out of time. How would you handle hot keys — a single key getting disproportionate traffic?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "hot_keys" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hot keys can overwhelm a single node. A few approaches: First, add a caching layer in front — a local cache on each coordinator node for frequently accessed keys. Reads for hot keys are served from the local cache without hitting the storage node. Second, key splitting — transparently split a hot key into multiple sub-keys (key_0, key_1, key_2) spread across different nodes. The coordinator randomly picks a sub-key for reads. This works for read-heavy hot keys. For writes, it's more complex — you'd need to fan out the write to all sub-keys. Third, dynamic replica expansion — temporarily add more replicas for a hot key. This is operationally complex but some systems like DynamoDB do it automatically.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hot_keys", "local_caching", "key_splitting", "dynamic_replication"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong interview. Your depth on vector clocks, LSM trees, and the repair mechanisms was impressive. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 76,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 5,
+      "database_design": 9,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Deep understanding of conflict resolution with vector clocks — walked through a concrete example",
+      "Excellent LSM-tree explanation with practical considerations for compaction strategies",
+      "Strong failure handling — covered gossip, hinted handoff, Merkle trees, and streaming repair",
+      "Good quorum math with practical trade-off reasoning"
+    ],
+    "weaknesses": [
+      "API design was not discussed — no mention of GET/PUT/DELETE interface or client library design",
+      "Did not discuss multi-datacenter replication",
+      "No mention of monitoring or operational tooling for the cluster"
+    ]
+  }
+}

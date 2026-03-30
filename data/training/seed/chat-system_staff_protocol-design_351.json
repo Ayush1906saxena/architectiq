@@ -1,0 +1,179 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "staff",
+    "candidate_profile": "protocol-design",
+    "total_exchanges": 22,
+    "generation_id": "seed_351"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a real-time chat system like Slack or WhatsApp. I'd like you to focus on the messaging protocol design — how clients and servers communicate. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Several questions: What types of messaging do we need — 1:1, group chats, channels? What's the target scale for concurrent connections? Do we need offline message delivery? What about presence (online/offline status) and typing indicators? And do we need to support mobile clients with unreliable connections?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["messaging_types", "concurrent_connections", "offline_delivery", "presence", "mobile_reliability"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "All messaging types — 1:1, groups up to 500 members, and channels up to 100K members. 50 million concurrent connections. Yes to offline delivery, presence, and typing indicators. Mobile is a primary platform. Now design the protocol.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "protocol_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll design a WebSocket-based binary protocol with defined message types. Let me start with the message frame format. Every message follows this structure: [Version: 1 byte][Type: 1 byte][Flags: 1 byte][Reserved: 1 byte][Sequence: 4 bytes][Payload Length: 4 bytes][Payload: variable]. Total header: 12 bytes. Version byte allows protocol evolution without breaking clients. Type byte identifies the message kind. Flags byte encodes: bit 0 = compressed, bit 1 = encrypted, bit 2 = requires ACK, bit 3 = is a retry. Sequence number is per-connection monotonically increasing — critical for ordering and deduplication.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["binary_protocol", "message_framing", "protocol_versioning", "sequence_numbers"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good frame format. Walk me through each message type.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_types" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll define 10 core message types. Type 0x01: CONNECT — client sends after WebSocket handshake. Payload: {auth_token, client_id, device_type, protocol_version, last_seen_sequence}. Server responds with CONNACK (0x02): {session_id, server_time, heartbeat_interval_ms}. The last_seen_sequence in CONNECT enables resumption — server knows which messages the client has already received. Type 0x03: SUBSCRIBE — client subscribes to a conversation. Payload: {conversation_id, since_sequence}. Response: SUBACK (0x04) with the current conversation state. Type 0x05: UNSUBSCRIBE — leaves a conversation's real-time stream.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["connection_handshake", "session_resumption", "subscription_model"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Continue with the data message types.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_types" }
+    },
+    {
+      "role": "candidate",
+      "content": "Type 0x10: PUBLISH — client sends a chat message. Payload: {client_msg_id (UUID), conversation_id, content_type (text/image/file/system), body, reply_to_msg_id, mentions[]}. The client_msg_id is generated client-side and is the key for idempotency. Type 0x11: MESSAGE — server delivers a message to recipients. Payload: {server_msg_id, client_msg_id, conversation_id, sender_id, content_type, body, server_timestamp, sequence}. The server assigns the canonical server_msg_id and server_timestamp — the client_msg_id is echoed back so the sender can correlate. Type 0x12: ACK — bidirectional acknowledgment. Payload: {msg_ids[], ack_type (received/read/delivered)}. Batch ACKs are critical — instead of ACKing each message individually, clients batch every 500ms. This reduces wire traffic by 10-50x in active conversations.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_publishing", "idempotency", "server_timestamp", "batch_ack", "delivery_status"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about presence and typing?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "presence_protocol" }
+    },
+    {
+      "role": "candidate",
+      "content": "Type 0x20: PRESENCE — bidirectional. Client sends its status: {status (online/away/dnd/offline), custom_status_text}. Server fans out presence updates to relevant users. But we don't fan out to everyone — only to users who have the person visible in their active chat list. This is presence filtering and it's essential at scale. If a user has 500 contacts, we don't send 500 PRESENCE updates for every status change — we only send to contacts who are currently viewing a conversation with that user. Type 0x21: TYPING — client sends {conversation_id, is_typing: boolean}. Server relays to other active members of the conversation. Typing indicators have special handling: they're fire-and-forget (no ACK required), they auto-expire after 5 seconds (if no follow-up TYPING message or actual message), and they're never persisted. The Flags byte has the 'requires ACK' bit unset for typing indicators.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["presence_protocol", "presence_filtering", "typing_indicator", "fire_and_forget", "auto_expiry"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Smart on the presence filtering. How do you handle compression?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "compression" }
+    },
+    {
+      "role": "candidate",
+      "content": "Compression happens at two levels. First, WebSocket-level: we enable the permessage-deflate extension during the WebSocket handshake. This uses a sliding window compressor (LZ77) that maintains context across messages — subsequent messages in the same conversation compress better because they share vocabulary. Typical compression ratio: 60-80% for text messages. Second, application-level: for payloads over 256 bytes, we apply zstd compression before framing. zstd gives better ratios than deflate (70-90% for JSON) and is faster to decompress. The 'compressed' flag bit in our header tells the receiver to decompress. For small messages (< 256 bytes), compression actually increases size due to overhead, so we skip it. For mobile clients on cellular, compression reduces bandwidth by 3-5x, directly improving battery life since the radio is active for less time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["permessage_deflate", "zstd_compression", "compression_threshold", "mobile_optimization", "bandwidth_reduction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle protocol versioning when you need to evolve the protocol?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "protocol_versioning" }
+    },
+    {
+      "role": "candidate",
+      "content": "The version byte in the header is the primary mechanism. During CONNECT, the client declares its protocol_version. The server responds with the version it will use — always the minimum of client version and server's max supported version. For backward compatibility: new fields are always added at the end of payloads using a TLV (Type-Length-Value) encoding for optional extensions. Old clients ignore unknown TLV tags; new clients handle missing tags with defaults. For breaking changes, we increment the major version. The server maintains handlers for version N and N-1 simultaneously. Version N-2 clients get a special UPGRADE_REQUIRED message (type 0xFF) with a URL to download the latest client. In practice, I'd use Protocol Buffers for the payload serialization — protobuf's field numbering naturally supports backward and forward compatibility. New fields get new numbers; removed fields are reserved.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["protocol_versioning", "tlv_encoding", "backward_compatibility", "protobuf", "version_negotiation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now, with 50 million concurrent connections, how does the server-side handle message routing?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "message_routing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each WebSocket connection terminates at a connection server. A single server (16-core, 32GB) can handle about 500K concurrent WebSocket connections — mostly idle, so it's I/O-bound not CPU-bound. That's 100 connection servers for 50M connections. When a client sends PUBLISH, the connection server writes the message to a Kafka topic partitioned by conversation_id. A routing service consumes from Kafka, looks up which connection servers hold the recipient's active sessions (from a Redis hash: user_id → {server_id, session_id}[]), and sends the MESSAGE to those servers via internal gRPC. The connection server then pushes down the WebSocket. For group messages (500 members), the routing service fans out to potentially 500 different connection servers. For channels (100K members), we use a pub/sub layer — connection servers subscribe to channel topics and broadcast locally.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["connection_server", "message_routing", "kafka_partitioning", "session_registry", "fan_out_architecture"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a connection server crashes? Those 500K connections are dropped.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "connection_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "The protocol handles this via the CONNECT resumption mechanism. When the WebSocket drops, the client detects it (WebSocket onclose event or missed heartbeats — we send PING/PONG every 30 seconds). The client reconnects to any available connection server via the load balancer. In the CONNECT message, it sends last_seen_sequence — the sequence number of the last MESSAGE it received. The new connection server fetches messages from the message store (Cassandra or similar) with sequence > last_seen_sequence and replays them. There's a message buffer: we keep the last 1000 messages per conversation in Redis for fast replay. For the session registry, the crashed server's entries become stale. We use a TTL of 60 seconds on session entries — if the server doesn't send heartbeats to Redis, entries expire. The client re-registers on the new server. Total disruption time: typically 2-5 seconds — the WebSocket close detection plus one reconnection attempt.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["session_resumption", "heartbeat", "message_replay", "session_ttl", "reconnection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle offline message delivery for mobile clients that are disconnected?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "offline_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "When the routing service can't find an active session for a recipient, the message is queued in an offline store — a per-user queue in Cassandra: (user_id, sequence) → message. Simultaneously, we send a push notification via APNs/FCM. The notification payload is minimal: {conversation_id, sender_name, preview (first 100 chars)} — under 4KB to fit push payload limits. When the user opens the app and sends CONNECT, the server checks the offline queue: SELECT * FROM offline_messages WHERE user_id = ? AND sequence > last_seen_sequence ORDER BY sequence ASC LIMIT 500. Messages are delivered in order, and the client ACKs. Once ACKed, offline messages are deleted. For users offline for days, we cap the offline queue at 10,000 messages. Beyond that, the client does a full sync — fetching from the conversation history rather than the offline queue.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["offline_delivery", "push_notification", "offline_queue", "message_sync", "queue_capping"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about end-to-end encryption? How does that affect the protocol?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "encryption" }
+    },
+    {
+      "role": "candidate",
+      "content": "E2E encryption changes the PUBLISH and MESSAGE payloads. I'd use the Signal Protocol (Double Ratchet algorithm). During initial key exchange, clients swap public keys via a KEY_EXCHANGE message type (0x30): {identity_key, signed_pre_key, one_time_pre_key}. The server stores pre-key bundles but never sees plaintext. The PUBLISH body becomes: {encrypted_body, sender_key_id, message_key_index}. The server relays this opaquely — it cannot decrypt. This impacts several features: search becomes client-side only, push notification previews must be generated client-side (the server sends a silent push, the client decrypts locally and shows the notification), and the server-side message store holds ciphertext. For groups, we use the Sender Keys protocol — a shared group key encrypted to each member. The 'encrypted' flag bit in our frame header signals E2E encrypted payload to the receiver.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["e2e_encryption", "signal_protocol", "double_ratchet", "pre_key_bundle", "sender_keys"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle message ordering in the protocol? Especially for group chats where messages arrive from different senders.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "message_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Message ordering is defined by the server-assigned sequence number, not client timestamps (which can be skewed). For 1:1 chats, ordering is straightforward — the Kafka partition for the conversation ensures total order. For group chats, all messages to the same conversation go to the same Kafka partition (partitioned by conversation_id), so we get total order. The server assigns a monotonically increasing sequence per conversation using a Redis INCR: INCR conversation_seq:{conversation_id}. Clients display messages sorted by this server sequence. For conflict resolution: if two people reply to the same message simultaneously, both get sequential server sequences — no conflict. The protocol includes a parent_msg_id field in PUBLISH for threading, so replies stay visually attached to their parent regardless of sequence order. For channels with 100K members, the single-partition-per-conversation becomes a bottleneck. There, I'd relax strict ordering — partition by sub-topics or threads within the channel, providing per-thread ordering rather than global channel ordering.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_ordering", "server_sequence", "kafka_partition", "total_order", "per_thread_ordering"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about rate limiting within the protocol itself?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "protocol_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rate limiting is embedded in the protocol at multiple levels. Per-connection: max 50 PUBLISH messages per second per WebSocket connection. If exceeded, the server sends an ERROR message (type 0xF0): {code: RATE_LIMITED, retry_after_ms: 1000}. Per-conversation: max 200 messages per second per conversation (across all members) to prevent group spam. Per-user global: max 100 messages per second across all conversations. For TYPING indicators: max 1 per second per conversation — the client shouldn't send TYPING more often. For PRESENCE updates: max 1 per 10 seconds. The connection server enforces these using local token bucket counters — no Redis call needed since it's per-connection. If a client persistently violates limits (>10 violations in 60 seconds), the server sends a DISCONNECT message (type 0xFE) with reason: ABUSE, and closes the WebSocket.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "per_connection_limits", "abuse_detection", "token_bucket", "graceful_disconnect"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Any final additions to the protocol design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few important additions. First, a SYNC message type (0x40) for clients to request a full state sync — conversation list, unread counts, last messages. This is different from offline delivery — it's for when a client has been reinstalled or lost local state. Second, I'd add message editing and deletion as protocol messages: EDIT (0x13) and DELETE (0x14), both referencing the original server_msg_id. These propagate to all clients and update the local store. Third, I'd implement protocol-level metrics: each CONNACK includes a session_id, and the client periodically sends METRICS (0x50) with {messages_sent, messages_received, latency_histogram, reconnect_count}. This gives us observability into client-side protocol performance. Finally, the entire protocol should be documented in an IDL format — either Protobuf .proto files or a custom schema — that auto-generates client libraries for iOS, Android, and Web.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["state_sync", "message_editing", "client_metrics", "protocol_documentation", "code_generation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent protocol design. You covered the full lifecycle from connection to failure recovery. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 78,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 6,
+      "api_design": 10,
+      "database_design": 6,
+      "caching_strategy": 6,
+      "scalability": 8,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Comprehensive protocol design with well-defined binary frame format and message type taxonomy",
+      "Excellent handling of connection recovery with sequence-based resumption",
+      "Strong understanding of mobile-specific concerns including compression and offline delivery"
+    ],
+    "weaknesses": [
+      "Capacity estimation was minimal — no throughput or storage math",
+      "Database design was mentioned in passing but not detailed — schema for message store not discussed"
+    ]
+  }
+}

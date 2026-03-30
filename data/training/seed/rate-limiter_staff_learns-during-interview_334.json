@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "staff",
+    "candidate_profile": "learns-during-interview",
+    "total_exchanges": 22,
+    "generation_id": "seed_334"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter. Think of something like an API gateway that enforces rate limits across thousands of services. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. What kinds of rate limits are we enforcing? Per-user, per-IP, per-API-key? What's the typical limit — requests per second, per minute? And how many total requests per second is the system handling?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_granularity", "qps"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "All of the above — per-user, per-IP, and per-API-key. Limits range from 10/minute to 10,000/second depending on the tier. Total system throughput is 1 million requests per second. What rate limiting algorithms are you familiar with?",
+      "annotation": { "action": "probe", "phase": "requirements", "target_concept": "rate_limiting_algorithms" }
+    },
+    {
+      "role": "candidate",
+      "content": "I know the token bucket algorithm well — you have a bucket that fills at a constant rate, each request removes a token. If the bucket is empty, the request is rejected. There's also fixed window counting — you count requests in a time window and reject once the count exceeds the limit. I've implemented token bucket in production before.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["token_bucket", "fixed_window"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What about the boundary problem with fixed windows? If a user sends 100 requests at 11:59:59 and another 100 at 12:00:01, they've sent 200 in 2 seconds but neither window sees more than 100.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "sliding_window" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, I haven't actually thought about that edge case in depth. The fixed window resets at the boundary and you lose track of the previous window's requests. I suppose you could overlap windows somehow, but I'm not sure how that would work efficiently.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["fixed_window"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "There's a technique called sliding window log — you keep a sorted set of timestamps for each request. And an optimization called sliding window counter, where you weight the previous window's count by how much it overlaps with the current window. For example, if you're 30% into the current minute, you take 70% of the previous minute's count plus 100% of the current.",
+      "annotation": { "action": "teach", "phase": "high_level_design", "target_concept": "sliding_window" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh, that's elegant. The weighted approach is really clever — it's O(1) in both time and space per check, just two counters and a timestamp. And it smooths out the boundary problem without the memory overhead of storing every timestamp. Actually, this gives me an idea — what if we extended this further? Instead of just weighting the previous window equally, what if we weighted recent requests higher than older ones using an exponential decay? More recent traffic bursts would count more heavily. That way, a user who had steady traffic 45 seconds ago but is now bursting would be limited sooner than one with a flat request pattern.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sliding_window", "exponential_decay_rate_limiting"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a novel extension. How would you implement that exponential decay efficiently? You can't recalculate over every past request.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "exponential_decay_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right. The key insight is that exponential decay is memoryless — we can maintain a single running counter. When a new request arrives at time T, we first decay the existing counter: counter = counter * e^(-lambda * (T - last_update_time)). Then we add 1 for the new request. The counter naturally decays over time, so old requests fade away. Lambda controls the half-life — a half-life of 30 seconds means requests from a minute ago contribute only 25% of their weight. This is O(1) per operation: one multiplication, one addition, and storing two values — the counter and the last update timestamp.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["exponential_decay_rate_limiting", "algorithmic_complexity"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Impressive. Now let's talk about making this distributed. At 1M requests per second, we can't have a single counter. How do you distribute the rate limiting?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "The fundamental tension is between accuracy and latency. A centralized store like Redis gives perfect accuracy but adds a network hop to every request. At 1M RPS, that's 1M Redis operations per second. Let me think about this in layers. Layer 1: local rate limiting on each API gateway node. Each node tracks its own counters. If we have 50 gateway nodes, each sees about 20K RPS. Layer 2: periodic synchronization via Redis. Every 500ms, each node pushes its local increments to Redis and pulls the global count. This means our rate limits are slightly approximate — a user could exceed the limit by up to (num_nodes * sync_interval * request_rate) before being caught. For a 1000/minute limit with 50 nodes and 500ms sync, the overshoot is at most 50 * 0.5 * (1000/60) = ~417 extra requests. We can tune the sync interval to balance accuracy vs Redis load.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_rate_limiting", "redis_caching", "eventual_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good analysis with concrete numbers on the overshoot. What about the Redis layer itself — how do you prevent it from becoming a bottleneck?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "redis_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 50 nodes syncing every 500ms, that's 100 Redis operations per second per node — very manageable. But the keys are the concern. If we have 10 million unique API keys, Redis needs to hold all their counters. I'd use Redis Cluster with hash-slot sharding on the API key. We can also use Redis pipelining — each sync batch bundles all the increments into a single pipeline call. For the exponential decay counters, we'd store {counter, last_update} as a Redis hash and use a Lua script for atomic read-decay-increment. The Lua script runs server-side, so no race conditions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_scaling", "lua_scripting", "atomic_operations"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when Redis is temporarily unavailable?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "redis_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a critical design decision. There are two failure modes: fail-open (allow all requests) or fail-closed (deny all requests). For most API rate limiting, I'd fail-open with degraded accuracy. Each gateway node falls back to local-only rate limiting. The limit per node becomes global_limit / num_nodes. So a 1000/minute global limit becomes 20/minute per node. This is stricter than necessary for users whose traffic happens to concentrate on one node, and too lenient for perfectly distributed traffic. But it's safe — we won't accidentally DDoS ourselves. I'd also trigger an alert immediately and have the circuit breaker keep testing Redis availability every few seconds to recover quickly.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["graceful_degradation", "circuit_breaker", "fail_open_vs_closed"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle different limit types — per-user, per-IP, per-API-key — all at the same time?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "multi_dimension_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each request is evaluated against multiple rules. I'd model it as a rules engine. A rate limit rule has: dimension (user_id, ip, api_key), limit, window, and algorithm. For each incoming request, we extract all applicable dimensions and check each rule independently. The request is allowed only if ALL rules pass. The rules are stored in a configuration service and cached on each gateway node. For the check itself, we can parallelize — check all rules concurrently since they're independent. If any returns 'deny', short-circuit and reject immediately. The Redis key includes the dimension: rate_limit:{rule_id}:{dimension_value}. This keeps keys organized and lets us set different TTLs per rule.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_dimension_limiting", "rules_engine", "parallel_evaluation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle rate limit configuration changes? Say a customer upgrades their tier and their limits should double immediately.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "config_propagation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Configuration changes need to propagate quickly but consistently. I'd use a two-tier approach. The source of truth is a database — PostgreSQL with the rules table. When an admin or billing system updates a rule, it writes to the DB and publishes a change event to a pub/sub system, say Redis Pub/Sub or Kafka. Each gateway node subscribes and updates its local cache within seconds. For the counter itself, when a limit doubles from 1000 to 2000, the existing counter value is still valid — we just compare against the new threshold. No counter reset needed. But if the limit halves, we might need to handle the case where the current count already exceeds the new limit — I'd choose to let existing windows drain naturally rather than retroactively rejecting.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["config_propagation", "pubsub", "graceful_transitions"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the API response when a request is rate limited. What should the client see?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "HTTP 429 Too Many Requests with specific headers: X-RateLimit-Limit (the allowed rate), X-RateLimit-Remaining (requests left in the window), X-RateLimit-Reset (Unix timestamp when the window resets), and Retry-After (seconds until the client should retry). The response body should include a machine-readable error code and a human-readable message explaining which limit was hit. This is critical for developer experience — vague rate limit errors are incredibly frustrating to debug. I'd also include the dimension that triggered the limit, like 'api_key' vs 'ip', so the client knows whether to back off on their key or investigate IP-level issues.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "http_status_codes", "developer_experience"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good DX thinking. How would you monitor this system? What metrics matter?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Key metrics: rate of 429 responses per customer and per rule — spikes indicate either abuse or limits set too low. The accuracy gap — difference between local node counts and the global Redis count after sync, which tells us how stale our local decisions are. Redis operation latency — if sync latency degrades, our accuracy window widens. Rule evaluation latency per request — this directly adds to API latency. Counter memory usage on each node and in Redis. And importantly, the false positive rate — requests that were rejected locally but would have been allowed with perfect global knowledge. We measure this by comparing local rejection decisions against the global count at the next sync.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "observability", "false_positive_rate"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're wrapping up. Any final thoughts on the design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Two things. First, I'd add a shadow mode for new rules — they log what would have been rate-limited without actually blocking. This lets us validate limits before enforcing them in production. Second, going back to the exponential decay idea from earlier — it actually solves a real problem in practice. Traditional fixed windows punish users who have legitimate traffic spikes within a window even if their average rate is fine. Exponential decay naturally handles bursts more gracefully because old requests fade. I'd offer it as a premium algorithm tier for customers who need burstable limits with long-term fairness.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["shadow_mode", "exponential_decay_rate_limiting", "productization"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "I was impressed by how you took the sliding window concept and extended it into something novel. Strong interview overall. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 65,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 8,
+      "database_design": 6,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 7
+    },
+    "strengths": [
+      "Novel extension of sliding window into exponential decay with efficient O(1) implementation",
+      "Strong distributed systems thinking with concrete overshoot calculations",
+      "Excellent failure mode analysis with fail-open vs fail-closed tradeoffs"
+    ],
+    "weaknesses": [
+      "Did not know sliding window algorithm initially — gap in foundational knowledge for staff level",
+      "Could have discussed more about storage layer design and data modeling",
+      "Limited discussion of geographic distribution for a global rate limiter"
+    ]
+  }
+}

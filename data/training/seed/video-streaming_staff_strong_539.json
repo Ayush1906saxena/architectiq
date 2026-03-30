@@ -1,0 +1,140 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_539"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a video streaming platform at YouTube scale. At staff level, I want depth on the CDN, transcoding pipeline, and failure scenarios.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll drive this. Let me frame the requirements first. Key dimensions: upload volume (how many videos per day, max size), viewing scale (DAU, concurrent streams, geographic distribution), quality requirements (resolution range, adaptive bitrate, startup latency), and content safety (moderation, DRM). What are the numbers?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["structured_framing", "upload_volume", "viewing_scale", "quality_requirements", "content_safety"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "200M DAU, 1M uploads/day, up to 4K resolution, global delivery across 6 continents, playback start under 2 seconds. Content moderation required, DRM not needed (user-generated content, not licensed).",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me size this. 200M DAU, assume each watches 30 minutes of video/day at average 3Mbps for mixed quality. That's 200M × 30min × 60sec × 3Mbps = 1.08 exabits/day = 135 petabytes/day of egress. Peak concurrent viewers: if viewing is concentrated in 8 active hours per timezone, maybe 50M concurrent at global peak. At 3Mbps average, peak bandwidth is 150Tbps. Storage: 1M uploads/day at average 200MB per video (post-transcoding, all renditions) = 200TB/day. Over a year with no deletion: 73PB. With older content accessed less frequently, we tier storage. This is a bandwidth-dominated cost structure — CDN egress dwarfs everything else.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["egress_estimation", "peak_concurrent", "peak_bandwidth", "storage_per_day", "annual_storage", "bandwidth_dominated_cost"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thorough estimation. Walk me through the architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Four major subsystems. Upload & Processing pipeline: chunked resumable upload to blob storage (S3). Upload completion triggers a message to a transcoding task queue. Transcoding workers produce renditions: 240p, 360p, 480p, 720p, 1080p, 4K — each in H.264 (universal) and AV1 (30-40% bandwidth savings for supported devices). Per-title encoding optimizes the bitrate ladder per video — animated content compresses better than live action. Workers run on spot instances (60-70% cost savings for batch work). Content Delivery: a CDN with edge servers in 100+ PoPs globally. Hot content is served from edge cache. Cold content (long tail) goes through an origin shield (regional mid-tier cache) before hitting S3. Multi-CDN strategy with real-time performance-based routing — if one CDN is slow in a region, steer traffic to another. Playback Services: manifest generation (HLS .m3u8 with all quality variants), client ABR (adaptive bitrate) algorithm that selects quality per segment based on bandwidth estimation, and video metadata API (title, description, comments, view count). Content Platform: metadata storage (PostgreSQL), search (Elasticsearch), recommendations (ML pipeline), content moderation (pre-publication ML screening + human review queue), and creator analytics.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chunked_upload", "transcoding_queue", "multi_codec", "per_title_encoding", "spot_instances", "cdn_edge", "origin_shield", "multi_cdn", "performance_routing", "hls_manifest", "abr", "metadata_api", "search", "recommendations", "content_moderation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's go deep on the CDN. 150Tbps at peak. How does the multi-CDN routing work?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "cdn_routing" }
+    },
+    {
+      "role": "candidate",
+      "content": "A CDN steering service makes per-request routing decisions. When a client requests a video segment, the manifest contains a base URL that points to our steering service, not directly to a CDN. The steering service evaluates: which CDN has the best real-time performance for this user's ISP and location? We maintain a performance database fed by client-side telemetry — each video player reports throughput, rebuffer events, and startup latency per CDN per ISP. This data feeds an ML model that predicts the best CDN for each (ISP, location, time_of_day) combination. The steering service returns a 302 redirect to the chosen CDN's URL. Fallback: if the chosen CDN is unreachable, the client retries with a different CDN from a prioritized list baked into the manifest. This makes the system resilient to single-CDN outages without requiring server-side detection. Cost dimension: CDN pricing varies by region and volume commitment. The steering service can also optimize for cost — if two CDNs have similar performance but one is 20% cheaper, prefer the cheaper one. This saves millions per year at our egress volume.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_steering_service", "client_telemetry", "performance_database", "ml_routing_model", "302_redirect", "client_fallback", "cost_optimization", "isp_level_routing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent CDN design. How does the adaptive bitrate algorithm work on the client side?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "abr_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ABR algorithm decides which quality to request for each video segment. Two main approaches. Throughput-based: measure the download speed of the last N segments. If the last 3 segments averaged 5Mbps download speed, request the highest quality whose bitrate is below 5Mbps (with a safety margin — maybe 80%). Simple and responsive but oscillates when bandwidth is unstable. Buffer-based (BBA): decide based on how full the playback buffer is. If the buffer has >30 seconds of content, request higher quality (we can afford a slow download). If buffer is <10 seconds, request lower quality (we're at risk of rebuffering). Smoother than throughput-based but slower to react to bandwidth changes. In practice, modern players use a hybrid: throughput estimation for the initial quality selection, buffer level for ongoing adaptation, and a state machine that prevents rapid oscillation (don't switch quality more than once every 3 segments). The goal: maximize quality while keeping rebuffer rate below 0.1%. At our scale, every 0.01% improvement in rebuffer rate affects millions of viewing hours.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["throughput_based_abr", "buffer_based_abr", "bba", "hybrid_approach", "oscillation_prevention", "rebuffer_rate_target", "quality_maximization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Deep ABR knowledge. Let's talk about the transcoding pipeline. 1M uploads per day — how do you handle the compute?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "transcoding_compute" }
+    },
+    {
+      "role": "candidate",
+      "content": "1M uploads/day. Each video is transcoded into, say, 12 renditions (6 resolutions × 2 codecs). Average transcoding time per rendition: 1x real-time for H.264 on CPU, 0.5x on GPU. For AV1: 5-10x real-time on CPU, 1-2x on GPU. For a 5-minute video, total transcoding across all renditions takes roughly 30-60 GPU-minutes. At 1M videos/day, that's 30M-60M GPU-minutes/day. A GPU instance does 1440 GPU-minutes/day (24 hours). So we need ~20,000-40,000 GPU instances if running continuously. With spot instances (60% savings): cost is maybe $0.30/GPU-hour × 40,000 × 24 = $288K/day = ~$105M/year. That's significant. Optimizations: prioritize by expected viewership. A creator with 10M subscribers gets transcoded in minutes. A new creator's first video gets transcoded in hours — they have fewer viewers waiting. This lets us use a smaller fleet and handle peaks with spot burst capacity. Also: parallel transcoding. Split the video into time chunks (e.g., 10-second segments), transcode each independently on separate workers, then stitch. A 5-minute video split into 30 segments can be transcoded in parallel and done in 10 seconds instead of 5 minutes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rendition_count", "transcoding_time_per_codec", "gpu_fleet_sizing", "spot_instances", "cost_estimation", "priority_by_viewership", "parallel_transcoding", "segment_splitting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a transcoding worker crashes mid-job?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "transcoding_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The task queue handles this with visibility timeouts. When a worker claims a job, the message becomes invisible for a timeout period (e.g., 30 minutes). If the worker finishes, it deletes the message. If the worker crashes, the message reappears after the timeout and another worker picks it up. Transcoding is idempotent — same input, same output — so retries are safe. For segmented parallel transcoding: each segment is a separate queue message. If one segment's worker crashes, only that segment is retried, not the entire video. Once all segments complete, a merge job stitches them. If a video fails 3 times, it goes to a dead letter queue. We alert the on-call team and mark the video as 'processing failed' — the creator sees an error with a retry button. Common failure causes: corrupt input file, unsupported codec, out-of-memory on particularly complex scenes (4K with lots of motion). We log the failure reason for debugging.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["visibility_timeout", "idempotent_retry", "per_segment_retry", "dead_letter_queue", "creator_error_message", "failure_root_causes"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about content moderation? A video is uploaded with harmful content — how quickly can you prevent it from being viewed?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "content_moderation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Content moderation runs in parallel with transcoding, not after it. During upload, before the video enters the transcoding pipeline, we extract keyframes (one per second of video) and run them through image classification models: nudity detector, violence detector, hate symbols detector. We also transcribe the audio and run text classification for hate speech. This takes 1-2 minutes for a 5-minute video. Results: high-confidence violations are auto-blocked — the video never becomes publicly available. Uncertain cases get a 'pending review' flag — the video is visible only to the creator until a human reviewer clears it. Low-risk content proceeds to transcoding and publishing. The latency target: harmful content should never be publicly viewable, even briefly. By running moderation before publishing, we prevent the window of exposure. Post-publication monitoring: for content that passes initial screening but gets user reports, we have a report queue that escalates based on volume (10 reports in 1 hour → immediate human review).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["parallel_moderation", "keyframe_extraction", "ml_classifiers", "audio_transcription", "auto_block", "pending_review", "zero_exposure_window", "report_escalation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if a CDN edge in Europe goes down? Millions of European viewers affected.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cdn_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multi-CDN saves us. The CDN steering service detects the failure within seconds — client telemetry shows increased errors or latency from that CDN in Europe. The steering service automatically redirects European traffic to another CDN provider. Viewer impact: a few seconds of rebuffering as the client switches CDN, then playback resumes. For viewers mid-stream: the client-side fallback mechanism in the manifest handles this. The player tries the next CDN URL in the fallback list without waiting for server-side detection. For a complete regional failure (all CDNs down in Europe): traffic routes to the nearest healthy region's CDN — probably US-East. Higher latency (100ms+ instead of 20ms) means the ABR algorithm will select lower quality to compensate, but playback continues. We'd also have a pre-warmed origin shield in a backup region that can serve European traffic during the outage.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_cdn_failover", "client_telemetry_detection", "automatic_redirect", "client_side_fallback", "cross_region_routing", "abr_quality_adaptation", "backup_origin_shield"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Closing thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Two things I'd emphasize. View counting: at our scale, every play generates a counter increment. We can't write to a database on every view. Use Redis for real-time counting with periodic flush to the database. But deduplication matters — bot views, autoplay views, and accidental taps shouldn't inflate counts. A 'qualified view' requires 30+ seconds of playback from a non-bot client. Second: creator experience. Upload processing should show real-time progress — 'transcoding: 60% complete' — not a black box. Push notifications when the video is ready. And the analytics dashboard (views, retention graph, audience demographics) is what keeps creators on the platform. The creator is the supply side of the marketplace.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["view_counting", "redis_counter", "view_deduplication", "qualified_view", "creator_experience", "processing_progress", "analytics_dashboard", "creator_as_supply"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. Deep across CDN routing, ABR algorithms, transcoding economics, and content moderation. The view deduplication and creator experience points show product thinking alongside technical depth. Strong hire.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 84,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Outstanding capacity estimation — egress, bandwidth, storage, and transcoding GPU fleet all quantified",
+      "Deep CDN design — multi-CDN steering with client telemetry, ML routing, cost optimization, and client-side fallback",
+      "Excellent ABR algorithm comparison — throughput-based vs buffer-based with hybrid recommendation",
+      "Strong content moderation — parallel with transcoding, zero-exposure-window guarantee"
+    ],
+    "weaknesses": [
+      "Database design was mentioned but not deep-dived — metadata schema and view count table weren't designed",
+      "Didn't discuss codec strategy trade-offs in detail — AV1 adoption timeline and device support matrix"
+    ]
+  }
+}

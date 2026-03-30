@@ -1,0 +1,149 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "caching-deep",
+    "total_exchanges": 20,
+    "generation_id": "seed_359"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like feed system. I'd like you to go deep on caching — how you cache at every layer to handle the read-heavy workload. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. What's our scale — DAU and peak read QPS? What's the acceptable staleness for the feed — can it be a few seconds behind? How many tweets per user's feed do we need to serve? Do we have celebrity accounts with tens of millions of followers? And what's our latency target for loading the feed?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_qps", "staleness", "feed_depth", "celebrity_problem", "latency_target"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "200 million DAU. 500K feed reads per second at peak. Feed can be 2-3 seconds behind. Serve the latest 200 tweets per user. Yes, celebrity accounts with 50M+ followers. Feed load under 200ms at P99. Focus on the caching architecture.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "caching_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll design a multi-layer caching architecture. Starting from the client and working toward the backend. Layer 1: Browser/Client Cache. For the web client, we set Cache-Control headers on tweet data that rarely changes — user profile images, display names, verified badges. Cache-Control: public, max-age=300 (5 minutes for profile data). For the feed itself, Cache-Control: no-cache, must-revalidate — the feed changes constantly, so we always validate. But we use ETag-based conditional requests: the client sends If-None-Match with the last feed ETag. If the feed hasn't changed, we return 304 Not Modified — no data transfer. On mobile, the app maintains a local SQLite database of recent tweets. On app launch, it loads the cached feed instantly (< 50ms) while fetching updates in the background. This gives instant perceived load time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["browser_cache", "cache_control", "etag", "conditional_requests", "offline_cache"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What about the CDN layer?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cdn_cache" }
+    },
+    {
+      "role": "candidate",
+      "content": "Layer 2: CDN Edge Cache. The tricky part: personalized feeds can't be cached at the CDN because each user sees a different feed. But some content IS cacheable at the edge. Trending topics: the same trending list for a region is served to millions of users. Cache at CDN with: Cache-Control: public, max-age=30 (refresh every 30 seconds). Key: trending:{region_code}. At peak, trending topics alone generate 100K+ requests per second — CDN absorbs all of this. Tweet media: images and videos are served from CDN with aggressive caching. Cache-Control: public, max-age=31536000, immutable. URLs contain a content hash, so new versions get new URLs. This is the biggest bandwidth saver — media is 95% of bandwidth. Celebrity tweet content: when a celebrity posts, millions of users fetch the same tweet. We cache the tweet object (text, metadata, but not the personalized context like 'your friend liked this') at the CDN edge. Cache key: tweet:{tweet_id}. TTL: 60 seconds. Cache hit ratio for trending content: 99%+.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_cache", "trending_cache", "media_cache", "immutable_content", "cache_key_design"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now the Redis caching layer — this is the core. Go deep.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "redis_cache" }
+    },
+    {
+      "role": "candidate",
+      "content": "Layer 3: Redis — the timeline cache. This is the heart of the system. Each active user has a pre-computed timeline stored in Redis as a sorted set. Key: timeline:{user_id}. Members: tweet_ids. Scores: tweet timestamps (or Snowflake IDs which embed timestamps). I store up to 800 tweet IDs per user — more than the 200 we serve, to have buffer for filtering (removing muted/blocked accounts, deleted tweets). Memory sizing: each sorted set entry is 8 bytes (tweet_id) + 8 bytes (score) + ~32 bytes (Redis sorted set overhead) = ~48 bytes per entry. Per user: 800 * 48 = 38.4 KB. For 200M DAU: 200M * 38.4 KB = 7.68 TB. That's a Redis cluster of about 240 nodes with 32 GB RAM each (at 80% utilization to leave room for fragmentation and overhead). We shard by user_id using CRC16 hash (Redis Cluster's default). Each shard handles ~833K users.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_sorted_set", "timeline_cache", "memory_sizing", "redis_cluster", "sharding"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a lot of Redis. How do you populate these timelines?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cache_population" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fan-out on write for normal users. When user A posts a tweet, a fan-out service looks up A's followers (from the social graph), and for each active follower, does ZADD timeline:{follower_id} {timestamp} {tweet_id}. Then ZREMRANGEBYRANK timeline:{follower_id} 0 -(801) to cap at 800 entries. For a user with 1,000 followers, that's 1,000 Redis ZADD operations. At 500M tweets per day (assuming average), that's a lot of fan-out. But the critical optimization: we only fan out to active users. If a user hasn't logged in for 7 days, they don't have a cached timeline. When they log in, we build their timeline on-the-fly (fan-out on read): query the social graph for who they follow, fetch the latest tweets from each followed account, merge-sort, and cache the result. For celebrities (50M+ followers): we never fan out their tweets. Celebrity tweets are merged at read time. When a user's feed is requested, we fetch their pre-computed timeline (containing non-celebrity tweets) and merge in the latest tweets from celebrities they follow. This hybrid approach caps fan-out at ~10K writes per tweet.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_on_write", "fan_out_on_read", "hybrid_approach", "celebrity_problem", "active_user_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about caching the tweet content itself? The timeline only stores IDs.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "tweet_cache" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right. After getting tweet IDs from the timeline, we need the actual tweet objects. Layer 3b: Tweet object cache. Key: tweet:{tweet_id}, Value: serialized tweet object (protobuf or JSON). Each tweet object is ~500 bytes (text + metadata). I'd use a separate Redis cluster for tweet objects, sized for the hot working set. Hot set: tweets from the last 48 hours that have been viewed at least once. Estimated: 500M tweets/day * 2 days * 30% viewed = 300M hot tweets. At 500 bytes each + Redis overhead: 300M * 600 bytes = 180 GB. A much smaller cluster — maybe 8 nodes with 32 GB each. TTL: 48 hours. Eviction: volatile-lru on keys with TTL. Cache-aside pattern: on feed load, MGET tweet:{id1} tweet:{id2} ... tweet:{id20}. If any miss, fetch from database and SET with TTL. The MGET is a single round trip, fetching all 20 tweets at once — critical for latency. Expected cache hit ratio: 95%+ since most feed reads are for recent, popular tweets.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tweet_object_cache", "working_set", "cache_aside", "mget_batch", "cache_hit_ratio"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned a local process cache. How does that work?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "local_cache" }
+    },
+    {
+      "role": "candidate",
+      "content": "Layer 4: Local in-process cache on each application server. This is a small, extremely fast cache that sits in the application's heap memory. I'd use Caffeine (Java) or an LRU HashMap with TTL. What goes in it: (a) Hot user profiles: the top 10K most-followed accounts' profile data. These profiles appear in thousands of feed renders per second. Cache size: 10K * 2KB = 20 MB. TTL: 60 seconds. (b) Hot tweet objects: tweets that are trending or viral. If a tweet appears in 1M+ timelines, caching it locally avoids 1M Redis calls. The local cache detects hotness: if a tweet_id is requested more than 100 times in 10 seconds on this server, promote to local cache. Cache size: 50K tweets * 500 bytes = 25 MB. TTL: 30 seconds. (c) Configuration data: feature flags, rate limit configs, blocked content hashes. Negligible size, TTL 5 minutes. Total local cache: ~50 MB per server. Minimal heap impact. The huge win: local cache lookups are ~100 nanoseconds vs Redis RTT of ~500 microseconds — 5,000x faster. Even a 10% local cache hit rate saves significant Redis load.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["local_cache", "caffeine", "hot_user_detection", "cache_promotion", "latency_comparison"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle cache consistency when a tweet is deleted?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_invalidation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Cache invalidation is the hardest part. When a tweet is deleted: Step 1: Mark as deleted in the database (soft delete). Step 2: Publish a TweetDeleted event to Kafka. Step 3: A cache invalidation consumer processes the event: (a) DEL tweet:{tweet_id} from the tweet object cache. (b) For the timeline caches, we don't remove the tweet_id from all follower timelines — that would require fan-out to millions of timelines. Instead, the feed assembly service filters out deleted tweets at read time: after fetching tweet objects, check is_deleted and skip. (c) For local process caches, we broadcast the deletion via a pub/sub channel. Each app server subscribes and evicts the tweet_id from its local cache. Worst case staleness: a user might see a deleted tweet for up to 30 seconds (local cache TTL) + 2 seconds (Kafka consumer lag) = 32 seconds. For most use cases this is acceptable. For legally required deletions (GDPR, DMCA), we add a synchronous path: the API server directly calls each Redis cluster to invalidate, bypassing the async pipeline. This reduces staleness to < 2 seconds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_invalidation", "soft_delete", "event_driven_invalidation", "pub_sub_broadcast", "gdpr_compliance"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a Redis node fails? You lose 833K users' timeline caches.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Redis Cluster with replicas handles this. Each master has one replica. When a master dies, Redis Cluster promotes the replica in 1-5 seconds (failover detected by other masters via gossip protocol). During those seconds, requests to keys on that shard fail. The app server should handle this gracefully: on Redis timeout (50ms timeout), fall back to the database path — query the social graph, fetch recent tweets from followed accounts, merge and return. This is slower (200-500ms) but works. After failover, the replica becomes the new master. But if both master and replica die: cold cache for 833K users. On next login, each user triggers a cache rebuild. With 833K users, this creates a thundering herd on the database. Mitigation: (1) Stagger rebuilds — add a random delay (0-5 seconds) before rebuilding. (2) Rate-limit cache rebuilds to 10K/sec on the database. (3) Prioritize by user activity — rebuild timelines for users who are currently online first. (4) For the first load, serve a degraded feed (only followed celebrities + top 20 most-followed accounts) which doesn't need the per-user cache.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_cluster_failover", "graceful_degradation", "thundering_herd", "staggered_rebuild", "degraded_feed"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you pre-compute celebrity feeds for the merge at read time?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "celebrity_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Celebrity tweets are cached in a dedicated structure. Key: celeb_tweets:{user_id}, Value: sorted set of the last 100 tweet IDs. For the top 10,000 celebrities, we maintain these sorted sets proactively — every time a celebrity posts, we ZADD to their celeb_tweets set. This set is read-heavy (millions of users merge it into their feed) and rarely written. I replicate it across all Redis shards as a read-through cache — each shard has a local copy. Memory: 10K celebrities * 100 tweets * 48 bytes = 48 MB per shard — negligible. At read time: the feed service gets the user's timeline (800 non-celebrity tweet IDs), then gets celeb_tweets for each celebrity the user follows. If a user follows 5 celebrities, that's 5 ZREVRANGE calls returning 20 tweets each. Merge-sort the 800 + 100 = 900 tweet IDs by timestamp, take the top 200. The merge adds ~2ms to feed generation. Total feed load path: local cache check (0.1ms) + Redis timeline (0.5ms) + Redis celebrity tweets (1ms) + Redis tweet objects MGET (0.5ms) + merge and filter (2ms) = ~4ms. Well under 200ms P99.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["celebrity_caching", "replicated_cache", "merge_sort", "latency_breakdown"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Anything to wrap up the caching architecture?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three additions. First, cache warming: when we deploy new Redis nodes or recover from failures, we pre-warm the cache from the database during off-peak hours. A background job reads user timelines from the database and populates Redis for the most active users. This prevents a cold-cache spike during peak traffic. Second, monitoring: I'd track cache hit ratio per layer (target: local 10%, Redis timeline 90%, Redis tweet objects 95%), cache memory utilization, eviction rate, and the ratio of fan-out-on-read vs fan-out-on-write feeds. If the fan-out-on-read ratio exceeds 20%, it means too many users have cold caches. Third, cost optimization: for inactive users (no login in 30+ days), we expire their timeline cache entirely. When they return, we rebuild on-demand. This saves about 40% of Redis memory since most registered users are inactive.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_warming", "monitoring", "cache_hit_targets", "cost_optimization", "inactive_user_eviction"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent caching architecture. Very thorough multi-layer design. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 75,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 5,
+      "database_design": 5,
+      "caching_strategy": 10,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Comprehensive multi-layer cache architecture from browser to local process cache with precise memory sizing",
+      "Excellent celebrity caching strategy with replicated read-through cache and merge-at-read",
+      "Strong cache failure handling with graceful degradation and thundering herd mitigation"
+    ],
+    "weaknesses": [
+      "API design was not discussed — no endpoints or request/response formats",
+      "Database schema and storage design were not covered — focused entirely on caching"
+    ]
+  }
+}

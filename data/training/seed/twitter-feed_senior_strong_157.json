@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_157"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed system. Users post tweets and see a feed of tweets from people they follow. What clarifying questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several questions. What's the scale — DAU, average tweets per user, average followers per user? How fresh does the feed need to be — should a new tweet appear in followers' feeds within seconds or is eventual consistency over minutes acceptable? Do we need to support ranked feeds or just reverse chronological?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scale", "freshness", "feed_ranking", "consistency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "300 million DAU, average 2 tweets per day, median 200 followers but some celebrities have 10-50 million. Feed should update within 5 seconds for most users. Reverse chronological for now. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Is the read:write ratio heavily skewed toward reads? And for celebrities with tens of millions of followers, are we okay with slightly delayed delivery — say 30 seconds instead of 5?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_write_ratio", "celebrity_problem", "tiered_sla"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes, read-heavy — at least 100:1. And yes, relaxed delivery for celebrities is fine. Let's design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Quick capacity estimate. 300M DAU times 2 tweets per day is 600M tweets/day, about 7,000 writes/sec. For reads, at 100:1, that's 700K feed reads/sec. Each tweet is maybe 300 bytes of text plus metadata. 600M times 300 bytes is 180GB of new tweet data per day. Now the critical number: fanout. If the average user has 200 followers, each tweet fans out to 200 feed inboxes. That's 120 billion fanout writes per day — 1.4 million fanout operations per second. This is the hard part.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "fanout_calculation", "storage_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good numbers. How do you handle those 1.4 million fanout writes per second?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "fanout_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a fan-out-on-write approach with Kafka as the backbone. When a user posts a tweet, the tweet service writes it to the tweets table and publishes an event to a Kafka topic — call it 'tweet-created'. A fleet of fanout workers consume from this topic. Each worker reads the tweet event, looks up the poster's follower list, and writes the tweet ID to each follower's feed timeline in Redis. The key insight is partitioning: the Kafka topic is partitioned by author_id, so all tweets from the same author go to the same partition and are processed by the same consumer. This guarantees ordering of tweets from a single author in their followers' feeds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_on_write", "kafka", "consumer_groups", "partitioning", "ordering_guarantee"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do the Kafka consumer groups work here? Walk me through the parallelism.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "kafka_consumers" }
+    },
+    {
+      "role": "candidate",
+      "content": "The tweet-created topic has, say, 256 partitions. We run a consumer group called 'fanout-workers' with 256 consumers — one per partition. Each consumer is responsible for processing tweet events from its assigned partition. When it receives a tweet event, it fetches the author's follower list from a follower service, splits the followers into batches of 1,000, and for each batch, writes the tweet ID to each follower's Redis sorted set using pipelining. With 256 parallel consumers, our throughput is 256 times whatever a single consumer can handle. If one consumer can process 10K fanout writes per second, we get 2.5M/sec total — comfortably above our 1.4M requirement. If we need more, we increase partitions and consumers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka_partitions", "consumer_parallelism", "redis_pipelining", "horizontal_scaling", "throughput_calculation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about celebrities? A tweet from someone with 50 million followers — that's 50 million Redis writes from a single event.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "celebrity_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the classic celebrity problem. For users with more than, say, 100K followers, I'd switch to fan-out-on-read. Their tweets are not pre-distributed to follower feeds. Instead, when a user opens their feed, the feed service does two things: fetches the pre-computed timeline from Redis (fan-out-on-write content), and separately fetches recent tweets from the celebrities they follow (fan-out-on-read). It merges these two lists in the application layer, sorted by timestamp. The celebrity threshold is configurable — we'd tune it based on fanout latency budgets. Most users follow maybe 5-10 celebrities, so the on-read merge adds only a few extra queries.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["celebrity_problem", "hybrid_fanout", "fan_out_on_read", "merge_strategy", "threshold_tuning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good hybrid approach. How does the feed read path work in detail?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "read_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a user requests their feed, the feed service: 1) Queries Redis for the user's timeline sorted set — ZREVRANGE to get the top 50 tweet IDs by timestamp score. 2) Fetches the list of celebrities the user follows from a cache. 3) For each celebrity, queries their recent tweets from a separate Redis sorted set (celebrity_tweets:{user_id}). 4) Merges all tweet IDs by timestamp, takes the top 50. 5) Multi-gets the full tweet objects from a tweet cache (Redis) or the tweets database on cache miss. 6) Returns the hydrated feed. Steps 2-3 happen in parallel with step 1. The total latency is dominated by the Redis round trips — about 2-3 sequential calls at sub-millisecond each, plus one batch GET for tweet hydration. We're well under 50ms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_assembly", "redis_sorted_set", "parallel_queries", "tweet_hydration", "latency_analysis"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the Redis memory footprint for all those pre-computed timelines?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "memory_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each user's timeline sorted set stores tweet IDs (8 bytes) with timestamp scores (8 bytes), plus Redis overhead — roughly 50 bytes per entry. If we keep the last 800 tweets per user, that's 40KB per user. With 300M DAU, that's 12TB. Significant but achievable with a Redis cluster — say 40-50 instances with 256GB each. We can also trim older entries aggressively. Most users only scroll back a few hundred tweets, so 800 is generous. Reducing to 200 entries per user brings it down to 3TB, and we fall back to the database for deeper pagination.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["memory_estimation", "redis_cluster_sizing", "timeline_truncation", "fallback_pagination"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if a fanout worker crashes mid-way through distributing a tweet to 200 followers — it's written to 150 but not the last 50?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "partial_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Kafka handles this with consumer offsets. The consumer doesn't commit the offset until the entire fanout for that event is complete. If the worker crashes, Kafka rebalances the partition to another consumer, which re-reads the uncommitted event and retries the full fanout. The 150 followers who already received the tweet ID will get a duplicate write to their sorted set, but since we're using ZADD with the tweet ID as the member, it's idempotent — the duplicate is silently ignored. The last 50 followers will receive the tweet on retry. No data loss, no duplicates in the feed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka_offset_management", "consumer_rebalancing", "idempotent_writes", "exactly_once_delivery"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if a user deletes a tweet? How does that propagate?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "tweet_deletion" }
+    },
+    {
+      "role": "candidate",
+      "content": "Another event — 'tweet-deleted' — goes to Kafka. The fanout workers consume it and issue ZREM on each follower's timeline sorted set to remove the tweet ID. Same parallelism as the write path. Additionally, we soft-delete the tweet in the database and invalidate it from the tweet cache. If some timelines still reference the deleted tweet ID before the removal propagates, the hydration step will see the tweet is deleted and filter it out — so the user never sees it. This eventual consistency window is typically under a few seconds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["event_driven_deletion", "soft_delete", "cache_invalidation", "eventual_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running out of time. Final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few additions. I'd add a CDN for serving static assets in tweets. For the database, I'd use Cassandra for the tweets store — it handles the write volume well and supports time-range queries for the fan-out-on-read celebrity path. Monitoring would track Kafka consumer lag — if lag grows, it means feeds are falling behind and we need to scale consumers. And eventually we'd want a ranking layer instead of pure chronological, but that's a separate ML pipeline that re-sorts the feed before serving.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn", "cassandra", "kafka_consumer_lag", "monitoring", "feed_ranking"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong interview. Your async Kafka-based fanout with the celebrity hybrid was well-thought-out. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 77,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent Kafka consumer group architecture for parallel fanout — clearly understood partitioning and ordering guarantees",
+      "Hybrid fan-out approach for celebrities was well-articulated with clear threshold reasoning",
+      "Strong failure handling — idempotent writes via ZADD and Kafka offset management for crash recovery"
+    ],
+    "weaknesses": [
+      "API design was implicit — didn't define explicit endpoints for posting, reading feeds, following",
+      "Didn't discuss social graph storage or how follower lists are maintained at scale",
+      "No mention of rate limiting on the write path to prevent spam"
+    ]
+  }
+}

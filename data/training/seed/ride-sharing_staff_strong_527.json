@@ -1,0 +1,140 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_527"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a ride-sharing platform. At staff level, I expect you to drive the conversation with depth on matching optimization, real-time systems, and failure handling.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll start with requirements and capacity, then architecture, then deep-dive the hardest parts. Scale: how many rides per day, cities, and concurrent drivers? What's the matching latency target? Do we need ride types (pool, premium) or just standard?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["structured_approach", "scale", "matching_latency", "ride_types"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "15 million rides per day, 100 cities, 3 million active drivers. Match within 10 seconds. Standard rides only for now.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Capacity math. 15M rides/day = ~175 rides/sec average, ~700/sec at 4x peak. With 3M drivers, assume 1M online at any time, each sending GPS every 4 seconds = 250K location updates/sec. This is a write-heavy real-time system — the location ingestion path is the hottest component. For the matching path: 700 matches/sec at peak, each requiring a geospatial query + ETA computation for ~10 candidate drivers = 7,000 ETA calls/sec to the routing engine. Manageable but not trivial.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "peak_calculation", "location_update_rate", "matching_throughput", "eta_call_volume"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. Walk me through the architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Six core services. Location Service: ingests driver GPS, stores in Redis with geospatial indexes, sharded by city. Each city's location data is independent — a rider in NYC never queries SF drivers. Matching Service: the brain. Receives ride requests, queries nearby drivers from Location Service, computes ETAs via the Maps Service, and runs the matching algorithm. Maps Service: wraps a routing engine (OSRM or Valhalla) for ETA computation and turn-by-turn navigation. Caches common routes. Trip Service: manages the trip state machine from request through completion. Persists to PostgreSQL, sharded by city. Pricing Service: computes fare estimates and dynamic surge pricing. Uses supply-demand data from the Location Service. Gateway Service: manages WebSocket connections for real-time rider and driver communication — location tracking, trip status updates, push notifications.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["location_service", "matching_service", "maps_service", "trip_service", "pricing_service", "gateway_service", "city_sharding", "osrm"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good decomposition. Let's go deep on the matching algorithm. You said 700 matches per second — is one-at-a-time matching optimal?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "matching_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "No — one-at-a-time is locally optimal but globally suboptimal. Classic example: driver A is 2 min from rider X and 8 min from rider Y. Driver B is 3 min from X and 3 min from Y. Greedy assigns A→X (closest), leaving B→Y: total 2+3=5 min. But the optimal assignment is B→X, A→Y: total 3+8=11 min... wait, that's worse. Let me reconsider. Actually: A is 2 min from X, 10 min from Y. B is 3 min from X, 3 min from Y. Greedy: A→X(2), B→Y(3) = 5 min total. But Y requests 1 second later — with A already assigned, B→Y(3). Now rider Z appears 5 min from A, 2 min from B. B is taken, so Z waits. If instead we'd assigned B→X(3), A→Y(10)... no, that's still worse. The real benefit of batch matching shows when there are multiple concurrent requests. Accumulate requests for 2-3 seconds, build a bipartite graph of riders and candidate drivers, and solve the assignment problem to minimize total pickup time. The Hungarian algorithm solves this optimally in O(n³), but for n>100 a greedy approximation with local swaps gets within 5% of optimal in O(n log n).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["global_optimization", "batch_matching", "bipartite_graph", "assignment_problem", "hungarian_algorithm", "greedy_approximation", "local_swaps"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "I like that you caught your own example error and worked through it. How does the geospatial indexing work for the candidate driver lookup?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "geospatial_indexing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two-level indexing. First level: H3 hexagonal grid at resolution 7 (~5km² cells). We maintain a set of available driver IDs per H3 cell in Redis. When a driver moves, we update their cell membership — SREM from old cell, SADD to new cell. This is O(1) per update. For candidate lookup: compute the rider's H3 cell and the ring of neighboring cells (7 cells total at resolution 7). Pull all available drivers from those cells. This gives a rough candidate set within ~10km. Second level: exact distance filtering. Compute haversine distance for each candidate, filter to within 5km radius. Then compute road-network ETA for the top 10 nearest by straight-line distance. This two-level approach means the expensive ETA computation only runs for ~10 drivers, not hundreds. At 250K location updates/sec, each update is 2 Redis operations (SREM + SADD). Redis handles this easily. For candidate queries at 700/sec, each touching 7 cells with maybe 50 drivers total — trivial.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["h3_hexagonal_grid", "resolution_7", "cell_membership", "ring_neighbors", "haversine", "two_level_filtering", "eta_for_top_10"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent geospatial design. How does surge pricing work, and how do you prevent gaming?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge computation: every 60 seconds, for each H3 cell, compute demand (ride requests in last 5 min) and supply (available drivers in cell). The surge multiplier is a function of the demand/supply ratio: no surge below 1.5:1, 1.3x at 2:1, 1.5x at 3:1, 2.0x at 5:1, capped at 3.0x (some cities have legal caps). The multiplier is smoothed — we use an exponential moving average to prevent sudden spikes that confuse riders. Gaming prevention: drivers could go offline when they see low surge and come back when surge rises. We detect this pattern: if a driver goes offline for <2 minutes and comes back in a surge zone, they don't get the surge benefit for their next ride. Riders might wait for surge to drop — we can inform them of estimated wait time at current surge vs lower surge: 'Ride now for $25 or wait ~10 min for estimated $18.' Transparent information reduces frustration.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_computation", "demand_supply_ratio", "multiplier_curve", "legal_caps", "exponential_smoothing", "driver_gaming_detection", "rider_transparency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The anti-gaming logic is a nice touch. What's the trip state machine?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "trip_state_machine" }
+    },
+    {
+      "role": "candidate",
+      "content": "States: REQUESTED → MATCHING → DRIVER_OFFERED → DRIVER_ACCEPTED → EN_ROUTE_TO_PICKUP → ARRIVED_AT_PICKUP → TRIP_IN_PROGRESS → ARRIVED_AT_DESTINATION → COMPLETED. Terminal failure states: CANCELLED_BY_RIDER (any state before IN_PROGRESS), CANCELLED_BY_DRIVER (before IN_PROGRESS, with penalty), NO_MATCH_FOUND, DRIVER_OFFER_EXPIRED. Each transition has guards: EN_ROUTE_TO_PICKUP → ARRIVED requires driver location within 200m of pickup. TRIP_IN_PROGRESS → COMPLETED requires driver location within 500m of destination OR a manual 'end trip' after minimum trip duration. Persistence: trip events are append-only in PostgreSQL — we don't update the row, we insert a new event. The current state is derived from the latest event. This gives us a full audit trail and makes concurrent state transitions safe — the DB enforces ordering via sequence numbers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["detailed_states", "transition_guards", "location_based_guards", "event_sourced_persistence", "append_only_events", "audit_trail", "concurrent_safety"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Event-sourced trip state is an interesting choice. What's the failure mode if the entire Location Service goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "location_service_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the Location Service is down: new matches can't happen because we can't find nearby drivers. In-progress trips continue unaffected — the driver app has local navigation and the trip state machine doesn't depend on the Location Service. For matching: we have two mitigation layers. First, the Location Service is sharded by city — a failure in the NYC shard doesn't affect SF. Second, each city shard has 3 Redis replicas with automatic failover. A single node failure promotes a replica in seconds. If the entire Redis cluster for a city is down (catastrophic): fail gracefully. Return 'no drivers available, please try again in a moment' to new ride requests. Send a push notification to affected riders when service recovers. The driver location data is self-healing — drivers send fresh updates every 4 seconds, so the Redis cache fully rebuilds within seconds of recovery. We don't need to backfill from durable storage.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["city_isolation", "redis_failover", "graceful_degradation", "self_healing_data", "automatic_recovery", "no_backfill_needed"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the maps/routing service? ETA computation is on the critical path for matching.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "maps_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the routing service is degraded or slow, matching latency blows up. Mitigation: aggressive caching. We pre-compute and cache ETA estimates for common origin-destination pairs in a grid overlay. Instead of calling the routing engine for exact ETA, use the cached grid estimate. Accuracy drops (maybe ±2 minutes) but matching still works. The cache can be built offline from the routing engine and refreshed hourly. With a 1km grid resolution across a city, that's maybe 10K×10K = 100M grid pairs — too many. But we only need pairs where origin is a driver location (dynamic) and destination is a rider pickup (sparse). A more practical approach: use straight-line distance with a city-specific correction factor as the fallback. In Manhattan, multiply by 1.4x (grid pattern). In London, multiply by 1.6x (irregular streets). These factors are empirically derived from routing engine data. Not precise, but good enough for matching during a routing outage.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["eta_caching", "grid_overlay", "offline_precomputation", "distance_correction_factor", "city_specific_factors", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The city-specific correction factors are a practical production insight. We're out of time. Closing thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Two things I'd prioritize in production: safety features — an SOS button that immediately shares the trip GPS trace with emergency services and a trusted contact. And driver earnings transparency — drivers make business decisions based on earnings estimates, so the pricing system needs to be predictable and fair. Both are product concerns that deeply shape the technical architecture.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["safety_features", "sos_system", "driver_earnings_transparency", "product_driven_architecture"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. Deep across matching, geospatial indexing, surge pricing, and failure handling. The event-sourced trip state and distance correction factors showed real production thinking. Strong hire.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 83,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Outstanding capacity estimation with per-component throughput calculations",
+      "Deep H3-based geospatial indexing with two-level filtering and precise Redis operation counts",
+      "Excellent surge pricing with anti-gaming logic and legal cap awareness",
+      "Creative routing fallback with city-specific distance correction factors"
+    ],
+    "weaknesses": [
+      "Batch matching example stumbled — caught the error but wasted time",
+      "Didn't discuss multi-city deployment architecture or data partitioning across regions"
+    ]
+  }
+}

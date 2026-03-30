@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "vp",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_076"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a rate limiting system for an API platform. You're interviewing at the VP level. How would you approach this?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Rate limiting is fascinating because it sits at the intersection of engineering, business, and security. Before diving into algorithms, I want to understand the business context. Is this rate limiting for our own internal APIs (protecting backend services), or is this a customer-facing API platform where rate limits are a product feature tied to pricing tiers? The design is radically different depending on the answer.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["business_context", "internal_vs_external", "pricing_tiers"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great distinction. It's a customer-facing API platform — think Stripe, Twilio, or SendGrid. Rate limits are part of the product. Free tier gets 100 requests/minute, Pro gets 10,000, Enterprise gets custom limits. We also need DDoS protection. 50,000 API customers, 500K total requests per second at peak.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "business_context" }
+    },
+    {
+      "role": "candidate",
+      "content": "Perfect, so rate limiting is a first-class business capability. Let me frame the strategic dimensions. Dimension 1: Revenue enablement. Rate limits define the API pricing ladder. The free-to-Pro upgrade is often triggered by hitting rate limits. This means the rate limit experience needs to be excellent — clear error messages, real-time usage dashboards, proactive alerts before users hit limits. Dimension 2: Platform reliability. Rate limiting protects our backend from misbehaving clients — intentional or accidental. A single customer doing 100K requests/second shouldn't impact the other 49,999 customers. Dimension 3: Security. DDoS protection, bot mitigation, and abuse prevention. This is where rate limiting overlaps with services like Cloudflare and AWS WAF.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["revenue_enablement", "platform_reliability", "ddos_protection", "strategic_dimensions"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great framing. Let's start with the technical architecture. How does rate limiting work at 500K requests per second?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "rate_limiting_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "The architecture is multi-layered. Layer 1: Edge rate limiting. At the CDN/load balancer level — Cloudflare, AWS CloudFront, or Nginx. This handles volumetric DDoS attacks before they reach our application. Simple IP-based rate limiting: no single IP gets more than 1,000 requests per second. This is stateless and operates at the network edge, so it's extremely fast. Layer 2: Application rate limiting. At the API gateway level — this is the business logic layer. It knows the customer, their plan, and their limits. This uses a distributed rate limiter backed by Redis. Each request checks the customer's current count against their plan limit. Layer 3: Service-level rate limiting. Each backend microservice has its own rate limiter to prevent cascading failures. If the payment service can handle 10K requests/second, it rejects requests above that regardless of what the API gateway allows.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_layer_rate_limiting", "edge_protection", "application_rate_limiting", "service_level_limits"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's focus on Layer 2 — the application rate limiter. What algorithm would you use?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "rate_limiting_algorithms" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several options, each with different characteristics. Token bucket: each customer has a bucket that fills at their rate limit (e.g., 10,000 tokens per minute for Pro). Each request consumes a token. Burst-friendly — allows short spikes as long as tokens are available. Sliding window log: tracks exact timestamps of each request. Perfectly accurate but memory-intensive — storing 10K timestamps per customer per window. Sliding window counter: approximates the count using the current and previous window's counts. Low memory, slight inaccuracy at window boundaries. For our API platform, I'd use token bucket. The burst tolerance is a feature, not a bug — customers appreciate being able to handle traffic spikes without immediate rejection. And it's simple to implement with Redis: one key per customer storing the token count and last refill timestamp.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "sliding_window", "burst_tolerance", "algorithm_comparison"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "500K requests per second, each checking Redis. Can a single Redis instance handle that?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "redis_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "A single Redis instance tops out at about 100K operations per second. At 500K requests, each requiring 1-2 Redis operations (read + update token count, ideally as a Lua script for atomicity), we need 5-10 Redis instances. Using Redis Cluster with hash-based sharding on the customer API key — each shard handles a subset of customers. But here's the thing: for ultra-low-latency rate limiting, I'd also add a local in-process rate limiter on each API gateway instance. This handles the first pass — if a customer's local counter exceeds the limit, reject immediately without hitting Redis. Periodically sync with Redis for cross-node accuracy. This hybrid approach gives us sub-millisecond rate limit checks for 99% of requests, with Redis providing global consistency.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_cluster", "lua_scripts", "local_rate_limiter", "hybrid_approach"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "With the local rate limiter, if a customer's traffic is spread across 20 API gateway instances, each instance only sees 1/20th of the traffic. How do you prevent the customer from getting 20x their limit?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "distributed_counting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each local limiter is configured with 1/N of the total limit, where N is the number of gateway instances. If the Pro limit is 10,000/minute and there are 20 gateways, each local limiter allows 500/minute per customer. This is approximate — traffic isn't perfectly balanced — but it provides a fast reject path. The Redis global counter is the authoritative check. Local limiter acts as a fast-path optimization, not the source of truth. An alternative is sticky routing — route all of a customer's traffic to the same gateway instance. Then the local limiter sees all their traffic. But this creates hot spots and makes scaling harder. I'd stick with the distributed approach with periodic Redis sync — say every 1-2 seconds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_counting", "sticky_routing", "approximate_limiting", "sync_frequency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the business side. How does rate limiting connect to your API pricing strategy?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "api_monetization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rate limits are the primary lever for API monetization. The pricing ladder: Free tier (100 requests/minute) — developer onboarding, evaluate the product. Pro tier ($99/month, 10K requests/minute) — production workloads, small companies. Business tier ($499/month, 100K requests/minute) — growing companies. Enterprise (custom pricing, custom limits) — large customers who need dedicated rate limit configurations, burst agreements, and priority support. The rate limiting system needs to support real-time plan changes — when a customer upgrades from Pro to Business, their limits should increase immediately, not after a cache refresh. The 429 (Too Many Requests) response should include headers: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, and Retry-After. And the response body should include a link to the upgrade page. Every 429 response is a sales opportunity.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_monetization", "pricing_tiers", "rate_limit_headers", "upsell_opportunity"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned DDoS protection. How does the rate limiter interact with Cloudflare or similar services?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "ddos_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "The relationship with Cloudflare is layered defense. Cloudflare handles Layer 3/4 attacks (SYN floods, UDP amplification) before they reach us — we pay for their DDoS protection tier. For Layer 7 attacks (HTTP floods), Cloudflare provides basic IP-based rate limiting, but our application rate limiter handles the sophisticated cases — because only we know that API key X belongs to the free tier. The integration: Cloudflare is configured with our general rate limits per IP. When we detect an attack pattern (sudden spike from many IPs targeting one endpoint), we push rules to Cloudflare's API to block at the edge, before traffic enters our network. This feedback loop — detect at the application layer, block at the edge — is critical. We'd also negotiate our Cloudflare contract carefully: at 500K requests/second baseline, the bandwidth costs are significant. Enterprise plans with committed throughput are typically 30-40% cheaper than pay-as-you-go.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cloudflare_integration", "layered_defense", "l3_l4_l7", "edge_blocking", "cost_negotiation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What are the legal implications of blocking users via rate limiting?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "legal_implications" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several legal dimensions. First, terms of service: our API ToS must clearly state that rate limits apply and that we reserve the right to throttle or block traffic. This is table stakes. Second, SLA implications: for paid tiers, if our rate limiter incorrectly blocks legitimate requests, that's a service degradation. Depending on our SLA, the customer might be entitled to credits. The rate limiter needs to be accurate — false positives are both a legal and a business problem. Third, discrimination concerns: if we rate-limit customers differently based on protected characteristics, that's illegal. Our rate limits must be based solely on plan tier and usage, applied uniformly. Fourth, international considerations: some jurisdictions have 'right to service' provisions. If a customer is blocked from an API they depend on for their business, they might have legal recourse beyond the ToS. I'd involve legal counsel in the rate limiting policy design and ensure all blocking decisions are logged with full audit trails for dispute resolution.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["terms_of_service", "sla_obligations", "discrimination", "audit_trail", "legal_compliance"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you communicate rate limit changes to customers?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "customer_communication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Communication is a trust issue. For planned changes: 90 days notice minimum via email, in-app notification, and API changelog. If we're reducing limits (rare but sometimes necessary), we contact affected customers individually — a generic email isn't enough when someone's production system depends on our API. For real-time communication: a developer dashboard showing current usage vs limits with real-time graphs. Proactive email alerts at 80% and 90% of limit utilization — 'You've used 8,000 of your 10,000 requests this minute.' Webhook notifications for rate limit events so customers can build their own monitoring. For incidents: if our rate limiter has a bug and over-blocks, we publish a post-mortem, automatically issue credits, and personally reach out to heavily impacted customers. Trust, once lost, is extremely expensive to rebuild.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["change_management", "proactive_alerts", "developer_experience", "incident_communication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you structure the team that owns this system?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "team_structure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rate limiting touches multiple teams, but needs a clear owner. I'd have it owned by the API Platform team — 5-6 engineers. They own: the rate limiting service, the customer usage tracking pipeline, the developer dashboard, and the integration with Cloudflare. They partner with: the billing team (plan limits and overage charges), the security team (DDoS response and abuse detection), and the developer relations team (documentation, customer communication). The API Platform team's success metrics: false positive rate (target <0.01%), rate limiting latency overhead (target <1ms p99), customer upgrade rate from free tier (shared with product), and time to detect/mitigate DDoS attacks (target <60 seconds).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["team_structure", "ownership", "success_metrics", "cross_team_partnerships"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "One thing I'd add: rate limiting should be graceful, not punitive. When a customer hits their limit, don't just return 429 and leave them stuck. Offer immediate options: upgrade their plan with a one-click API call, request a temporary burst allowance for known traffic events, or implement client-side retry with exponential backoff (document the recommended pattern). The best rate limiting systems are ones that customers rarely notice because the tooling helps them stay within limits. That's the difference between a rate limiter that frustrates customers and one that drives revenue.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["graceful_degradation", "customer_experience", "self_service_upgrade", "burst_allowance"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. The business-technical integration was exceptional — connecting rate limiting to monetization, legal compliance, and customer trust. The multi-layer architecture was well thought out. Outstanding VP-level performance.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 83,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 10,
+      "capacity_estimation": 8,
+      "api_design": 9,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 10
+    },
+    "strengths": [
+      "Exceptional business-technical integration — rate limiting as a revenue lever, not just a technical control",
+      "Multi-layer architecture with clear reasoning for each layer",
+      "Thoughtful coverage of legal implications and customer communication"
+    ],
+    "weaknesses": [
+      "Could have discussed rate limiter failure modes — what happens if Redis is down?",
+      "Didn't cover rate limiting for specific endpoints vs global limits",
+      "Limited discussion of rate limit analytics and usage forecasting"
+    ]
+  }
+}

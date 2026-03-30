@@ -1,0 +1,169 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_292"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing platform like Uber or Lyft. Users request rides, drivers accept them, and we track the trip from start to finish. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several questions. What's our target geography — a single city, a country, or global? How many concurrent ride requests per second do we expect? Do we need to support shared rides (carpooling) or just point-to-point? And what's the acceptable time from a rider requesting a trip to being matched with a driver?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scale_estimation", "geographic_scope", "matching_latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's design for a major city — 10 million residents, 500K daily rides, 50K concurrent active drivers. Point-to-point rides only. Matching should happen within 30 seconds. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "What's the expected peak-to-average ride request ratio — events, rush hour, bar closing time? Do we need surge pricing? And for the scope of this interview, should I focus on the ride lifecycle or also cover payment processing and driver onboarding?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["peak_traffic", "surge_pricing", "scope_definition"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Peak is about 3x average — Friday night at 2am. Yes to surge pricing. Focus on the ride lifecycle — request through completion. Let's go.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with capacity estimation. 500K daily rides over 16 active hours averages about 8.7 rides per second. At 3x peak, that's 26 requests per second — not massive in terms of throughput, but the real-time matching and location tracking make the system complex. 50K active drivers sending location updates every 4 seconds means 12,500 location writes per second. Over a day, that's about 1 billion location events — we need an efficient spatial index.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "location_tracking", "spatial_indexing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good numbers. Walk me through the complete trip lifecycle.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "trip_state_machine" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd model the trip as a state machine with clear transitions. The states are: REQUESTED — rider submits pickup and dropoff locations. MATCHING — system is searching for a driver. MATCHED — a driver has accepted. DRIVER_EN_ROUTE — driver is heading to pickup point. ARRIVED — driver is at pickup, waiting for rider. IN_TRIP — ride is in progress. COMPLETED — rider has been dropped off. RATED — both parties have submitted ratings. Each transition has validation rules. For example, MATCHING to MATCHED requires a driver's explicit acceptance. ARRIVED to IN_TRIP requires the driver to confirm rider is in the vehicle. The state machine is persisted in a Trip table, and every transition emits an event to Kafka for downstream services — billing, analytics, ETA updates, and notifications.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["state_machine", "trip_lifecycle", "event_driven_architecture", "kafka"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a driver cancels after accepting — say they realize the pickup is 15 minutes away?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "edge_cases" }
+    },
+    {
+      "role": "candidate",
+      "content": "Driver cancellation transitions the trip from MATCHED or DRIVER_EN_ROUTE back to MATCHING. We re-enter the matching pool but with context: we exclude the driver who just cancelled and prioritize faster matching since the rider has already been waiting. We track driver cancellation rate — too many cancellations trigger warnings, then temporary suspension. From the rider's perspective, we send a push notification: 'Your driver cancelled. Finding a new driver.' We also need a timeout — if the rider has been in MATCHING for more than 2 minutes after a driver cancel, we proactively offer the option to cancel with no charge.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["state_transitions", "retry_logic", "driver_reliability", "user_experience"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good edge case handling. What about the rider no-show — the driver arrives but the rider doesn't come out?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "edge_cases" }
+    },
+    {
+      "role": "candidate",
+      "content": "When the trip is in ARRIVED state, we start a 5-minute timer. The driver app shows the countdown. At 2 minutes we send the rider a push notification and SMS: 'Your driver is waiting.' At 5 minutes, the driver gets the option to mark the rider as a no-show. This transitions the trip to COMPLETED with a no_show flag. The rider is charged a cancellation fee — typically $5-10 — to compensate the driver for their time. The driver also gets paid for the wait time. We need to be careful about fraud here — GPS verification confirms the driver actually arrived at the pickup location within a reasonable radius, say 100 meters, before the no-show option becomes available.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["no_show_handling", "timeout_mechanism", "fraud_prevention", "gps_verification", "cancellation_fee"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great depth on edge cases. Now let's talk about the matching algorithm. How do you find the best driver for a ride request?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "matching_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "The matching service needs to efficiently find nearby available drivers and rank them. For spatial lookup, I'd use geohashing. We divide the city into geohash cells at precision level 6, which gives roughly 1.2km x 600m cells. When a request comes in, we look up the rider's geohash cell and its 8 neighbors — that covers a ~3.6km radius. For each available driver in those cells, we compute a match score based on: ETA to the pickup point (weighted highest — typically 60%), driver rating (20%), and driver acceptance rate (20%). We'd use a road-network-based ETA from a routing service, not straight-line distance, because a driver 500m away across a river might be 15 minutes away by road.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geohashing", "matching_algorithm", "eta_scoring", "spatial_indexing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Where do you store the real-time driver locations and how do you keep them updated?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "location_tracking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Driver locations need to be in-memory for fast lookups. I'd use Redis with a geospatial index — Redis's GEOADD and GEOSEARCH commands give us O(N+log(M)) lookups where N is the result count and M is the total entries. Each driver app sends location updates every 4 seconds via a WebSocket connection to our Location Service. The Location Service updates Redis and also writes to Kafka for the historical location stream. The Redis key structure: 'available_drivers' as the sorted set for geospatial queries. When a driver accepts a trip, we remove them from 'available_drivers' and add them to 'on_trip_drivers'. We also maintain a TTL on each driver's entry — if we haven't received an update in 30 seconds, we assume the driver went offline and remove them.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_geospatial", "websocket", "location_tracking", "ttl_expiration", "kafka"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you implement surge pricing?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing balances supply and demand in real time. I'd divide the city into zones — roughly aligned with neighborhoods using geohash level 5 cells. Every 2 minutes, a Pricing Service computes a supply-demand ratio per zone: available drivers divided by recent ride requests. When demand exceeds supply by a threshold — say the ratio drops below 0.7 — we apply a multiplier. The multiplier scales with the imbalance: 1.2x at 0.6 ratio, 1.5x at 0.4, 2.0x at 0.2. We cap the maximum surge at 3x. The surge multiplier is shown to the rider before they confirm. On the supply side, we send push notifications to offline drivers in adjacent zones: 'High demand in Downtown — earn 2x!' This creates a feedback loop that naturally rebalances supply.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_pricing", "supply_demand_balancing", "zone_based_pricing", "dynamic_pricing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about safety — an area that's critical for ride-sharing?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "safety" }
+    },
+    {
+      "role": "candidate",
+      "content": "Safety has multiple layers. First, trip sharing — riders can share their live trip with trusted contacts who see real-time location on a map. Second, route deviation detection — if the driver deviates significantly from the expected route, we alert the rider and offer a one-tap emergency button. Third, the emergency button contacts local authorities and shares the trip details, driver info, and live location. Fourth, we record the in-trip audio (with consent) as evidence in case of disputes. Fifth, post-trip we analyze driver behavior — hard braking, speeding, route deviations — from GPS data and flag unsafe drivers for review. All of this is backed by a Safety Service that processes trip events in real time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["safety_features", "trip_sharing", "route_monitoring", "emergency_response", "driver_behavior_analysis"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss failure scenarios. Your Redis instance holding driver locations goes down. What happens?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "fault_tolerance" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the primary Redis goes down, we lose the ability to match riders with drivers — that's critical. Mitigation: Redis Sentinel with automatic failover. We run a primary plus two replicas. Sentinel promotes a replica within seconds. During the failover window, we have a few seconds where matching is degraded. We handle this by queueing ride requests during the failover and processing them once the new primary is ready. We also keep a cold standby with periodic RDB snapshots — worst case, we lose a few seconds of location data and some drivers need to re-send their positions. The WebSocket connections stay alive through this since they're to the Location Service, not directly to Redis.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_sentinel", "failover", "replication", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. We're running short on time. How would you handle the database for trip persistence?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Trips table in PostgreSQL: trip_id (UUID), rider_id, driver_id, status (the state machine state), pickup_location (PostGIS point), dropoff_location, requested_at, matched_at, started_at, completed_at, fare_amount, surge_multiplier, and a JSONB column for metadata like cancellation reason or no_show flag. Indexes on rider_id and driver_id for user trip history, and on status for operational queries. At 500K rides per day, that's 180M rows per year — PostgreSQL handles this fine for a few years. When we need to scale beyond that, we shard by city since ride data is naturally partitioned geographically.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_schema", "postgis", "indexing", "sharding_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final additions to the design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add ETA updates pushed to riders in real time via WebSocket during DRIVER_EN_ROUTE and IN_TRIP states, a notification service for SMS and push at each state transition, and driver earnings dashboards. For monitoring, I'd track p50 and p99 match time, rider wait time, and trip completion rate as golden metrics. Any degradation in these signals immediate alerts.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["real_time_updates", "notification_service", "observability", "golden_metrics"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. Your state machine approach and edge case handling were particularly impressive. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 75,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 8,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Modeled the entire trip lifecycle as a well-defined state machine with clear transitions",
+      "Thorough edge case handling for driver cancellation, rider no-show, and fraud prevention",
+      "Strong surge pricing design with concrete supply-demand ratios and multiplier thresholds"
+    ],
+    "weaknesses": [
+      "Payment integration was not discussed despite being core to ride-sharing",
+      "Could have discussed multi-city scaling and data partitioning strategy in more depth"
+    ]
+  }
+}

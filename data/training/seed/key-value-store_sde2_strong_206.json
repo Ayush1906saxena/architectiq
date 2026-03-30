@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "sde2",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_206"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a simple key-value store, like a simplified version of Redis. The system needs to support get(key) and put(key, value) operations. How would you approach this?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. A few questions first: what's the expected data size — can everything fit in memory, or do we need disk storage? What are the durability requirements — is it okay to lose data on a crash? And are we building a single-node system or distributed?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["memory_vs_disk", "durability", "distributed_systems"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Start with single-node. Data should fit in memory — say up to 10GB. But we can't lose data on a crash — durability is required. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "durability" }
+    },
+    {
+      "role": "candidate",
+      "content": "What are the key and value sizes? And what's the expected throughput — reads per second, writes per second? Do we need to support TTL or any data types beyond simple strings?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "data_types", "ttl"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Keys are strings up to 256 bytes. Values are strings up to 10KB. 50K reads per second and 10K writes per second. Just strings, no TTL. Go ahead.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "At the core, the in-memory data structure is a hash map. A get(key) is just a hash map lookup — O(1). A put(key, value) inserts or updates in the hash map — also O(1). For 10GB of data, with average key of 100 bytes and value of 5KB, that's roughly 10GB / 5KB = 2 million entries. A hash map with 2 million entries is straightforward in memory.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hash_map", "in_memory_storage", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now the hard part — durability. If the process crashes, the hash map is gone. How do you make sure data survives a crash?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "durability" }
+    },
+    {
+      "role": "candidate",
+      "content": "The simplest approach: on every put(), after updating the hash map, also write the key-value pair to a file on disk. So the file is a log of all put operations — just append 'PUT key value' to the end of the file. On startup after a crash, we read the file from beginning to end, replaying each put into a fresh hash map. This reconstructs the exact state.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["durability", "append_only_log", "crash_recovery"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the performance problem with writing to disk on every put?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "write_performance" }
+    },
+    {
+      "role": "candidate",
+      "content": "Disk I/O is slow compared to memory. If we fsync on every write to guarantee it's actually on disk, that's maybe 1-5ms per write on an SSD. At 10K writes per second, that means we'd need the disk to complete 10K fsyncs per second. An SSD can do maybe 10K-50K IOPS, so we'd be right at the limit. And if we're on a spinning disk, it's way worse — maybe 200 IOPS.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["write_performance", "disk_io", "fsync"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "So how would you improve write performance while maintaining durability?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "write_ahead_log" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where a Write-Ahead Log (WAL) with batching helps. Instead of fsyncing on every write, we batch multiple writes together. The WAL is still an append-only file, but we buffer writes in memory and fsync every, say, 10ms or every 100 writes, whichever comes first. This way, one fsync covers multiple operations. The trade-off is that we could lose up to 10ms of writes on a crash, but we go from 10K fsyncs per second to maybe 100. That's a huge improvement.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["write_ahead_log", "batching", "durability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good trade-off analysis. What happens to the WAL file over time? It just keeps growing?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, the WAL grows forever because every operation is appended. If a key is updated 100 times, all 100 entries are in the log, but only the last one matters. We need compaction. Periodically, we write a snapshot of the entire hash map to a new file — a point-in-time dump. Then we can delete all WAL entries before the snapshot. On recovery, we load the snapshot first, then replay any WAL entries after the snapshot.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["compaction", "snapshot", "crash_recovery"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you take a snapshot without blocking reads and writes?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "snapshot_concurrency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good question. We could fork the process — like Redis does with BGSAVE. The forked child process has a copy-on-write view of the hash map and can write the snapshot to disk without blocking the parent. The parent continues serving reads and writes. Any writes after the fork go to the WAL as usual. On modern operating systems, the fork is almost instant because of copy-on-write pages.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fork", "copy_on_write", "background_snapshot"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Impressive that you know about Redis's BGSAVE approach. Let's switch gears — how do you handle concurrent access? Multiple clients reading and writing at the same time.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "concurrency" }
+    },
+    {
+      "role": "candidate",
+      "content": "A few options. The simplest — and what Redis does — is single-threaded event loop. All commands execute sequentially on one thread. At 60K operations per second total, a modern CPU can easily handle this. The advantage is no locks, no race conditions, no complexity. If we need more throughput, we could shard across multiple instances, each single-threaded.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["concurrency", "event_loop", "single_threaded", "sharding_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if we wanted to support multi-threaded access?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "concurrency" }
+    },
+    {
+      "role": "candidate",
+      "content": "For multi-threaded, we'd need synchronization. A simple approach is a read-write lock on the hash map: multiple readers can access simultaneously, but a writer gets exclusive access. This works but the write lock can become a bottleneck. A more granular approach is to shard the hash map into, say, 256 buckets and have a lock per bucket. This reduces contention since two writes to different buckets don't block each other.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["concurrency", "read_write_lock", "lock_striping"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the client-server interface. How do clients talk to this key-value store?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a simple TCP server. Clients open a connection and send commands as text: 'GET key' and 'PUT key value'. The server responds with the value or an OK. Using TCP rather than HTTP avoids the overhead of HTTP headers for each command. We could also support pipelining — the client sends multiple commands without waiting for responses, and the server sends responses in order. That reduces round-trip latency.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "tcp", "pipelining"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Anything you'd want to add to the design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add memory monitoring — alert when we're approaching the 10GB limit so we can plan capacity. I'd also add a delete(key) operation that marks the key as deleted in both the hash map and the WAL (a tombstone). And for production, connection pooling on the client side and a health check endpoint. If we needed to scale beyond one node, we could use consistent hashing to distribute keys across multiple instances.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "tombstone", "connection_pooling", "consistent_hashing"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent design. You showed a strong understanding of the performance trade-offs between memory and disk. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 62,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 5,
+      "scalability": 6,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Deep understanding of WAL, batching, and fsync performance trade-offs",
+      "Knew Redis BGSAVE fork/copy-on-write approach for snapshots",
+      "Good concurrency discussion with single-threaded vs lock-striping options"
+    ],
+    "weaknesses": [
+      "Didn't discuss data serialization format for the WAL or snapshot",
+      "No discussion of replication for high availability",
+      "Could have explored LSM trees or other on-disk data structures"
+    ]
+  }
+}

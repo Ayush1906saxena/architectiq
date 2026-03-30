@@ -1,15 +1,17 @@
-from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 
 class ChatMessage(BaseModel):
-    role: str  # "user" | "assistant" | "system"
-    content: str
+    role: Literal["user", "assistant"]  # Block "system" role injection
+    content: str = Field(max_length=5000)
 
 
 class DesignChallengeRequest(BaseModel):
-    topic_id: str
-    challenge_id: str
-    messages: list[ChatMessage]
+    topic_id: str = Field(max_length=50)
+    challenge_id: str = Field(max_length=50)
+    messages: list[ChatMessage] = Field(max_length=50)  # max 50 messages in history
 
 
 class DesignChallengeResponse(BaseModel):
@@ -20,8 +22,8 @@ class DesignChallengeResponse(BaseModel):
 
 
 class AskRequest(BaseModel):
-    question: str
-    context_topic: str | None = None
+    question: str = Field(max_length=2000)
+    context_topic: str | None = Field(default=None, max_length=100)
 
 
 class AskResponse(BaseModel):

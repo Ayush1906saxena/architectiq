@@ -1,0 +1,151 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "staff",
+    "candidate_profile": "perfect",
+    "total_exchanges": 24,
+    "generation_id": "seed_332"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing platform like Uber or Lyft. We need to handle the full lifecycle: matching riders with drivers, real-time tracking, pricing, and safety. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me scope the design. What's our scale — concurrent riders and drivers, trips per day, geographic coverage? What vehicle types do we support — just standard rides, or also shared rides and premium? Do we need to handle surge pricing? What's the matching latency target — how fast should a rider get paired with a driver? Do we need trip scheduling (book for later) or only on-demand? And what safety features are in scope — driver verification, trip monitoring, emergency SOS?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scale", "vehicle_types", "surge_pricing", "matching_latency", "scheduling", "safety"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10 million concurrent drivers globally, 20 million concurrent riders, 15 million trips per day. Standard and premium rides. Yes to surge pricing. Matching within 10 seconds. On-demand only. Full safety suite. Let's focus on the technical architecture.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do some capacity math. 15M trips/day is about 175 trips/sec average, probably 500/sec at peak. 10M drivers sending location updates every 4 seconds = 2.5 million location updates per second. That's the highest throughput component. Each update is small — driver_id, lat, lng, timestamp, heading, speed — roughly 50 bytes. That's 125MB/sec of location data. For the location index, we need to efficiently answer 'find available drivers within 5km of this rider' at 500 queries/sec (one per trip request). The key challenge is that the index is constantly changing — drivers are moving every 4 seconds. This rules out static spatial indexes like R-trees which are expensive to update. I'd use a geospatial indexing system based on Google's S2 Geometry library.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "location_updates", "geospatial_indexing", "s2_geometry", "throughput_calculation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me more about S2 Geometry and how you'd use it for location indexing.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "s2_geometry" }
+    },
+    {
+      "role": "candidate",
+      "content": "S2 divides the Earth's surface into hierarchical cells. Each cell is identified by a 64-bit cell ID. At level 12, cells are roughly 3.3km x 3.3km. At level 14, they're about 800m x 800m. For our driver index, I'd use level 12 cells. Each driver's current S2 cell ID is computed from their lat/lng. The index is a hash map: S2_cell_id -> set of available drivers in that cell. When a rider requests a ride, we compute the rider's S2 cell ID and query the index for that cell plus all neighboring cells (8 neighbors), giving us a ~10km search radius. This is O(1) lookup per cell — no tree traversal. When a driver moves, we check if their S2 cell changed. If the driver moved within the same cell, no index update needed (saves a lot of writes). If they crossed into a new cell, we remove them from the old cell's set and add to the new one — two hash operations. I'd store this index in Redis using hash sets: key = cell:{s2_cell_id}, members = driver IDs. At level 12, there are about 7 million land cells on Earth, but most are empty. Only cells near active cities have entries. With 10M drivers, the average populated cell has a handful of drivers — memory is minimal.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["s2_geometry", "cell_hierarchy", "geospatial_indexing", "hash_index", "redis", "neighbor_search", "cell_change_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great. How does the matching algorithm work? Finding the nearest driver isn't always the best match.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "matching_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "Correct — nearest driver is greedy and suboptimal. Consider two riders R1 and R2, and two drivers D1 and D2. D1 is closest to R1, but if we assign D1 to R1, D2 is very far from R2, resulting in a long wait. If we'd assigned D1 to R2 instead, both riders get reasonable ETAs. This is a batch matching optimization problem. Every 2 seconds, I'd collect all pending ride requests and available drivers in a geographic region, and run a batch matching algorithm. The objective function minimizes the sum of ETAs across all matches, subject to constraints (vehicle type match, driver rating threshold, etc.). This is an assignment problem solvable by the Hungarian algorithm, but at scale (thousands of riders and drivers per batch in a large city), we need approximations. I'd use a greedy algorithm with local search: start with a nearest-driver greedy assignment, then iteratively swap pairs of assignments if the swap reduces total ETA. Run for a fixed time budget (say 100ms) and output the best assignment found. The batch window of 2 seconds adds a small delay but dramatically improves match quality. During high demand, the batch is larger and optimization is more impactful.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["batch_matching", "hungarian_algorithm", "greedy_with_local_search", "eta_optimization", "assignment_problem"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned ETA. How do you estimate the time for a driver to reach the rider?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "eta_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "ETA estimation is a critical system in its own right. The naive approach — Euclidean distance / average speed — is wildly inaccurate in cities with one-way streets, bridges, and traffic. I'd use a routing engine based on a road network graph. The graph has intersections as nodes and road segments as edges, with weights based on expected travel time. For real-time accuracy, edge weights incorporate live traffic data from our own drivers' GPS traces — millions of data points per minute telling us actual travel speeds on every road. The ETA service: given a driver location and rider location, find the shortest-time path using a modified Dijkstra's algorithm. For speed, we precompute hierarchical shortcuts using Contraction Hierarchies — this preprocessing reduces query time from seconds to milliseconds. The precomputed shortcuts are rebuilt every 15 minutes incorporating the latest traffic data. For the matching algorithm, we don't need exact ETAs — approximate ETAs are sufficient. I'd maintain a precomputed ETA matrix for each city: for every pair of S2 level-12 cells, the approximate drive time. This matrix is updated every 5 minutes from the routing engine. During matching, looking up the ETA between any two points is a simple cell-to-cell lookup — O(1), no routing computation needed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["eta_estimation", "road_network_graph", "contraction_hierarchies", "live_traffic", "precomputed_eta_matrix", "dijkstra"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the trip state machine — what states does a trip go through?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "trip_state_machine" }
+    },
+    {
+      "role": "candidate",
+      "content": "A trip goes through well-defined states. REQUESTED: rider submits a ride request. MATCHING: the system is searching for a driver (timeout after 30 seconds, return to CANCELLED). DRIVER_ASSIGNED: a driver accepted the match. We send both parties real-time updates. EN_ROUTE_TO_PICKUP: driver is driving to the rider. We share the driver's live location with the rider. The driver can cancel (penalty after repeated cancellations). ARRIVED_AT_PICKUP: driver arrives. A 5-minute timer starts — if the rider doesn't appear, the driver can cancel and collect a no-show fee. TRIP_IN_PROGRESS: rider is in the vehicle. We track the route in real time. The fare meter is running based on distance and time. This is also when safety monitoring is most critical. TRIP_COMPLETED: driver marks arrival at destination. The fare is calculated. Payment is processed. PAYMENT_PROCESSED: successfully charged. Rating prompts sent to both parties. Terminal state. Error branches: CANCELLED (by rider or driver, with different fee rules depending on timing), PAYMENT_FAILED (retry logic, then block rider from future requests until resolved), DISPUTED (rider contests the fare — goes to support queue). Each state transition emits an event to Kafka for downstream consumers: billing, analytics, safety monitoring, and driver payout calculation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["trip_state_machine", "state_transitions", "timeout_handling", "cancellation_fees", "fare_calculation", "event_emission", "payment_processing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does surge pricing work? How do you determine when and how much to surge?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing is fundamentally a supply-demand balancing mechanism. For each geographic zone (I'd use S2 level-10 cells, roughly 10km), I compute a supply-demand ratio every 30 seconds. Supply = number of available drivers in the zone. Demand = number of ride requests in the last 2 minutes, annualized to requests per hour. The surge multiplier is a function of the ratio: when demand/supply > 1, the multiplier increases. I'd use a piecewise linear function: ratio 1.0 = 1.0x (no surge), ratio 1.5 = 1.5x, ratio 2.0 = 2.0x, capped at 3.0x. But raw current demand is noisy. I'd add a prediction layer: a time-series model that predicts demand 15 minutes ahead based on historical patterns (Friday night in downtown = high demand), current trends, weather (rain increases demand by 30-50%), and events (concert ending at 11 PM at this venue). The predicted demand feeds into the surge calculation, making pricing proactive rather than purely reactive. This smooths out price spikes and gives drivers time to reposition. Importantly, the surge multiplier is shown to the rider before they confirm — they can wait for the surge to drop. We also show drivers a heat map of surging areas to incentivize them to drive there, naturally increasing supply.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_pricing", "supply_demand", "demand_prediction", "time_series_model", "surge_cap", "driver_heat_map", "price_transparency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does real-time trip tracking work — both for the rider watching the driver approach, and for backend safety monitoring?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "real_time_tracking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Real-time tracking uses WebSocket connections. The rider's app maintains a WebSocket to a Trip Tracking Service. When the driver sends a location update (every 4 seconds), the Location Service publishes to a Kafka topic partitioned by city. The Trip Tracking Service consumes relevant events and pushes the driver's position to the rider's WebSocket. For the map animation on the rider's phone to be smooth, we interpolate between the 4-second GPS updates — the client-side animation moves the driver icon along the road at estimated speed. The driver's route is also tracked against the expected route from our routing engine. If the driver deviates significantly — say, more than 500m from the expected path for more than 60 seconds — we flag this for the safety system. For backend safety monitoring, we run a streaming pipeline that analyzes trip data in real time. Key signals: unexpected stops (car stopped for >3 minutes mid-trip), speed anomalies (>40% above posted speed limit), route deviation, trip taking significantly longer than expected ETA. These feed into an ML anomaly detection model that scores each trip's risk level. High-risk trips trigger alerts to our safety operations team, who can contact the rider, contact the driver, or involve emergency services.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket_tracking", "location_streaming", "client_interpolation", "route_deviation", "safety_monitoring", "anomaly_detection", "real_time_pipeline"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about the safety pipeline in more detail. What other safety features would you build?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "safety" }
+    },
+    {
+      "role": "candidate",
+      "content": "Safety is multi-layered. Pre-trip: driver background checks (criminal records, driving history) at onboarding and annually. Vehicle inspection verification. Real-time identity verification — periodically ask the driver to take a selfie that's compared against their profile photo using facial recognition to detect account sharing. During trip: the anomaly detection I described. Plus a rider-facing SOS button that, when pressed, alerts our safety team with the trip ID, live location, and opens a phone call to 911. The rider can also share their trip in real-time with trusted contacts — a separate read-only WebSocket stream of the trip location. Post-trip: both parties rate each other. Drivers below 4.6 stars are flagged for review. Riders can report safety concerns, which are escalated based on severity. ML classifiers analyze trip patterns for systemic issues — e.g., a driver who consistently takes longer routes for female passengers might be flagging a subtle safety concern that individual trip reports wouldn't catch. Data retention: trip GPS traces are stored for 30 days for dispute resolution and up to 7 years for safety investigations, anonymized after the active period.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["background_checks", "identity_verification", "sos_button", "trip_sharing", "rating_system", "pattern_detection", "data_retention"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What are the key failure scenarios and how do you handle them?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three critical failure scenarios. First, Location Service goes down. Without location updates, matching is blind. Mitigation: the driver app caches the last known location locally and continues sending updates when the service recovers. The matching service falls back to the last known driver positions (stale but better than nothing), with an expanded search radius to account for driver movement during the outage. Active trips continue — the trip state machine doesn't depend on continuous location updates. Second, Matching Service goes down. Riders can't get matched. Mitigation: degrade to a simple nearest-driver algorithm running on a backup service with the cached location index. It's suboptimal (no batch optimization) but functional. Third, Payment Service goes down. Rides can still happen — we never block a trip completion on payment. The fare is calculated and stored, and payment is retried asynchronously. Drivers are paid from a reserve fund during the outage, and settlement catches up when payment recovers. We alert if unpaid fares exceed a threshold. Across all services, I'd run multi-region active-active with per-city routing — a city's traffic stays within its region. If a region fails, we can redirect that city's traffic to another region with a cold start penalty of a few minutes while caches warm up.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["location_service_failure", "matching_degradation", "payment_resilience", "async_payment", "multi_region", "per_city_routing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Anything else to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few important additions. First, driver payout calculation — a separate ledger service tracks earnings per trip including base fare, surge bonus, tips, and deductions (platform commission, tolls). Weekly payouts via ACH with itemized statements. Second, regulatory compliance — different cities have different rules (driver rest requirements, maximum surge caps, data residency). I'd build a rules engine per city that the trip state machine consults. Third, offline-capable driver app — in areas with poor connectivity, the driver app should queue location updates locally and batch-send when connectivity returns. The trip can continue even during brief connectivity gaps. Fourth, load shedding during extreme peaks (New Year's Eve midnight) — if the system is overwhelmed, we'd prefer to serve fewer requests well than serve all requests poorly. Queue requests by priority (safety-related > active trips > new requests) and shed lowest priority first.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["driver_payouts", "regulatory_compliance", "offline_support", "load_shedding", "priority_queuing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Outstanding interview. Your S2 geometry indexing, batch matching optimization, surge pricing with demand prediction, and safety pipeline were all exceptional. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 87,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 9,
+      "api_design": 8,
+      "database_design": 9,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 10
+    },
+    "strengths": [
+      "S2 Geometry-based location indexing with cell-level optimization to minimize index updates",
+      "Batch matching with greedy + local search — understood why nearest-driver is suboptimal",
+      "ETA estimation using Contraction Hierarchies with precomputed cell-to-cell matrix for matching",
+      "Surge pricing with demand prediction model incorporating weather, events, and historical patterns",
+      "Comprehensive safety pipeline with real-time anomaly detection and pattern analysis across trips"
+    ],
+    "weaknesses": [
+      "Could have discussed map tile serving and client-side rendering architecture",
+      "Didn't elaborate on data partitioning strategy for the trip database or driver earnings ledger"
+    ]
+  }
+}

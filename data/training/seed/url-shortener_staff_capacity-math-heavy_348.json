@@ -1,0 +1,179 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "staff",
+    "candidate_profile": "capacity-math-heavy",
+    "total_exchanges": 22,
+    "generation_id": "seed_348"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service like bit.ly. I'd like you to focus heavily on capacity planning and numbers. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Absolutely. Before I start estimating, I need to nail down the requirements. What's our target scale — daily active users and URL creation rate? What's the read-to-write ratio? What's our data retention policy — do URLs expire? And are we targeting a specific geography or is this global?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "read_write_ratio", "data_retention", "geo_distribution"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Assume 200 million new URLs per day, 200:1 read-to-write ratio. URLs are retained for 10 years. Global service. Go ahead with your capacity math.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me break this down methodically. Starting with writes: 200M URLs/day. There are 86,400 seconds in a day, so 200,000,000 / 86,400 = ~2,315 writes per second. At peak, assuming 3x average, that's ~6,945 writes/sec. For reads: 200:1 ratio gives us 2,315 * 200 = 463,000 reads per second average. At peak (3x), that's ~1.39 million reads per second. That's a significant read load.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "peak_traffic"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good start. Now walk me through storage estimation in detail.",
+      "annotation": { "action": "probe", "phase": "capacity_estimation", "target_concept": "storage_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Let me size each record first. A URL mapping record contains: short_code (7 bytes), original_url (average 200 bytes), creation_timestamp (8 bytes), expiry_timestamp (8 bytes), user_id (8 bytes), click_count (4 bytes), and metadata overhead (let's say 65 bytes for indexes and row overhead). Total per record: ~300 bytes. Daily storage: 200M * 300 bytes = 60 GB/day. Annual storage: 60 GB * 365 = 21.9 TB/year. Over 10 years: 219 TB of raw data. With replication factor of 3, that's 657 TB of total storage. That's about 730 billion records total over 10 years.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["storage_estimation", "replication_factor", "data_retention"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What about bandwidth estimation?",
+      "annotation": { "action": "probe", "phase": "capacity_estimation", "target_concept": "bandwidth_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "For write bandwidth: each incoming request carries roughly 250 bytes (URL + headers), so 2,315 writes/sec * 250 bytes = ~579 KB/s inbound for writes. The response is about 100 bytes, so 231 KB/s outbound for write responses. For read bandwidth: each redirect request is tiny, maybe 50 bytes inbound. But the response includes HTTP redirect headers — about 300 bytes including the Location header with the full URL. So reads: inbound is 463,000 * 50 bytes = ~23.15 MB/s. Outbound is 463,000 * 300 bytes = ~138.9 MB/s average, or ~417 MB/s at peak. That's about 3.3 Gbps peak outbound bandwidth. We need network infrastructure that can handle at least 5 Gbps to have headroom.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["bandwidth_estimation", "network_capacity", "peak_traffic"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent detail. Now let's talk about cache sizing. Walk me through that math.",
+      "annotation": { "action": "deepen", "phase": "capacity_estimation", "target_concept": "redis_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll use the Pareto principle — 20% of URLs generate 80% of traffic. Daily unique URLs accessed: let's assume 30% of all URLs are accessed on any given day. Over 10 years we have 730 billion records, so daily active set is about 219 billion * 0.3... actually, that's too large. Let me think differently. Daily reads are 200M * 200 = 40 billion reads, but many are to the same URL. If the top 20% of today's created URLs plus historically popular ones make up the hot set, I'd estimate the working set at about 200 million URLs. At 300 bytes each, that's 60 GB. With Redis overhead (pointers, hash table entries — roughly 100 bytes overhead per key), total is 200M * 400 bytes = 80 GB. I'd deploy a Redis cluster with 4 nodes, each with 32 GB RAM, giving 128 GB total with room for growth. Cache hit ratio target: 95%+.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "cache_sizing", "cache_hit_ratio", "pareto_principle"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now I want you to think about connection pool sizing for the application servers. How do you determine that?",
+      "annotation": { "action": "deepen", "phase": "capacity_estimation", "target_concept": "connection_pool" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a critical tuning parameter. Let me think through it. Our peak write QPS is ~7K and peak read QPS that misses cache (5% miss rate) is 1.39M * 0.05 = ~69,500 DB queries/sec at peak. Assume average DB query latency of 2ms. Using Little's Law: concurrent connections = throughput * latency = 69,500 * 0.002 = 139 concurrent connections needed for reads. Plus writes: 6,945 * 0.002 = ~14 concurrent connections. Total: ~153 concurrent DB connections at peak. If we have 20 application servers, that's about 8 connections per server for the pool. I'd set the pool to min=4, max=15 per server, giving a max of 300 total connections across all servers. PostgreSQL's default max_connections is 100, so we'd need to increase that to at least 350 (with some buffer) or put PgBouncer in front for connection multiplexing.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["connection_pool", "littles_law", "pgbouncer", "database_tuning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great use of Little's Law. How about thread count for the application servers?",
+      "annotation": { "action": "deepen", "phase": "capacity_estimation", "target_concept": "thread_sizing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right. Total peak QPS hitting app servers is ~1.39M reads/sec + ~7K writes/sec = ~1.397M requests/sec. With 20 app servers, each handles ~69,850 req/sec. Average request processing time: cache hit path is about 1ms, cache miss path is about 5ms. Weighted average with 95% hit rate: 0.95*1 + 0.05*5 = 1.2ms per request. Using Little's Law again: concurrent requests per server = 69,850 * 0.0012 = ~84 concurrent requests. So each server needs at least 84 threads. I'd set thread pool size to 150 to handle bursts and tail latency. With 150 threads, each needing about 1MB of stack space, that's 150 MB of thread stack memory per server — totally fine. If we used async I/O (like Netty or Go goroutines), we could handle this with far fewer OS threads, maybe 4-8 per core on 16-core machines.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["thread_sizing", "littles_law", "async_io", "concurrency_model"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let me push back on the 20 application servers. How did you arrive at that number?",
+      "annotation": { "action": "challenge", "phase": "capacity_estimation", "target_concept": "server_sizing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fair question — let me derive it properly instead of assuming. A typical application server (say 16-core, 32GB RAM) running a well-optimized Java/Go service can handle about 50K-100K simple requests per second for lightweight operations like our redirect. Let's be conservative and say 75K req/sec per server. Total peak load: 1.397M req/sec. Servers needed: 1,397,000 / 75,000 = ~18.6 servers. Rounding up to 20 for redundancy — if we lose 2 servers, the remaining 18 can still handle the load. For writes specifically, each server handles 7,000/20 = 350 writes/sec, which is trivial. I'd actually provision 24 servers total — 20 active plus 4 in standby — to handle rolling deployments and unexpected failures without degraded performance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["server_sizing", "redundancy", "capacity_planning", "rolling_deployment"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Very thorough. Now let's talk about the database sharding given the 730 billion records over 10 years. How would you shard?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "With 730 billion records and 219 TB of raw data, we need significant sharding. I'd use hash-based sharding on the short_code. Let me size the shards: a single PostgreSQL instance comfortably handles 1-2 TB of data with good performance. Targeting 1.5 TB per shard: 219 TB / 1.5 TB = 146 shards. I'd round up to 256 (power of 2 for easy hash partitioning). Each shard holds about 855 GB and ~2.85 billion records. With replication factor 3, that's 768 total database instances. For the hash function, take the first 2 characters of the base62 short_code — 62^2 = 3,844 possible values — and map to 256 shards using modulo. This gives even distribution.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_strategy", "hash_partitioning", "database_sizing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "768 database instances is expensive. Any way to reduce that?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "cost_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Absolutely. Several strategies. First, cold storage tiering: URLs older than 2 years with zero clicks in the last 6 months can be moved to cheaper storage — like S3 with a DynamoDB index for lookups. That could move 60-70% of data off PostgreSQL. Second, we could use larger instances — with modern SSDs, a PostgreSQL instance can handle 5-10 TB if the working set fits in memory. Using 5 TB per shard: 219 TB / 5 TB = 44 shards, times 3 replicas = 132 instances. Third, compress the original_url field — URLs have high redundancy (common prefixes like https://www.), achieving 40-50% compression. That brings raw storage from 219 TB down to about 140 TB. Combined: maybe 60-80 database instances total, which is much more reasonable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cost_optimization", "data_tiering", "compression", "storage_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good optimization thinking. Let's talk about the load balancer layer. How do you size that?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "load_balancer_sizing" }
+    },
+    {
+      "role": "candidate",
+      "content": "At peak, we're handling 1.39M HTTP requests per second. A modern L7 load balancer (like an Nginx instance on a 16-core machine) can handle roughly 200K-400K HTTP requests per second for simple routing. At 300K per LB: 1,390,000 / 300,000 = ~4.6, so 5 active load balancers. I'd deploy them behind DNS round-robin or a network load balancer (L4). For bandwidth, each LB sees about 417 MB/s / 5 = ~83 MB/s outbound, well within a 1 Gbps NIC. But I'd use 10 Gbps NICs for headroom. Each LB needs to maintain connections to all 24 app servers — 24 persistent connections with keep-alive, multiplexed. Memory footprint: ~10KB per active connection * 278K concurrent connections (1.39M * 0.001s avg) / 5 LBs = 556K connections per LB * 10KB = 5.6 GB RAM per LB. 16 GB machines are sufficient.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["load_balancer_sizing", "network_capacity", "connection_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've covered the capacity math very well. Let me shift gears — what about failure handling at this scale?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "At this scale, failures are certain. Let me quantify the impact. If one of our 256 database shards goes down, we lose 1/256 = 0.39% of reads that miss cache. With 95% cache hit rate, only 0.05 * 0.0039 = 0.0195% of total requests are affected. With replication, the read replica takes over — failover time of 10-30 seconds using something like Patroni. If a Redis node dies (1 of 4), we lose ~25% of cache capacity. Cache hit rate drops from 95% to maybe 70% temporarily. DB load jumps from 69,500 to 69,500 * (0.30/0.05) = ~417,000 queries/sec. That exceeds our DB capacity of ~300K QPS (768 instances * ~400 QPS per instance). We'd need circuit breakers to shed load and serve stale data from local caches until Redis recovers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["failure_handling", "cache_failure", "database_failover", "circuit_breaker", "blast_radius"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a sharp analysis of the failure cascade. What about the total cost estimate for this infrastructure?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "cost_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me estimate monthly cloud costs. Application servers: 24 x c5.4xlarge (16 vCPU, 32GB) at ~$490/month = $11,760. Redis cluster: 4 x r5.2xlarge (8 vCPU, 64GB) at ~$360/month = $1,440. Database: let's use the optimized estimate of 80 instances, say db.r5.2xlarge at ~$520/month = $41,600. Load balancers: 5 x c5.4xlarge at ~$490/month = $2,450. Storage (SSD): 140 TB at ~$0.10/GB/month = $14,000. S3 for cold data: ~200 TB at $0.023/GB = $4,600. Bandwidth: 417 MB/s peak → assuming 200 MB/s average → ~500 TB/month at $0.05/GB = $25,000. Total monthly: roughly $100,850. So about $1.2M per year. That's about $0.0000014 per redirect — very cost-effective at scale.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cost_estimation", "cloud_pricing", "cost_per_request"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's the most thorough capacity estimation I've heard. Anything you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few additions. I'd build auto-scaling into the application tier: scale from 20 to 40 servers based on CPU utilization > 70% to handle unpredictable spikes like viral links. I'd also set up capacity monitoring dashboards tracking QPS per shard, cache hit ratios, connection pool utilization, and P99 latency — with alerts when any metric exceeds 80% of capacity. For the database, I'd plan a resharding strategy when any shard exceeds 80% of its target size. And I'd maintain a capacity model spreadsheet that gets updated quarterly with actual vs projected numbers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["auto_scaling", "monitoring", "capacity_planning", "alerting"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. Really strong capacity planning throughout. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 80,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 10,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 9,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional capacity math — derived every number from first principles with step-by-step reasoning",
+      "Used Little's Law correctly for connection pool and thread sizing",
+      "Provided concrete cost estimation tying infrastructure to dollars"
+    ],
+    "weaknesses": [
+      "API design was not covered — went deep on numbers but skipped the interface",
+      "Could have discussed geographic distribution and multi-region capacity"
+    ]
+  }
+}

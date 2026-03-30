@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "senior",
+    "candidate_profile": "ex-cdn-engineer",
+    "total_exchanges": 22,
+    "generation_id": "seed_384"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a video streaming platform like Netflix or YouTube. It should support uploading, processing, and streaming video to millions of users. Where would you start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I worked at a CDN company for five years, so I have strong opinions about the delivery side. Before anything: what's the content model? Live streaming, on-demand, or both? This changes the caching and delivery architecture fundamentally. Also, what geographic coverage? And what quality targets — are we doing 4K, HDR?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn", "content_delivery", "live_vs_vod", "geographic_distribution"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "On-demand video. Global coverage — North America, Europe, Asia. Up to 4K. 100 million daily active viewers, 100,000 new videos uploaded per day. Average viewing session: 30 minutes.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do the delivery math because that's where the real engineering challenge is. 100M viewers, 30 minutes average session. Average bitrate for adaptive streaming: let's say 5 Mbps average across quality levels (720p to 4K). Peak concurrent viewers — assume 20% of DAU are watching simultaneously: 20 million. Bandwidth: 20M * 5 Mbps = 100 Tbps aggregate. That's enormous. For reference, Akamai's total global capacity is about 300 Tbps. We need CDN-scale infrastructure. Total daily egress: 100M * 30 min * 60 sec * 5 Mbps / 8 = about 11 exabytes per day... let me recheck. Actually 100M * 1800 seconds * 5 Mbps = 900 Tbps-seconds = about 112 petabytes per day. At $0.02/GB for CDN egress, that's $2.2 million per day in bandwidth alone. This is the most expensive part of the system by far.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "bandwidth_calculation", "cdn_cost", "concurrent_viewers"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great bandwidth estimation. Walk me through the overall architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two major pipelines. Upload/Processing Pipeline: Creator uploads raw video via resumable upload to object storage (S3). A transcoding service converts it into multiple quality levels (360p through 4K) using adaptive bitrate encoding. Each quality level is segmented into 4-6 second chunks for HLS or DASH delivery. Metadata and manifests are stored in a database. Delivery Pipeline — this is my area: When a viewer hits play, the client requests the video manifest from our API. The manifest contains URLs for each quality level's segments, pointing to our CDN edge servers. The CDN is a multi-tier cache hierarchy: edge POPs close to users, regional mid-tier caches, and the origin storage. Let me go deep on the CDN architecture because that's what I know best.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["transcoding", "adaptive_bitrate", "hls", "cdn", "cache_hierarchy", "resumable_upload"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes, please go deep on the CDN architecture.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "cdn_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three-tier cache hierarchy. Tier 1 — Edge POPs: 200+ Points of Presence worldwide, placed in ISP data centers or Internet Exchange Points (IXPs). Each POP has 20-100 cache servers with 50-100TB of SSD storage. Uses anycast routing — all POPs announce the same IP prefix via BGP. When a user's DNS resolves our domain, their ISP's BGP routing sends them to the nearest POP. Within a POP, an L4 load balancer (ECMP-based, not a proxy) distributes requests across cache servers using consistent hashing on the URL. This ensures the same content lands on the same server, maximizing cache efficiency. Tier 2 — Regional Shields: 10-20 regional cache clusters. When an edge POP has a cache miss, it doesn't go to origin — it goes to the regional shield. This is called 'origin shielding' and it's critical for protecting the origin from thundering herd. Without shields, a popular new video could trigger 200 simultaneous origin fetches from every POP. With shields, each region makes one origin fetch, caches it, and serves all edge POPs in that region. Tier 3 — Origin: S3 or a dedicated object store. Only handles the initial fill for each segment. At steady state, origin traffic is minimal.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_architecture", "edge_pop", "anycast_routing", "bgp", "origin_shielding", "consistent_hashing", "cache_hierarchy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the edge server decide whether to serve from cache or fetch from the shield?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "cache_logic" }
+    },
+    {
+      "role": "candidate",
+      "content": "Standard HTTP cache semantics with video-specific optimizations. Each video segment has a Cache-Control header with a long TTL — typically max-age=31536000 (1 year) since video segments are immutable once transcoded. The cache key is the full URL: /video/{video_id}/quality/{quality_level}/segment/{segment_number}. Cache lookup is O(1) via a hash index stored in shared memory. On cache miss: the edge server sends a request to the regional shield. But here's a critical optimization — request coalescing (we called it 'collapsed forwarding'). If 100 viewers request the same segment within a few hundred milliseconds (a hot new video), the edge server sends ONE request to the shield and holds the other 99 requests in a wait queue. When the shield responds, all 100 requests are served from the single fetched copy. Without request coalescing, a viral video launch would DDoS our own origin. Another optimization: hot content detection. We track request rate per content ID at the edge. When a video crosses a threshold (say 100 requests/second at one POP), we pre-warm it across all other POPs proactively. This reduces cache miss rate for content that's going viral.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_control", "request_coalescing", "hot_content_detection", "cache_warming", "cache_key_design"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about TLS? HTTPS adds overhead for video delivery at this scale.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "tls_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "TLS is non-negotiable — all traffic must be encrypted. But the overhead is manageable with proper optimization. TLS offloading happens at the edge — the edge server terminates TLS, and internal traffic between tiers is either plaintext (in private networks) or uses session-level TLS with long-lived connections. For the TLS handshake: we use TLS 1.3 which reduces the handshake to 1-RTT (one round trip). With 0-RTT resumption, repeat visitors skip the handshake entirely — the client sends encrypted data in the first packet. Session tickets are shared across all servers in a POP using a shared key store (encrypted in memory). Cipher suite: AES-128-GCM — modern CPUs have AES-NI hardware acceleration, so encryption/decryption adds less than 2% CPU overhead. At 100 Gbps per edge server, TLS encryption consumes about 2 CPU cores — negligible. OCSP stapling eliminates the client's need to check certificate revocation separately. Certificate management: wildcard certs for our domain, rotated quarterly, distributed to all POPs via a secure config push system.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tls_offloading", "tls_1_3", "zero_rtt", "aes_ni", "ocsp_stapling", "certificate_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the adaptive bitrate streaming. How does the client decide which quality level to request?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "adaptive_bitrate" }
+    },
+    {
+      "role": "candidate",
+      "content": "Adaptive bitrate (ABR) is client-side logic. The standard algorithm — used in hls.js and dash.js — monitors two signals: estimated bandwidth (based on segment download speed) and buffer level (how many seconds of video are pre-buffered). Basic approach: if estimated bandwidth is 8 Mbps and the 1080p stream is 5 Mbps, select 1080p. If bandwidth drops to 3 Mbps, drop to 720p (2.5 Mbps). Always leave headroom — select a quality whose bitrate is at most 70% of estimated bandwidth to handle fluctuations. More sophisticated: buffer-based algorithms. If buffer is above 30 seconds, be aggressive — try higher quality. If buffer is below 10 seconds, be conservative — drop quality to avoid rebuffering. The key metric for video QoE: rebuffering ratio (time spent buffering / total session time). Industry target is under 0.5%. From a CDN perspective, ABR creates a beneficial caching pattern. The popular quality levels (720p and 1080p) are requested most often, so they have higher cache hit rates. 4K segments are requested less frequently, so they have lower cache hit rates — but that's fine because 4K viewers are more likely to have fast, stable connections.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["adaptive_bitrate", "abr_algorithm", "buffer_management", "rebuffering", "qoe_metrics"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the transcoding pipeline? 100,000 videos per day needs significant processing.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "transcoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Transcoding isn't my deepest area, but I understand the architecture. Each uploaded video enters a processing queue (SQS or Kafka). Workers pull videos and transcode using FFmpeg into multiple quality levels. For a 10-minute video, producing 6 quality levels (360p, 480p, 720p, 1080p, 1440p, 4K) takes maybe 15-30 minutes on a GPU-equipped instance (NVENC encoding). With 100K videos/day — about 1.2 videos/second — we need maybe 20-30 GPU instances running continuously. A cost optimization: per-title encoding. Instead of fixed bitrate ladders, analyze the content complexity first. An animated show compresses much better than a live sports broadcast. Netflix published research showing per-title encoding saves 20% bandwidth with equivalent quality. I'd implement a simpler version: categorize videos into complexity tiers and use different bitrate ladders per tier.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["transcoding", "ffmpeg", "gpu_encoding", "per_title_encoding", "bitrate_ladder"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when an edge POP goes down? How does traffic reroute?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "pop_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "POP failures are routine in CDN operations — we'd see 2-3 per month across 200 POPs. The recovery is automatic via BGP and health checks. Each POP runs a health check daemon that monitors local cache server health. If more than 50% of cache servers in a POP are unhealthy, the POP withdraws its BGP announcement — it stops advertising itself to the internet. Within 30-90 seconds (BGP convergence time), ISP routers update their tables and traffic shifts to the next nearest POP. For partial failures — say 30% of servers in a POP die — the POP stays active but the internal load balancer removes dead servers. The consistent hashing ring rebalances, and the remaining servers absorb the load. Cache hit rate temporarily drops because data on dead servers is lost, but it recovers within minutes as popular content is re-fetched. We also maintain real-time DNS-based traffic steering. Our authoritative DNS server monitors POP health and adjusts DNS responses to steer traffic away from degraded POPs. This is faster than BGP withdrawal — DNS TTL is 60 seconds. The two mechanisms work together: DNS for fast initial steering, BGP for definitive rerouting.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["bgp_failover", "health_checks", "dns_steering", "pop_failure", "consistent_hashing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle a 'flash crowd' — a massively popular video getting millions of simultaneous views at launch?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "flash_crowd" }
+    },
+    {
+      "role": "candidate",
+      "content": "Flash crowds are the defining challenge of CDN engineering. Say a major artist drops a new music video — 10 million viewers in the first 5 minutes. The problem: no edge POP has cached the content yet. Without mitigation, all 10M requests cascade to origin simultaneously. Defense layers: First, pre-warming. If we know about a high-profile launch (scheduled premiere), we proactively push the first few minutes of content to all edge POPs before launch. This eliminates cold-cache misses entirely. Second, request coalescing at every tier. Edge misses go to shield, but only one request per segment per POP. Shield misses go to origin, but only one request per segment per shield. So the origin sees at most 10-20 requests per segment (one per shield region), not millions. Third, buffer management at the client. HLS/DASH clients request segments sequentially. Even if segment 1 is slow due to a cache miss, by the time the viewer watches segment 1 (4-6 seconds), segments 2-5 have been fetched and cached. The cache self-heats within seconds. Fourth, overflow to partner CDNs. We maintain agreements with 2-3 other CDN providers. If our capacity in a region is exhausted, our DNS steering sends overflow traffic to the partner CDN. This is called multi-CDN and it's how Netflix handles major launches.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["flash_crowd", "pre_warming", "request_coalescing", "multi_cdn", "cache_heating"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you protect against video piracy and content theft?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "drm" }
+    },
+    {
+      "role": "candidate",
+      "content": "Content protection has two components from a CDN perspective. Signed URLs: every segment URL includes a token with an expiration timestamp and viewer-specific hash. The edge server validates the token before serving. This prevents URL sharing — a URL extracted from one viewer's session won't work for another. The token is generated by our API when the viewer starts playback, using HMAC with a shared secret between API and edge servers. DRM: for premium content, each segment is encrypted using AES-128 (for HLS) or CENC (for DASH). The decryption key is obtained by the player from a license server (Widevine, FairPlay, or PlayReady depending on platform). The CDN serves encrypted segments — even if intercepted, they're useless without the license. The CDN's role in DRM is simple: serve encrypted bytes. The complexity is in the license server, which I'm less expert on. From a CDN perspective, DRM-encrypted content caches identically to unencrypted content — the edge server doesn't need the decryption key.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["signed_urls", "drm", "content_encryption", "license_server", "hmac"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're wrapping up. What aspects of this system would you want to improve given more time?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three areas. First, I didn't discuss the metadata and search system — how users discover videos. The recommendation engine and search indexing are massive systems in themselves that I'd want to detail. Second, the upload and transcoding pipeline was high-level — I'd want to discuss chunked parallel transcoding, quality assurance checks, and the notification flow when a video is ready. Third, I want to mention one CDN trend: moving compute to the edge. Instead of just caching static segments, run lightweight video personalization at the edge — ad insertion, subtitle overlay, thumbnail generation. This reduces round trips to origin and enables personalized experiences at CDN scale. Cloudflare Workers and Fastly Compute@Edge are enabling this, and I think it's the future of video delivery.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["recommendation_engine", "edge_computing", "serverless_edge", "video_personalization"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Your CDN expertise is exceptional — the depth on anycast, origin shielding, TLS optimization, and flash crowd handling was outstanding. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 9,
+      "api_design": 6,
+      "database_design": 5,
+      "caching_strategy": 10,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional CDN architecture depth — anycast routing, POP design, cache hierarchy, origin shielding, TLS offloading",
+      "Outstanding flash crowd and hot content handling with multi-layer defense strategy",
+      "Strong bandwidth and cost estimation with real-world CDN pricing knowledge"
+    ],
+    "weaknesses": [
+      "Database design for video metadata was not discussed at all",
+      "API design for upload and playback endpoints was missing",
+      "Transcoding pipeline was surface-level — acknowledged as outside primary expertise"
+    ]
+  }
+}

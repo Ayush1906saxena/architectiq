@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "sde2",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_448"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing service like Uber. Users request rides, drivers accept them, and the system matches them in real time. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several questions. What's the scale — how many rides per day, how many active drivers? Do we need to support ride types — like pool, regular, and premium? What geography — single city or multi-city? And what's our matching latency target — how fast should a rider see 'driver assigned' after requesting?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scale", "ride_types", "geography", "matching_latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10 million rides per day, 2 million active drivers, single ride type for now, multi-city (50 cities), and matching should happen within 10 seconds. Anything else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Do we need to compute ETA — estimated time of arrival for both driver pickup and trip duration? And how do we handle pricing — fixed fare or dynamic surge pricing? Also, do drivers need to accept the ride, or is it auto-assigned?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["eta", "pricing", "surge_pricing", "driver_acceptance"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes to ETA for both. Dynamic pricing based on supply and demand. Drivers must accept within 30 seconds or the ride gets reassigned. Great questions — let's design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do some quick math. 10M rides per day is about 115 rides per second on average. But rides are concentrated in rush hours — maybe 4x peak, so around 460 rides per second at peak. With 2M drivers, most are active during peak hours — say 500K drivers online at any given time, each sending location updates every 5 seconds. That's 100K location updates per second. This is a write-heavy, real-time system.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "peak_traffic", "location_updates", "write_throughput"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. Walk me through the high-level architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "I see several core services. Rider Service: handles ride requests, fare estimates, and ride status for the rider app. Driver Service: handles driver availability, location updates, and ride offers for the driver app. Matching Service: the brain — takes ride requests, finds nearby available drivers, and matches them. Location Service: ingests and stores real-time driver locations, supports geospatial queries like 'find all available drivers within 3km of this point.' Trip Service: manages the trip lifecycle — from match confirmed through pickup, in-progress, and completed. Handles state transitions. Pricing Service: computes fares based on distance, time, and demand multiplier. The flow: rider requests a ride → Rider Service sends to Matching Service → Matching queries Location Service for nearby drivers → Matching picks the best driver → sends offer to Driver Service → driver accepts → Trip Service creates the trip → both rider and driver see real-time tracking.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["service_decomposition", "matching_service", "location_service", "trip_service", "pricing_service", "request_flow"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's dig into the Location Service. 100K updates per second with geospatial queries. How would you store and query driver locations?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "geospatial_indexing" }
+    },
+    {
+      "role": "candidate",
+      "content": "For geospatial queries, I'd use geohashing. Geohash divides the world into a grid of cells. Each cell has a string identifier — longer strings mean smaller cells. A geohash of length 6 is roughly a 1km × 1km cell. When a driver sends a location update, we compute their geohash and store it in a hash map: geohash → set of driver IDs. This is kept in-memory in Redis for speed. When we need drivers near a rider, we compute the rider's geohash and also check the 8 neighboring cells (to handle edge cases near cell boundaries). We pull all drivers from those 9 cells, compute exact distances, filter by radius, and sort by proximity. At 100K updates per second, Redis handles this easily — each update is a GEOADD or a hash set operation. The reads for matching — 460 per second at peak — are trivial.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geohashing", "geospatial_indexing", "redis", "neighboring_cells", "proximity_query"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. You mentioned Redis — what happens if the Redis instance crashes? You lose all driver locations.",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "location_availability" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good point. Driver locations are ephemeral — they change every 5 seconds — so we don't need durable storage. But we do need availability. I'd run a Redis cluster with replication. If the primary fails, a replica promotes automatically. During the failover (a few seconds), incoming location updates would be buffered or dropped — and that's okay because within 5 seconds, drivers send fresh locations. The location data is self-healing. For extra resilience, we could partition by city — each city has its own Redis instance. A failure in the NYC location service doesn't affect SF. This also helps with data locality.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_cluster", "replication", "self_healing_data", "city_partitioning", "data_locality"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Smart observation about the self-healing nature. Let's talk about the Matching Service. How do you pick the best driver for a ride request?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "driver_matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "The simplest approach: find the nearest available driver by straight-line distance. But that's not ideal — a driver 500m away across a river might take 15 minutes, while a driver 1km away on the same road takes 3 minutes. So we should match by ETA, not distance. The matching flow: query Location Service for all available drivers within, say, a 5km radius. For each candidate driver, call a routing service (or use precomputed road-network distances) to estimate the ETA to the rider's pickup point. Rank by ETA, and offer the ride to the driver with the shortest ETA. If that driver doesn't accept within 30 seconds, offer to the next one. One optimization: we don't need exact ETAs for all candidates. We can use straight-line distance as a rough filter to get the top 10 candidates, then compute road-network ETA only for those 10. This keeps the routing API calls manageable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["eta_based_matching", "road_network_distance", "two_stage_filter", "driver_ranking", "routing_service"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the trip lifecycle? A lot can go wrong between 'ride requested' and 'ride completed.'",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "trip_state_machine" }
+    },
+    {
+      "role": "candidate",
+      "content": "The trip is a state machine with these states: REQUESTED → MATCHING → DRIVER_ASSIGNED → DRIVER_EN_ROUTE → ARRIVED_AT_PICKUP → TRIP_IN_PROGRESS → COMPLETED. Plus failure states: CANCELLED_BY_RIDER, CANCELLED_BY_DRIVER, NO_DRIVERS_AVAILABLE, DRIVER_TIMEOUT. Each state transition is persisted to a database — I'd use PostgreSQL with a trips table. Key fields: trip_id, rider_id, driver_id, status, pickup_location, dropoff_location, fare_estimate, actual_fare, timestamps for each state transition. State transitions must be validated — you can't go from REQUESTED directly to COMPLETED, or cancel a trip that's already in progress (well, you can, but there's a different cancellation fee logic). The Trip Service enforces these rules.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["state_machine", "trip_states", "failure_states", "state_persistence", "transition_validation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about pricing? You said dynamic pricing. How does surge pricing work?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing adjusts the fare multiplier based on supply and demand in an area. The Pricing Service monitors two signals per zone: the number of ride requests (demand) and the number of available drivers (supply). If demand outstrips supply — say, 50 ride requests in a zone but only 10 available drivers — we apply a surge multiplier, maybe 2x. This serves two purposes: it discourages low-priority riders (reducing demand) and incentivizes more drivers to go to that zone (increasing supply). Implementation: divide each city into zones — could use the same geohash grid. Every 60 seconds, compute the supply-demand ratio per zone. Map the ratio to a multiplier using a predefined curve. The fare for a new ride request is base_fare × distance_component × time_component × surge_multiplier. The surge multiplier is locked in at request time — it won't change mid-ride.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_pricing", "supply_demand", "zone_based_pricing", "fare_formula", "price_locking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if the rider's phone loses connection during the trip? Or the driver's app crashes?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "connectivity_failures" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the rider losing connection: the trip continues normally on the driver's side. The driver's app is the source of truth for the trip — they see the route and navigation. When the rider reconnects, the app syncs the current trip state from the Trip Service. For the driver's app crashing: this is more serious because we lose location tracking. The Trip Service notices the driver stopped sending heartbeats. After a timeout (maybe 60 seconds), it alerts the rider that contact with the driver was lost and starts a recovery flow — try to re-establish connection, or if the driver is unreachable, flag the trip for support review. The fare would be computed based on the last known location and the route traveled so far. We should also cache recent GPS traces on the driver's device so when the app restarts, it can upload the gap in location data retroactively.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["offline_handling", "heartbeat_monitoring", "recovery_flow", "fare_computation", "local_caching", "retroactive_upload"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good thinking on edge cases. We're running low on time — anything you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things: safety features — trip sharing with a contact, an SOS button that alerts authorities with the live location, and driver background verification. Payment processing — I'd integrate with Stripe for card charges and track ride credits and promotions. And ratings — both riders and drivers rate each other after each trip, which feeds back into matching (we could prefer higher-rated drivers) and helps identify bad actors for deactivation.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["safety_features", "payment_integration", "ratings_system", "feedback_loop"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great interview. You had strong fundamentals — good capacity math, clean service decomposition, and thoughtful failure handling. Well done.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 76,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 8,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent capacity estimation upfront — correctly identified the write-heavy nature of location updates",
+      "Smart matching algorithm with two-stage filter (distance then ETA) to reduce routing API calls",
+      "Good failure handling — identified the self-healing nature of location data and handled app crash scenarios"
+    ],
+    "weaknesses": [
+      "Didn't discuss multi-city deployment architecture — how services are partitioned across regions",
+      "Missed notification system design — how push notifications reach rider and driver in real time",
+      "Surge pricing explanation was solid but didn't discuss the ethical/regulatory concerns"
+    ]
+  }
+}

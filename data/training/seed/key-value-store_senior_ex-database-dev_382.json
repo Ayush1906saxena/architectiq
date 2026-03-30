@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "senior",
+    "candidate_profile": "ex-database-dev",
+    "total_exchanges": 20,
+    "generation_id": "seed_382"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed key-value store, something like Redis or DynamoDB. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "First, what's the value size distribution? This is critical because it determines the entire storage engine design. Small values under 1KB can be stored inline in the index. Values between 1KB and 1MB need a separate value log. Values above 1MB need streaming and potentially chunked storage. Second, what's the read/write ratio? Write-heavy workloads favor LSM trees, read-heavy workloads favor B+ trees. Third, do we need transactions or just single-key operations?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["storage_engine", "lsm_tree", "btree", "value_size_distribution"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Values are mostly 100 bytes to 10KB. Write-heavy: 70% writes, 30% reads. Single-key operations only. Target: 500K operations per second, 10TB total data. Sub-millisecond reads.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Write-heavy with sub-ms reads — that's the classic LSM tension. Let me start with the single-node storage engine design because that's the foundation everything else builds on. I spent three years building a storage engine, so let me go deep here. For the on-disk format, I'd use an LSM tree with size-tiered compaction. Writes go to an in-memory memtable — a skip list or red-black tree that maintains sorted order. When the memtable reaches 64MB, it's flushed to disk as an immutable SSTable. The SSTable has a specific page layout: data blocks of 4KB each containing sorted key-value pairs, an index block mapping key ranges to data block offsets, and a Bloom filter block for negative lookups.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lsm_tree", "memtable", "sstable", "bloom_filter", "page_layout", "compaction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me more about the write path — what happens when a put(key, value) comes in?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "write_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "The write path has three steps with specific durability guarantees. Step 1: append to the Write-Ahead Log (WAL). This is a sequential write to a pre-allocated file — I'd use O_DIRECT to bypass the page cache and fdatasync to ensure the data hits the disk controller. On modern NVMe SSDs, a single fdatasync takes about 20-50 microseconds. Step 2: insert into the active memtable. The memtable is a concurrent skip list — lock-free reads, fine-grained locking on writes. This is an in-memory operation: sub-microsecond. Step 3: return success to the client. The data is now durable (WAL) and queryable (memtable). Background: when the memtable reaches 64MB, it becomes immutable. A background thread serializes it to an SSTable and writes it to disk. The WAL segment is then recycled. One critical detail: the WAL write is the bottleneck. At 500K ops/sec with an average write of 1KB, that's 500MB/sec of WAL throughput. A single NVMe drive handles 3-4 GB/sec sequential writes, so we're fine on a single node. But if we fsync every write, we'd be limited to about 50K ops/sec by fsync latency. Solution: group commit — batch WAL writes over a 1ms window, fsync once for the batch. Trades 1ms of durability risk for 10x throughput.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["wal", "write_path", "fdatasync", "group_commit", "memtable", "nvme_performance"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Impressive depth on the write path. What about the read path?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "read_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "Read path for a point lookup on key K: Step 1: check the active memtable. If found, return immediately — this is the fastest path, pure memory access. Step 2: check immutable memtables (ones being flushed). Usually 0-2 of these. Step 3: check SSTables from newest to oldest. For each SSTable, first check the Bloom filter — a 10-bit-per-key Bloom filter gives about 1% false positive rate. If the Bloom filter says 'no', skip this SSTable entirely. If 'maybe yes', do a binary search on the index block to find the right data block, then search within the data block. The critical optimization: the buffer pool. Frequently accessed index blocks and data blocks should be cached in memory. I'd implement a clock-based eviction policy — simpler than LRU and better for concurrent access because it doesn't need a mutex on every access. With 10TB of data and, say, 64GB of RAM for the buffer pool, we can cache about 0.6% of data. But with Zipfian access patterns, that 0.6% covers maybe 80% of reads. Combined with Bloom filters eliminating most negative lookups, the average read touches disk less than 20% of the time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_path", "bloom_filter", "buffer_pool", "cache_eviction", "binary_search"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned compaction. Can you explain the write amplification trade-off?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Write amplification is the ratio of total bytes written to disk versus the bytes written by the application. In an LSM tree, data is written multiple times: once to the WAL, once when the memtable flushes to an SSTable, and then repeatedly during compaction as SSTables are merged. With size-tiered compaction, the write amplification is approximately O(T * L) where T is the size ratio between tiers and L is the number of levels. Typical values: T=10, L=4, so write amplification is about 40x. That means our 500MB/sec of application writes generates 20GB/sec of actual disk I/O. That's too much for a single drive. Leveled compaction — used by LevelDB and RocksDB — gives lower write amplification of about O(T * L / T) = O(L) which is more like 10x. But leveled compaction has higher read amplification and higher space amplification during compaction. The trade-off math: size-tiered is better for write-heavy workloads (ours), leveled is better for read-heavy and space-sensitive workloads. I'd start with size-tiered given our 70/30 write/read ratio, and consider a hybrid: size-tiered for the first few levels where write volume is highest, leveled for the last level where read efficiency matters most. This is what RocksDB calls 'universal compaction'.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["write_amplification", "compaction", "lsm_tree", "size_tiered_compaction", "leveled_compaction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "This is great single-node depth. Now let's talk about making this distributed. How do you shard the data across multiple nodes?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, the distributed side. I'd use consistent hashing to map keys to nodes. Hash the key, map to a position on the ring, assign to the nearest node clockwise. With virtual nodes — say 256 per physical node — we get even distribution. For 10TB across, say, 20 nodes, each node holds about 500GB. But honestly, distributed systems aren't my deepest area. I know the theory — consistent hashing, replication, consensus — but I haven't implemented them at production scale the way I have storage engines.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["consistent_hashing", "virtual_nodes", "sharding_strategy"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle replication? What happens when a node goes down?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each key is replicated to N nodes — typically 3. On the consistent hashing ring, the key is stored on the primary node and the next N-1 nodes clockwise. For writes, we can use quorum: write to W out of N replicas. With N=3 and W=2, a write succeeds when 2 of 3 replicas acknowledge. For reads, R=2 gives us strong consistency since W + R > N. If a node goes down, remaining replicas handle reads and writes. A hinted handoff mechanism stores writes intended for the downed node on another node temporarily, and replays them when the node recovers. For permanent node failure, we need anti-entropy repair — compare Merkle trees of key ranges between replicas and sync differences.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["replication", "quorum", "hinted_handoff", "anti_entropy", "merkle_tree"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What consistency model would you offer to clients?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd offer tunable consistency, like Cassandra does. Clients choose per-request: ONE (lowest latency, eventual consistency), QUORUM (strong consistency with majority), ALL (highest consistency, lowest availability). The default would be QUORUM for both reads and writes. But I want to be transparent — I'm reciting Dynamo/Cassandra patterns here. My real expertise is in the single-node storage engine. If you asked me to implement Raft consensus from scratch, I could do the WAL and state machine parts (that's just a database), but the leader election and log replication protocol I'd need to study more carefully.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["tunable_consistency", "eventual_consistency", "strong_consistency", "quorum"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "I appreciate the honesty. Let's go back to your strength. How would you handle the buffer pool management in detail?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "buffer_pool" }
+    },
+    {
+      "role": "candidate",
+      "content": "The buffer pool is one of the most performance-critical components. I'd allocate a contiguous region of memory at startup — say 64GB — divided into fixed-size pages (4KB each, matching the OS page size and SSD page size). That's 16 million pages. Page table: a hash map from (file_id, page_offset) to buffer page pointer. When a read needs a page, check the hash map. If present, pin the page (increment a pin counter) and return it. If not present, find a free page using the clock sweep algorithm: a circular pointer sweeps through pages, checking a 'referenced' bit. If referenced, clear it and move on. If not referenced and not pinned, evict that page. This is O(1) amortized. Critical implementation detail: the buffer pool must use mmap with MAP_POPULATE for large allocations to avoid TLB misses. Or better yet, use huge pages (2MB) — with 64GB, that's only 32K TLB entries instead of 16M. This alone can improve throughput by 15-20% on real workloads. I'd also implement page prefetching: when we read page N of an SSTable during compaction, speculatively load pages N+1 through N+3 since compaction is sequential.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["buffer_pool", "clock_sweep", "huge_pages", "tlb_optimization", "page_prefetching", "mmap"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about compression? How does it fit into the storage engine?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "compression" }
+    },
+    {
+      "role": "candidate",
+      "content": "Compression happens at the data block level within SSTables. Each 4KB data block is independently compressed, so we can decompress a single block without touching others. Algorithm choice matters: LZ4 for the upper SSTable levels (fast compression/decompression, moderate ratio — about 2:1 for typical key-value data), Zstandard for the bottom level where data is cold and space savings matter more (3-4:1 compression, slower but bottom level has less I/O). This dual-compression strategy is what RocksDB uses. For our 10TB dataset, LZ4 on hot data and Zstd on cold data gives us maybe 3:1 overall compression — 10TB logical data in about 3.3TB of actual disk space. Compression also improves read throughput: we read less data from disk, and the decompression CPU cost is less than the I/O cost saved. On modern CPUs, LZ4 decompresses at 4-5 GB/sec — faster than most SSDs can deliver data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["compression", "lz4", "zstandard", "tiered_compression", "compression_ratio"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle hot keys — a single key receiving a disproportionate amount of traffic?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "hot_key" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hot keys are a distributed problem. On the single-node side, the buffer pool and memtable handle hot reads naturally — the data stays in memory. For hot writes, the WAL group commit batches them efficiently. But in a distributed setup, a hot key means one node takes all the load. Solutions I know of: client-side caching with short TTL — the application caches the hot key locally for 1 second. Read replicas — route hot key reads to multiple replicas. Key splitting — append a random suffix to the key (key_0 through key_9), read from a random suffix and merge results. I'll be honest, hot key mitigation in distributed systems is something I'd want to pair with a distributed systems specialist on. My instinct is to solve it at the storage engine level — make one node handle more load — rather than at the distribution level.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["hot_key", "client_side_caching", "key_splitting", "read_replicas"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last question — how would you benchmark this system?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "benchmarking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Benchmarking storage engines is something I care deeply about. I'd use YCSB (Yahoo Cloud Serving Benchmark) as the framework with custom workload profiles matching our requirements. Key benchmarks: sustained write throughput at target load (500K ops/sec), p50/p99/p999 read latency under load, tail latency during compaction (compaction often causes latency spikes — the p999 during compaction is the real metric), write amplification measured as total disk bytes written divided by application bytes, and space amplification over time. The most important test: run the benchmark for 48 hours, not 10 minutes. Short benchmarks miss compaction effects, memory pressure, and GC pauses. At my previous company, we found a 3x performance regression that only appeared after 6 hours when the LSM tree reached steady-state depth.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["benchmarking", "ycsb", "tail_latency", "write_amplification", "compaction_impact"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Remarkable storage engine depth. The distributed aspects need more development, but your single-node expertise is exceptional. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 68,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 5,
+      "database_design": 10,
+      "caching_strategy": 8,
+      "scalability": 5,
+      "failure_handling": 5,
+      "communication": 8
+    },
+    "strengths": [
+      "Extraordinary depth on storage engine internals — WAL, buffer pool, compaction, page layout, compression",
+      "Strong quantitative reasoning with real hardware performance numbers (NVMe latency, TLB, compression speeds)",
+      "Honest about knowledge boundaries — didn't bluff on distributed systems gaps"
+    ],
+    "weaknesses": [
+      "Distributed systems knowledge was textbook-level — consistent hashing and quorum without deep operational insight",
+      "No discussion of cluster management, node discovery, or membership protocol",
+      "API design was completely absent — never defined the client interface or protocol"
+    ]
+  }
+}

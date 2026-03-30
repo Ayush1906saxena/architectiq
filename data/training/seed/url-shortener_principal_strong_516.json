@@ -1,0 +1,193 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "principal",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_516"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Welcome. I'd like you to design a URL shortening service. Given your principal background, I'm especially interested in how you think about this as a platform and the strategic choices around it. Where do you want to start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Thanks. Before jumping into architecture, I want to frame this properly. A URL shortener in 2026 is not just a redirect service -- it's a platform play. The core redirect is commoditized; the real value is in the analytics layer, deep linking across mobile and web, and programmable routing like A/B testing and geo-targeting. So my first question: who is the customer? Are we building this as an internal tool for our own marketing and product teams, or as an external platform that third parties integrate with via API?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["platform_strategy", "analytics", "deep_linking", "ab_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Think of it as an external platform -- something like bit.ly but with a stronger analytics and routing story. We want to serve both self-serve customers and enterprise accounts with API integrations.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "platform_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "That changes the design significantly compared to an internal tool. Let me clarify a few things: What's our expected scale? I'll assume something in the range of 100 million short URLs created per month and 10 billion redirects per month -- roughly a 100:1 read-to-write ratio. Second, are we supporting custom branded domains from day one? Enterprise customers will expect sho.rt or go.company.com style links. Third, what geographies? If we're serving global redirects, latency is critical -- every millisecond of redirect delay degrades the end user experience and shows up in our customers' analytics.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "read_write_ratio", "custom_domains", "latency"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Your scale assumptions are reasonable. Yes to custom branded domains, and yes to global -- we need sub-50ms redirects worldwide. Walk me through the high-level architecture.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll work from the redirect path first since it's the critical hot path -- 10 billion per month is roughly 3,800 requests per second average, 20K+ at peak. The key insight is that redirects should never hit our origin servers if possible. I'd put CDN edge nodes at the front -- Cloudflare Workers or AWS CloudFront with Lambda@Edge. When a short URL is requested, the edge node looks up the mapping in a local cache. On a cache miss, it queries a globally distributed key-value store like DynamoDB Global Tables or a Redis cluster per region. The origin application servers only handle URL creation, analytics queries, and cache population. This CDN-first architecture means most redirects resolve in under 20ms at the edge, well within the 50ms target.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_architecture", "edge_computing", "dynamodb_global_tables", "latency_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting approach with CDN-first. How do you handle cache invalidation at the edge when a URL mapping changes or is deleted?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "cache_invalidation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good question -- this is the classic tradeoff between freshness and latency. URL mappings are mostly immutable once created. They rarely change, and when they do it's usually a deactivation or a destination update. So I'd use a TTL-based approach with purge-on-write. Edge cache TTL of 1 hour for active URLs. When a mapping is updated or deleted, we publish an invalidation event to a global pub/sub system that fans out to all edge regions. Cloudflare has a purge API that can invalidate a specific URL in under 5 seconds globally. For the rare case where a malicious URL needs to be killed immediately, we maintain a global blocklist that the edge checks on every request -- this is a small set that fits in memory, so it doesn't add latency. The tradeoff: a 1-hour TTL means if our origin goes down, edge keeps serving for up to an hour. That's actually a feature, not a bug -- it gives us tremendous resilience.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_invalidation", "ttl_strategy", "pub_sub", "cdn_purge", "resilience"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the analytics pipeline. You mentioned analytics is where the real platform value lives. How do you design that?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "analytics_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "Analytics is the revenue driver here, so it deserves careful design. Every redirect generates a click event with: timestamp, short code, referrer, user agent, IP-derived geo location, device type, and the destination URL. At 10 billion events per month, that's roughly 3TB of raw event data monthly assuming 300 bytes per event. The pipeline looks like this: edge nodes emit click events to a regional Kafka cluster. A stream processor -- Flink or Kafka Streams -- enriches the events with geo data and device classification in near real-time. Enriched events land in two places: a hot store in ClickHouse or Druid for real-time dashboards with sub-second query latency, and a cold store in S3 as Parquet files for long-term analytics and ad-hoc queries via Athena or Spark. The critical design decision is privacy-by-design. We anonymize at the edge before events even leave the CDN. IP addresses are hashed with a daily rotating salt so we can count unique visitors without storing PII. User agents are classified into device categories at the edge too. This means our analytics pipeline never handles raw PII, which simplifies GDPR and CCPA compliance enormously.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["analytics_pipeline", "kafka", "flink", "clickhouse", "privacy_by_design", "gdpr", "data_anonymization", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Privacy-by-design at the edge is a strong approach. How do you handle the case where an enterprise customer wants to track individual user journeys across multiple shortened links?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "privacy_vs_analytics" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's the tension between privacy and analytics value. My approach: we support two modes. Default mode is the privacy-first anonymous analytics I described -- aggregate counts, geo distribution, device breakdown, referrer analysis. For enterprise customers who need user-level journey tracking, we offer an opt-in mode where the customer embeds a first-party tracking parameter in their short URLs. Something like sho.rt/abc123?uid=their_encrypted_user_id. The customer owns that identifier and is responsible for obtaining consent from their users. We store it as an opaque string and can join it with click events, but we never decrypt it or correlate it with our own data. This way, we provide the capability without taking on the PII liability. The enterprise customer's DPA covers their user data, and our anonymized pipeline stays clean. It's similar to how Segment handles it -- they process customer-owned identifiers without being the data controller.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["privacy_architecture", "data_processing_agreement", "first_party_tracking", "enterprise_features"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Makes sense. Let's talk about the deep linking and A/B routing features you mentioned earlier. How do those work architecturally?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "deep_linking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Deep linking and A/B routing are what differentiate us from a simple redirect. At the edge, instead of a static mapping from short code to destination URL, we have a routing rule engine. Each short URL has a routing configuration that can include: platform-based routing -- if user agent indicates iOS, redirect to the App Store or a universal link; if Android, redirect to the Play Store; if desktop, redirect to the web page. A/B routing splits traffic by percentage -- send 50% to landing page A and 50% to landing page B, with deterministic assignment based on a hash of the visitor fingerprint so the same user always sees the same variant. Geo-routing sends users in EU to eu.example.com and US users to us.example.com. The routing configuration is a small JSON document -- maybe 500 bytes -- that gets cached at the edge alongside the URL mapping. The edge worker evaluates the rules locally, so there's no added latency for these features. For A/B testing specifically, we emit which variant was served as part of the click event, so customers can measure conversion through our analytics pipeline without needing a separate A/B testing tool.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["deep_linking", "ab_testing", "routing_engine", "edge_computing", "universal_links", "geo_routing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That routing engine at the edge is interesting. What's the database design behind all of this?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a polyglot persistence approach. For the core URL mappings and routing configurations, DynamoDB is the right fit -- it gives us single-digit millisecond reads at any scale with global replication built in. The partition key is the composite of custom_domain and short_code. The item contains destination_url, routing_config JSON, created_at, owner_account_id, and status. For account and billing data, PostgreSQL -- it's relational data with complex queries, transactional consistency matters, and the volume is manageable. For the analytics hot store, ClickHouse -- it's purpose-built for the kind of aggregate queries our dashboards need: 'show me clicks per day for this link, broken down by country and device.' ClickHouse handles billions of rows with sub-second response times for these kinds of queries. The API layer abstracts all of this -- the caller never knows which database is behind which endpoint. One important detail: the DynamoDB table has a GSI on owner_account_id so we can efficiently list all URLs for a given account, and another GSI on destination_url for abuse detection -- finding all short URLs pointing to a flagged destination.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["polyglot_persistence", "dynamodb", "postgresql", "clickhouse", "gsi", "data_modeling"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid. Now let's talk about scale and failure modes. What happens when DynamoDB Global Tables has a replication lag and two regions see different data?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "DynamoDB Global Tables uses last-writer-wins conflict resolution with a replication lag typically under one second. For URL creation, this is fine -- short codes are globally unique by construction since we use a combination of region prefix and a distributed ID generator, so two regions can't accidentally create the same short code. For URL updates -- say someone changes a destination URL -- there's a brief window where different regions serve different destinations. This is acceptable for our use case because URL updates are rare and the inconsistency window is sub-second. For URL deletion, it's more sensitive. If a URL is deleted for abuse, we need it blocked everywhere fast. That's where the global blocklist I mentioned earlier comes in -- the abuse service pushes to a separate low-latency channel like a Redis pub/sub or even an in-memory broadcast, which propagates to all edge nodes within seconds, independent of DynamoDB replication. The edge checks the blocklist before checking the URL cache. So even if DynamoDB hasn't replicated the deletion yet, the blocklist catches it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["eventual_consistency", "conflict_resolution", "distributed_id_generation", "blocklist", "abuse_prevention"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What about a full region outage? Say us-east-1 goes down.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "disaster_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "The CDN-first architecture gives us natural resilience here. Redirects continue serving from edge cache regardless of which origin region is down -- that 1-hour TTL means even if all origins are unreachable, cached URLs keep working. For cache misses during the outage, the edge falls back to the nearest healthy DynamoDB region. Since we're using Global Tables, all regions have a full copy of the data. URL creation is the part that needs active failover. Our API gateway routes creation requests to the nearest healthy region. The distributed ID generator I mentioned uses a region-aware scheme -- each region has its own ID space -- so a failover region can accept writes without coordination. Analytics events during the outage buffer at the edge in local queues and drain to Kafka when connectivity restores. We might see a delay in real-time dashboards, but no data loss. The recovery playbook: once the failed region comes back, DynamoDB Global Tables automatically re-sync. We verify consistency with a background reconciliation job, and we gradually shift traffic back. Total customer impact of a full region loss: zero for redirects, possible increased latency for URL creation during failover, and a few minutes of analytics delay.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["disaster_recovery", "multi_region", "graceful_degradation", "edge_buffering", "automatic_failover"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let me shift to the organizational angle. You mentioned this is a platform play. How would you structure the team to build and operate this?",
+      "annotation": { "action": "scaling_probe", "phase": "scaling_failures", "target_concept": "team_structure" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd organize around the value streams, not the technical layers. Three teams to start. Team one: Core Platform -- owns the URL creation API, the redirect path, the edge worker runtime, DynamoDB, and the routing engine. This is the reliability-critical team, roughly 5-6 engineers including an SRE. They own the SLA. Team two: Analytics and Insights -- owns the Kafka pipeline, ClickHouse, the analytics API, and the customer-facing dashboards. This team has a different cadence -- they're more feature-velocity oriented, building new report types and integrations. 4-5 engineers plus a data engineer. Team three: Platform Experience -- owns the self-serve console, API documentation, SDKs, and the developer experience. This is the team that makes the platform sticky. 3-4 engineers. As we grow, the first split I'd anticipate is separating the edge infrastructure from the core API within Team one, because edge workers and CDN configuration become a specialization. I'd also expect a dedicated Trust and Safety function to emerge once we're at scale, handling abuse detection and compliance. Each team owns their services end-to-end including on-call. Cross-cutting concerns like authentication, billing, and rate limiting are owned by Core Platform but exposed as shared libraries.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["team_topology", "value_streams", "sre", "developer_experience", "org_design"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Makes sense. Now a strategic question: when should a company build their own URL shortener versus using bit.ly or a similar service? Where's the line?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "build_vs_buy" }
+    },
+    {
+      "role": "candidate",
+      "content": "It depends on three factors. First, scale economics. Bit.ly enterprise pricing is roughly $3K-$35K per month depending on volume. If you're generating under 10 million clicks per month, the build cost doesn't justify it -- just use bit.ly. Above 100 million clicks per month, the economics flip because SaaS pricing scales linearly but infrastructure costs scale sub-linearly. Second, data ownership. If your click analytics are a core business input -- for example, you're a marketing platform where attribution data is your product -- you need to own the pipeline. Sending your most valuable data through a third party that might also serve your competitors is a strategic risk. Third, feature differentiation. If you need deep integration with your product -- like the A/B routing and deep linking we discussed -- you'll spend more time working around bit.ly's limitations than building your own. My rule of thumb: use bit.ly until you hit two of these three criteria, then build. Most companies should never build their own. The ones that should know it because URL shortening has become load-bearing infrastructure for their business.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["build_vs_buy", "scale_economics", "data_ownership", "strategic_risk", "total_cost_of_ownership"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the API design. What does the creation API look like for supporting all these features -- routing rules, custom domains, analytics configuration?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd design a RESTful API with progressive complexity. The simplest call is POST /v1/links with just a destination_url field -- that gives you a short URL with default settings in one line of code. Low barrier to entry is critical for self-serve adoption. For advanced features, the same endpoint accepts optional fields: custom_alias for vanity URLs, domain_id for branded domains, expires_at for time-limited links, and a routing_rules object. The routing_rules object is declarative: { \"rules\": [{ \"condition\": { \"platform\": \"ios\" }, \"destination\": \"https://apps.apple.com/...\" }, { \"condition\": { \"geo\": \"EU\" }, \"destination\": \"https://eu.example.com/...\" }], \"default\": \"https://example.com/page\" }. For A/B splits: { \"type\": \"split\", \"variants\": [{ \"destination\": \"https://landing-a.com\", \"weight\": 50 }, { \"destination\": \"https://landing-b.com\", \"weight\": 50 }] }. Other endpoints: GET /v1/links/{id} for metadata, PATCH /v1/links/{id} for updates, DELETE /v1/links/{id}, GET /v1/links/{id}/stats for analytics summary, and GET /v1/links/{id}/events for raw event stream with pagination. All endpoints support idempotency keys for safe retries. Rate limiting is per API key with tier-based quotas. We version via URL path, not headers, because it's more explicit for developer experience.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "progressive_complexity", "restful", "idempotency", "rate_limiting", "versioning"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good design with the progressive complexity. One concern -- how do you generate globally unique short codes without coordination between regions?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "id_generation" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a fundamental distributed systems problem. I'd use a hybrid approach. Each region gets a pre-allocated block of IDs from a central sequencer -- similar to how Snowflake IDs work. The ID structure is: 2 bits for region identifier (supports 4 regions), 41 bits for timestamp (good for 69 years), 10 bits for worker ID within the region, and 11 bits for sequence number per millisecond. That gives us 2,048 unique codes per millisecond per worker, which is more than enough. The short code is the base62 encoding of this 64-bit ID, producing 7-11 character codes. For custom aliases, we do a conditional write to DynamoDB -- write only if the key doesn't exist. If two regions try to create the same custom alias simultaneously, DynamoDB's conditional write ensures exactly one wins and the other gets a conflict error. The loser retries or returns an error to the user. This approach means zero coordination for auto-generated codes and minimal coordination for custom aliases -- only conflicting writes need resolution.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_id_generation", "snowflake_id", "base62_encoding", "conditional_write", "conflict_resolution"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid. Stepping back -- what are the biggest technical risks in building this platform, and how would you sequence the roadmap?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": "risk_assessment" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three main risks. First, edge reliability. Our CDN-first architecture means a CDN provider outage affects all customers. Mitigation: multi-CDN strategy with health-check-based DNS failover between Cloudflare and CloudFront. This adds operational complexity but eliminates single-provider risk. Second, analytics pipeline correctness. When customers make business decisions based on our click analytics, data accuracy is non-negotiable. Mitigation: end-to-end event auditing -- we sample 1% of events and verify they flow correctly through every pipeline stage. We also run daily reconciliation between edge-reported counts and analytics store counts. Third, abuse at scale. URL shorteners are magnets for phishing and spam. If our URLs get flagged by Google Safe Browsing, our entire domain reputation suffers and all customers are affected. Mitigation: dedicated ML-based URL scanning, partnership with anti-phishing organizations, and customer-level isolation where enterprise accounts get dedicated short domains so one bad actor can't poison the shared domain. For roadmap: Phase 1 is core redirect with CDN and basic analytics -- prove the latency and reliability story. Phase 2 adds deep linking and routing rules -- this is the feature differentiation. Phase 3 is the full analytics platform with real-time dashboards and API access. Phase 4 is A/B testing integration with conversion tracking. Each phase is a shippable product increment. I'd target Phase 1 in 8 weeks, Phase 2 in another 6, Phase 3 in a quarter, and Phase 4 six months in.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["risk_assessment", "multi_cdn", "abuse_prevention", "domain_reputation", "roadmap", "phased_delivery"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great conversation. You consistently framed this as a platform rather than just a redirect service, and the CDN-first architecture with privacy-by-design shows strong principal-level thinking. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 83,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 8,
+      "api_design": 9,
+      "database_design": 8,
+      "caching_strategy": 9,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 9,
+      "strategic_thinking": 9
+    },
+    "strengths": [
+      "Excellent platform framing from the start -- positioned analytics, deep linking, and A/B routing as core value propositions rather than afterthoughts",
+      "CDN-first redirect architecture demonstrates deep understanding of latency optimization at global scale",
+      "Privacy-by-design analytics pipeline with edge anonymization shows mature thinking about compliance and data architecture",
+      "Strong build-vs-buy framework with concrete decision criteria and cost thresholds",
+      "Well-structured team topology organized around value streams rather than technical layers"
+    ],
+    "weaknesses": [
+      "Could have discussed billing and monetization architecture more deeply for a platform play",
+      "Multi-CDN strategy mentioned but not deeply explored -- failover mechanics between CDN providers is non-trivial",
+      "Did not address SDK design or webhook integrations that enterprise customers would expect"
+    ]
+  }
+}

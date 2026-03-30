@@ -1,0 +1,141 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "staff",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_496"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a distributed key-value store. At staff level I want depth on the storage engine, consistency model, and failure recovery.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with requirements. Target scale: how many keys, operations per second, and value sizes? What consistency model — AP or CP? And what's the latency requirement?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["scale", "consistency_model", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10 billion keys, 1 million ops/sec, values up to 1MB. Tunable consistency. Sub-5ms p99 for reads, sub-10ms for writes.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Capacity math: 10 billion keys × average 1KB value (assuming most values are small, occasional large ones) = 10TB base data. With 3x replication = 30TB. At 1M ops/sec with 60/40 read/write split: 600K reads/sec and 400K writes/sec. Write throughput: 400K × 1KB = 400MB/s before replication, 1.2GB/s with replication. We need a cluster of roughly 20-30 storage nodes, each handling ~50K ops/sec and storing 1-1.5TB of data. That's comfortably within modern server capabilities.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "storage_sizing", "replication_overhead", "throughput_calculation", "cluster_sizing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. Walk me through the architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three layers. A routing layer — stateless nodes that resolve key → partition → storage node using a consistent hash ring with virtual nodes. Clients can also cache the partition map and go directly to storage nodes. The storage layer — stateful nodes each owning multiple partitions. Each partition uses an LSM-tree-based storage engine (think RocksDB). Writes go to a WAL + memtable in memory, flush to SSTables on disk when full. Reads check memtable → bloom filters → SSTables. A metadata service — a Raft-based cluster that maintains the partition map, detects node failures via heartbeats, and coordinates rebalancing.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["routing_layer", "consistent_hashing", "virtual_nodes", "lsm_tree", "wal", "memtable", "sstable", "bloom_filter", "raft_metadata"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Why LSM-tree over B-tree? Be specific about the trade-offs for this workload.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "storage_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "LSM trees optimize for write throughput — writes are sequential (append to WAL + memtable insert), which is 10-100x faster than B-tree random page updates. Our 400K writes/sec heavily favors this. The cost: read amplification. A point lookup might check the memtable, then each SSTable level's bloom filter. With bloom filters, this is usually 1-2 disk reads in the common case. Write amplification from compaction: each byte is written roughly 10-30x across compaction levels (with leveled compaction). That's the tax on our disk bandwidth. B-trees have better read performance (O(log N) with a single path) and lower write amplification (~2-3x). If our workload were 90% reads, B-tree might be better. At 40% writes, LSM wins on aggregate throughput.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["write_optimization", "sequential_io", "read_amplification", "bloom_filter_efficiency", "write_amplification", "compaction_cost", "workload_matching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does compaction affect tail latency? Can it cause p99 spikes?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "compaction_latency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes — compaction is the main source of p99 latency spikes. When compaction runs, it reads and rewrites large amounts of data, competing with foreground reads and writes for disk I/O. Mitigations: rate-limit compaction I/O to a fraction of total disk bandwidth — say 30%. Use separate I/O priorities for compaction (Linux ionice). On NVMe drives, use separate I/O queues for compaction and foreground traffic. And schedule heavy compaction during off-peak hours when possible. There's also the L0 stall problem: if L0 SSTables accumulate faster than compaction can merge them, the system pauses writes until compaction catches up. Monitoring L0 file count is critical — it's the early warning for compaction falling behind.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["compaction_latency_spikes", "io_rate_limiting", "io_priorities", "nvme_queues", "l0_stall", "compaction_monitoring"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How does the tunable consistency model work?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Quorum-based. With N=3 replicas, the client chooses W (write quorum) and R (read quorum) per operation. Strong consistency: W=2, R=2. Since W+R > N, the read set overlaps with the write set — guaranteed to see the latest value. Eventual consistency: W=1, R=1. Fastest, but may read stale data. There's also a useful middle ground: W=2, R=1 — durable writes (survives one node failure) with fast reads that might be stale. Good for cache use cases where durability matters more than read consistency.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["quorum", "w_r_n", "strong_consistency", "eventual_consistency", "middle_ground_config"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about conflict resolution? Two concurrent writes to the same key on different replicas under eventual consistency.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "conflict_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "With W=1, two clients can write to different replicas concurrently, creating conflicting versions. Options: last-write-wins (LWW) with timestamps — simple but can lose data if clocks are skewed. Vector clocks — each version carries a version vector that tracks which replicas contributed to it. On read, if we detect concurrent versions, we can either return both to the client (like Dynamo does) or apply a merge function. CRDTs — conflict-free replicated data types that are designed to merge automatically. For our use cases, I'd use LWW with hybrid logical clocks for the default, and offer vector clocks as an opt-in for use cases that need it. LWW with HLC is good enough for session storage and feature flags where the last update is almost always the correct one.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["lww", "vector_clocks", "concurrent_versions", "crdts", "hybrid_logical_clocks", "pragmatic_default"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "A storage node dies permanently. How do you recover?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "node_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The metadata service detects the failure via heartbeat timeout. It reassigns the dead node's partitions to surviving nodes. The remaining replicas (2 out of 3) continue serving reads and writes for those partitions — availability isn't lost. A repair process kicks in: the new owner of each partition copies data from one of the remaining replicas. To minimize bandwidth, use Merkle trees — compare hash trees between the source and target to identify only the missing or divergent key ranges, and transfer just those. Full recovery time depends on data volume — transferring 1TB at 1Gbps takes about 2.5 hours. During recovery, those partitions run with reduced replication factor (2 instead of 3), so we're more vulnerable to a second failure. Alerting on under-replicated partitions is critical.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["heartbeat_failure_detection", "partition_reassignment", "continued_availability", "merkle_tree_repair", "recovery_time", "under_replicated_alerting"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about anti-entropy? How do replicas stay in sync during normal operation?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "anti_entropy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two mechanisms. Read repair: when a quorum read returns divergent values from different replicas, the coordinator sends the latest value to the stale replica. This is opportunistic — it only fixes keys that are actually read. Background anti-entropy: a periodic process (every hour or so) compares Merkle trees between replica pairs and repairs any differences. This catches divergence from transient network partitions, missed writes, or software bugs. The combination gives us both fast repair for hot keys (read repair) and eventual repair for cold keys (background anti-entropy). Together they keep replicas convergent.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["read_repair", "background_anti_entropy", "merkle_tree_comparison", "hot_vs_cold_repair"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Monitoring is make-or-break for a KV store. Key metrics: read/write latency percentiles per node, compaction debt (L0 file count), under-replicated partition count, disk utilization, and memory usage (memtable size). Alerting on any of these degrading catches problems before they become outages. And operational tooling: the ability to drain a node gracefully (move its partitions before maintenance), rebalance partitions across nodes when adding capacity, and test disaster recovery with regular drills.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["monitoring", "operational_tooling", "graceful_drain", "rebalancing", "dr_drills"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid interview. Strong storage engine knowledge and good consistency design. The areas to push further would be more depth on cross-region replication and the client SDK design. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 72,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 9,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 7
+    },
+    "strengths": [
+      "Excellent capacity estimation with concrete cluster sizing",
+      "Strong LSM-tree vs B-tree comparison with write amplification numbers",
+      "Good anti-entropy design combining read repair with background Merkle tree sync"
+    ],
+    "weaknesses": [
+      "Conflict resolution was thorough but didn't go deep on HLC implementation details",
+      "No discussion of cross-region replication or multi-datacenter deployment",
+      "API design was implicit — didn't define the client API or discuss SDK ergonomics",
+      "Compaction discussion was good but didn't compare leveled vs size-tiered vs FIFO compaction strategies"
+    ]
+  }
+}

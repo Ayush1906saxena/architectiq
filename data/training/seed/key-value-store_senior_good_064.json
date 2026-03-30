@@ -1,0 +1,180 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "senior",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_064"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed key-value store — think DynamoDB or Cassandra. What questions do you have before we begin?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great, a few questions. What's the expected scale — total data size and QPS? What consistency model do we need — strong consistency or is eventual consistency acceptable? And what's the read-to-write ratio?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["scale", "consistency_model", "read_write_ratio"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Assume 10TB of data across the cluster, 500K reads per second and 50K writes per second. Eventual consistency is fine for most operations, but we need an option for strong reads. The system should be highly available.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "cap_theorem" }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. So we're leaning towards an AP system in CAP terms — availability and partition tolerance, with tunable consistency. What about the data model — is this a simple key-value or do we need range queries? And what's the value size — small JSON objects or large blobs?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cap_theorem", "range_queries", "data_model"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Simple key-value, point lookups only. Values average 1KB. Let's get into the design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with capacity estimation. 10TB of data at 1KB per value is about 10 billion key-value pairs. If each node holds 500GB, we need at least 20 data nodes, but with a replication factor of 3, that's 30TB total, so about 60 nodes. For QPS — 500K reads across 60 nodes is about 8,300 reads per node per second, which is manageable.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["capacity_estimation", "replication_factor", "qps_calculation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. How do you distribute the data across those 60 nodes?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "consistent_hashing" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use consistent hashing. We place nodes on a hash ring, and each key is hashed to a position on the ring. The key is assigned to the first node clockwise from that position. To handle uneven distribution, each physical node gets multiple virtual nodes — maybe 150-200 virtual nodes per physical node. This gives us much more uniform data distribution and makes rebalancing smoother when nodes are added or removed.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["consistent_hashing", "virtual_nodes"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How does replication work with consistent hashing?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "With a replication factor of 3, each key is stored on the primary node — the first node clockwise on the ring — plus the next 2 distinct physical nodes clockwise. We skip virtual nodes that map to the same physical node. So every key lives on 3 different physical machines. For writes, we write to all 3 replicas. For reads, we can read from any one replica for eventual consistency, or from a quorum of 2 for stronger consistency.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["replication", "quorum", "consistency_model"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned quorum. Can you formalize that — what are the read and write quorum sizes?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "quorum" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. With N=3 replicas, we set W (write quorum) and R (read quorum) such that R + W > N for strong consistency. So W=2, R=2 gives us strong reads. For eventual consistency, we can do W=1, R=1 — fastest but might read stale data. We could also do W=3, R=1 for read-heavy workloads where we want fast reads but can tolerate slower writes. This is the tunable consistency model that DynamoDB uses.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["quorum", "tunable_consistency", "dynamo"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when two clients write to the same key at the same time on different replicas?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "conflict_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "Ah, that's the conflict resolution problem. With eventual consistency and W=1, two writes could go to different replicas and create conflicting versions. I think... we'd need some kind of versioning. Maybe we use timestamps — last-write-wins based on the wall clock time. The write with the latest timestamp is the one that survives.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["conflict_resolution", "last_write_wins"], "depth": "shallow", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last-write-wins has problems — clock skew between servers can cause the 'earlier' write to overwrite the 'later' one. What alternatives are there?",
+      "annotation": { "action": "teach", "phase": "deep_dive", "target_concept": "vector_clocks" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, clock synchronization isn't perfect. I've heard of vector clocks — where each node maintains a logical clock and the version of a value includes a vector of all node clocks. That lets you detect whether two versions are causally related or truly concurrent. But I'm honestly not super clear on how they work in practice. I think for concurrent writes, the system would return both versions to the client and let the application resolve the conflict?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["vector_clocks", "causal_ordering"], "depth": "shallow", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's the right general idea. Dynamo does exactly that — returns sibling values and lets the application merge them. Let's move on. How do nodes detect that another node has failed?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "failure_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a gossip protocol for failure detection. Each node periodically pings a random subset of other nodes and shares its membership list. If a node doesn't respond after several attempts, it's marked as suspected-failed. Once enough nodes agree it's down, it's marked as failed. This is decentralized — no single coordinator that could be a single point of failure. Cassandra uses this approach.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["gossip_protocol", "failure_detection", "decentralized"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "When a node fails, what happens to the keys it was responsible for?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "hinted_handoff" }
+    },
+    {
+      "role": "candidate",
+      "content": "Since we have 3 replicas, the other 2 nodes still have the data, so reads can still be served. For writes that were supposed to go to the failed node, we can use hinted handoff — another node temporarily accepts the writes intended for the failed node and stores them as 'hints.' When the failed node comes back, the hints are forwarded to it. If the node is permanently gone, we need to re-replicate its data to a new node to restore the replication factor.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["hinted_handoff", "replication", "re-replication"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "After a node comes back from a temporary failure, how do you ensure its data is up to date?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "anti_entropy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Besides hinted handoff for recent writes, we need an anti-entropy mechanism for the full dataset. I'd use Merkle trees — each node maintains a hash tree of its data, and nodes periodically compare their Merkle trees. If a subtree hash differs, they drill down to find the specific keys that are out of sync and exchange just those. This is efficient because you only transfer the data that's actually different.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["anti_entropy", "merkle_trees"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What storage engine would you use on each individual node?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "storage_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use an LSM-tree based storage engine — similar to LevelDB or RocksDB. Writes go to an in-memory memtable, which is flushed to sorted string tables (SSTables) on disk when it reaches a threshold. Reads check the memtable first, then SSTables with the help of a bloom filter to skip tables that don't contain the key. LSM-trees are great for write-heavy workloads, which fits our 50K writes per second requirement.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["lsm_tree", "sstable", "bloom_filter", "memtable"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid choice. Let's talk about the client. How does a client know which node to contact for a given key?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "client_routing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two approaches. One is client-side routing — the client has a copy of the hash ring and directly contacts the correct node. This avoids an extra hop but the client needs to keep its ring state updated. The other is to use a coordinator — the client sends the request to any node, and that node acts as a coordinator, forwarding the request to the correct replicas. I'd probably start with the coordinator approach since it keeps the client simple, then add client-side routing as an optimization later.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["client_routing", "coordinator_node"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. We're running low on time. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add monitoring for replication lag, per-node latency, and cluster health. I'd also want rack-aware or zone-aware replica placement — making sure replicas are in different availability zones so a zone failure doesn't take out all copies. And I'd add compression on the SSTables to reduce storage and I/O.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["monitoring", "rack_awareness", "compression"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You showed solid understanding of distributed systems fundamentals. The one area I'd push you to go deeper is conflict resolution — that's a critical piece of any eventually consistent system. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 66,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 4,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 7
+    },
+    "strengths": [
+      "Strong consistent hashing and replication design with virtual nodes",
+      "Good capacity estimation connecting data size to node count",
+      "Solid knowledge of anti-entropy and Merkle trees for data repair"
+    ],
+    "weaknesses": [
+      "Weak on conflict resolution — couldn't explain vector clocks in practice",
+      "No discussion of caching layer or read path optimization",
+      "Didn't address multi-datacenter replication or geographic distribution"
+    ]
+  }
+}

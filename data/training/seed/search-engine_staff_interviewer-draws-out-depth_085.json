@@ -1,0 +1,171 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "staff",
+    "candidate_profile": "interviewer-draws-out-depth",
+    "total_exchanges": 24,
+    "generation_id": "seed_085"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a web search engine — the core search infrastructure, not the crawler. A user types a query, and we return ranked results. Go ahead.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me clarify scope. How many documents are we indexing? What's the query volume? What's our latency target for returning results? And are we dealing with just text or also images, videos, and other media?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["capacity_estimation", "latency"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10 billion web pages. 100,000 queries per second. Results in under 500 milliseconds. Text only for now. Take it away.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The core of a search engine is the inverted index. For each word in our corpus, we maintain a sorted list of document IDs that contain that word. When a user searches for 'distributed systems,' we look up the posting lists for 'distributed' and 'systems' and intersect them to find documents containing both terms. We then rank the results and return the top 10.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["inverted_index", "posting_list"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good starting point. Tell me more about the inverted index structure. How is a posting list actually stored? What's in each entry?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "inverted_index" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each entry in a posting list contains the document ID, the term frequency (how many times the word appears in that document), and optionally the positions of the word in the document for phrase queries. The posting list is sorted by document ID for efficient intersection. For storage, since posting lists can be millions of entries long for common words, we compress them heavily — delta encoding on the doc IDs (store the difference between consecutive IDs instead of absolute values) followed by variable-byte or PForDelta encoding.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["inverted_index", "posting_list", "term_frequency", "compression", "delta_encoding"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned delta encoding. Why does that work well for posting lists specifically? What property of the data makes it effective?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "compression" }
+    },
+    {
+      "role": "candidate",
+      "content": "Because posting lists are sorted by document ID. If the doc IDs are 100, 105, 112, 200, the deltas are 100, 5, 7, 88. The deltas are much smaller numbers than the absolute IDs, especially for common terms where documents are close together in ID space. Smaller numbers need fewer bits to encode. With variable-byte encoding, a delta of 5 takes 1 byte instead of 4 bytes for the full doc ID. For very dense posting lists — common words — the deltas are tiny and we get 4-8x compression. For rare words, the deltas are larger but the lists are shorter, so total space is still small.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["compression", "delta_encoding", "posting_list"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now, how do you intersect two posting lists? Walk me through the algorithm. And then tell me — what happens when one list has 100 million entries and the other has 1,000?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "posting_list_intersection" }
+    },
+    {
+      "role": "candidate",
+      "content": "For two sorted lists, the basic algorithm is a merge: two pointers, advance the smaller one, match when equal. That's O(n + m) where n and m are list sizes. But when one list is 100M and the other is 1,000, the merge approach scans 100M entries for 1,000 matches — wasteful. Better: for each entry in the short list, do a binary search (or galloping search) in the long list. That's O(k * log n) where k is the short list size and n is the long list. With k=1,000 and n=100M, that's about 1,000 * 27 = 27,000 comparisons versus 100M. Galloping search — also called exponential search — is even better when matches are clustered: it jumps ahead by doubling steps, then binary searches within the range.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["posting_list_intersection", "galloping_search", "binary_search"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Very good. Now the posting lists are compressed on disk. Do you decompress the entire 100M-entry list into memory before searching, or is there a smarter approach?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "block_compression" }
+    },
+    {
+      "role": "candidate",
+      "content": "You wouldn't decompress the whole thing. The standard approach is block-based compression. The posting list is divided into blocks of, say, 128 doc IDs. Each block is compressed independently. We store a skip table — a small index mapping the first doc ID of each block to its byte offset in the compressed data. For the galloping search, we first search the skip table to find the right block, decompress only that block, then search within it. This way, for the binary search across 100M entries, we're searching a skip table of about 780,000 entries, then decompressing and searching a single 128-entry block. Memory usage stays bounded.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["block_compression", "skip_table", "posting_list"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. You clearly know the index internals well. Now let's zoom out — how do you shard this index across machines? 10 billion documents is too large for one server.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "index_sharding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two sharding strategies: document-based and term-based. Document-based sharding assigns each document to a shard — each shard has a complete inverted index for its subset of documents. A query goes to all shards in parallel, each returns its top K results, and a coordinator merges them. Term-based sharding puts all posting entries for a term on one shard — a query only hits shards for its query terms. I'd go with document-based. Term-based has a problem: popular terms create hotspot shards, and multi-term queries require communication between shards to intersect. Document-based gives uniform load and each shard can do the full intersection locally.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["index_sharding", "document_partitioning", "term_partitioning"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "With document-based sharding, every query hits every shard. At 100K QPS, with say 1,000 shards, that's 100 million internal requests per second. How do you make that work?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "query_fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "A few strategies. First, reduce the number of shards each query hits. We can use a tiered index: a first-pass index with only the highest-quality pages — maybe 1 billion out of 10 billion — spread across 100 shards. Most queries find enough good results in the first tier. Only if the first tier doesn't have enough results do we fall back to the full index. This dramatically reduces fan-out for common queries. Second, replicate each shard — 3 copies — and load-balance across replicas. So it's 1,000 logical shards but 3,000 physical machines. Third, batch and pipeline: the coordinator doesn't wait for the slowest shard — it returns results as soon as it has enough from the fastest shards, with a timeout. Tail latency from slow shards is handled by redundant requests.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tiered_index", "replication", "tail_latency", "query_fan_out"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about ranking. You said you rank the results. How? What signals do you use?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Ranking is multi-stage. First stage — on each shard — we compute a basic relevance score using BM25, which is an improvement over TF-IDF. It considers term frequency, document length normalization, and inverse document frequency. This produces the initial candidate set — maybe top 1,000 per shard. Second stage — at the coordinator — we merge candidates and apply additional signals: PageRank (link-based authority), recency, domain authority, click-through rate from historical data, and user personalization signals. This can use a learned ranking model — LambdaMART or a neural model — trained on click-through data. The second stage re-ranks the top candidates and returns the final top 10.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["bm25", "tf_idf", "pagerank", "learning_to_rank", "multi_stage_ranking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned BM25. Walk me through the formula and explain each component.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "bm25" }
+    },
+    {
+      "role": "candidate",
+      "content": "BM25 score for a term t in document d is: IDF(t) * (tf(t,d) * (k1 + 1)) / (tf(t,d) + k1 * (1 - b + b * |d|/avgdl)). Let me break it down. IDF(t) is the inverse document frequency — rarer terms get higher weight. log((N - n(t) + 0.5) / (n(t) + 0.5)) where N is total docs and n(t) is docs containing t. tf(t,d) is the term frequency in the document. k1 is a saturation parameter (typically 1.2) — it controls how quickly additional occurrences of a term stop improving the score. b is the length normalization parameter (typically 0.75) — |d|/avgdl penalizes long documents. The intuition: a term that appears 10 times isn't 10x more relevant than appearing once — there are diminishing returns. And a long document mentioning a term once is less relevant than a short document mentioning it once.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["bm25", "tf_idf", "idf"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Impressive recall. Now — what happens when I search for 'apple'? It's ambiguous — could be the fruit or the company. How do you handle query ambiguity?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "query_understanding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Query understanding is a separate layer before the index lookup. For ambiguous queries, we use a few techniques. First, diversification — return results from multiple interpretations. For 'apple,' show Apple Inc results and apple fruit results in the first page. Second, query context — if the user recently searched for 'iPhone,' we bias toward Apple Inc. Third, entity recognition — an NLP model identifies 'apple' as potentially matching two entities in our knowledge graph and retrieves results for both. Fourth, the 'people also searched for' feature — suggest disambiguating queries like 'apple company' or 'apple fruit.' The ranking model itself learns from aggregate click data: if 80% of users who search 'apple' click on Apple Inc results, the model learns to rank those higher.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["query_understanding", "diversification", "entity_recognition", "personalization"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've been very strong on the indexing and retrieval fundamentals. Let's touch on infrastructure — how do you handle index updates? New pages are crawled constantly.",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "index_updates" }
+    },
+    {
+      "role": "candidate",
+      "content": "Index updates are tricky because the inverted index is optimized for reads, not writes. I'd use a dual-index approach. The main index is immutable — rebuilt periodically (daily or weekly) from the full corpus. A smaller real-time index handles recent updates — new pages, deletions, content changes. At query time, we search both indexes and merge results. The real-time index uses an in-memory structure (like a concurrent hash map of posting lists) that's periodically compacted and merged into the main index during the next rebuild. For deletions, we maintain a delete list — a bloom filter of removed doc IDs that's checked during query processing to filter out stale results.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["index_updates", "dual_index", "bloom_filter", "compaction"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost out of time. Anything you'd want to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few important areas I'd want to address in a full design: spell correction using edit distance and a language model for 'did you mean' suggestions, caching of frequent query results — the top 10K queries probably account for a large percentage of traffic, abuse prevention — rate limiting and bot detection, and a feedback loop from user clicks back to the ranking model for continuous improvement. I'd also want to discuss the serving infrastructure — how to do rolling index deployments without downtime and canary testing for ranking model changes.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["spell_correction", "caching", "rate_limiting", "feedback_loops", "deployment"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Really strong interview. I pushed deeper and deeper on the index internals and you never bottomed out. The BM25 explanation was particularly impressive. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 72,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 5,
+      "api_design": 4,
+      "database_design": 6,
+      "caching_strategy": 5,
+      "scalability": 8,
+      "failure_handling": 5,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional depth on inverted index internals — compression, block decoding, skip tables, galloping search",
+      "Strong understanding of BM25 ranking formula with clear intuitive explanation",
+      "Good analysis of document-based vs term-based sharding tradeoffs"
+    ],
+    "weaknesses": [
+      "Requirements gathering was perfunctory — barely explored before jumping into design",
+      "No API design discussion — never specified the search API endpoints or response format",
+      "Failure handling was not addressed — what happens when a shard is down during a query?",
+      "Capacity estimation was skipped entirely — no calculation of index size, memory, or hardware needs"
+    ]
+  }
+}

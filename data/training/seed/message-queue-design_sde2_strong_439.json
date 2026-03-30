@@ -1,0 +1,179 @@
+{
+  "metadata": {
+    "problem_id": "message-queue-design",
+    "level": "sde2",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_439"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed message queue — something like Kafka. Before we start, what questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure, a few things I'd like to clarify. What's the expected throughput — messages per second? Do we need strict ordering, and if so, is total ordering or per-key ordering sufficient? What's the expected message size? And what delivery guarantee do we need — at-most-once, at-least-once, or exactly-once?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["throughput", "ordering", "message_size", "delivery_guarantees"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great questions. 10 million messages per second peak, per-key ordering is fine, average message size of 1KB, and at-least-once delivery with the option for exactly-once. Anything else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "throughput" }
+    },
+    {
+      "role": "candidate",
+      "content": "How long do we retain messages — hours, days, weeks? And do consumers need to replay old messages, or just read from the latest? Also, do we expect bursty traffic or steady throughput?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["retention", "replay", "traffic_patterns"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "7-day retention with replay support from any point. Traffic is bursty — 10M/s peak but 2M/s average. Let's start designing.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do some quick math first. 10M messages per second at 1KB each is 10GB/s peak throughput. Per day at average rate, that's 2M × 1KB × 86,400 = about 172TB per day. Over 7 days, that's 1.2PB of storage. With 3x replication, we're looking at 3.6PB. That's a significant cluster — probably 100+ machines with 36TB disks each, just for storage.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "storage_calculation", "replication_overhead"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. Walk me through the architecture — what are the main components?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "The core components: Brokers — the servers that store messages. Each broker hosts a set of partitions. Partitions — the unit of parallelism. A topic is split into N partitions, each an ordered, append-only log stored on disk. Producers — clients that publish messages to topics. They hash the message key to determine which partition to write to. Consumers — clients that read messages from partitions, organized into consumer groups. A coordinator service — manages broker membership, partition assignment, leader election. Could use ZooKeeper or a built-in Raft-based controller. The flow: producer sends a message with key 'user-123' to the 'events' topic. The client hashes the key, determines it maps to partition 7, and sends the message to the broker that leads partition 7. The broker appends it to the log, replicates to followers, and acknowledges the producer.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["brokers", "partitions", "append_only_log", "producers", "consumers", "consumer_groups", "coordinator", "leader_election"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned append-only log. Why is that a good choice here instead of, say, a B-tree based database?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "append_only_log" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sequential I/O versus random I/O — that's the key. An append-only log only writes to the end of a file, which means the disk head never seeks. On a spinning disk, sequential writes can hit 600MB/s, while random writes might get 100 IOPS at best. Even on SSDs, sequential writes are 2-4x faster and cause less write amplification. A B-tree needs random writes for rebalancing and random reads for lookups. We don't need random access — producers always write to the end, and consumers always read sequentially from their offset. The data structure perfectly matches the access pattern.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sequential_io", "append_only_log", "disk_performance", "access_patterns"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid reasoning. How do you handle the producer API? How does a producer know which broker to send to?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "producer_api" }
+    },
+    {
+      "role": "candidate",
+      "content": "The producer client fetches topic metadata from any broker — this metadata includes which partitions exist and which broker is the leader for each. The client caches this locally and refreshes periodically or on error. For the actual send: the producer batches messages headed for the same partition to amortize network overhead. Instead of sending 1,000 individual 1KB messages, it sends one 1MB batch. This is critical at our scale — at 10M msg/s, if each message were a separate network request, we'd need 10M TCP round-trips per second. With batching, we might send 10K batches of 1K messages each, which is very manageable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["metadata_discovery", "client_caching", "batching", "network_efficiency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the consumer side? How does a consumer group coordinate which consumer reads which partition?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "consumer_groups" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each consumer group has a group coordinator — one of the brokers elected for this role. When a consumer joins the group, it sends a JoinGroup request to the coordinator. The coordinator waits briefly for other consumers, then triggers a rebalance. It assigns partitions to consumers — the simplest strategy is round-robin: if we have 100 partitions and 5 consumers, each gets 20 partitions. The consumer then starts fetching from its assigned partitions at the last committed offset. Important: one partition is assigned to at most one consumer within a group — this is what guarantees ordering. If we have more consumers than partitions, some consumers sit idle.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["group_coordinator", "rebalance", "partition_assignment", "ordering_guarantee"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens during a rebalance? Is it seamless?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "consumer_rebalancing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Not seamless — rebalances are actually one of the biggest operational pain points. During a rebalance, all consumers in the group stop processing, revoke their partition assignments, re-join, get new assignments, and resume. This 'stop-the-world' pause can last seconds to minutes depending on the group size. There's a newer approach called 'incremental cooperative rebalancing' where only the affected partitions are revoked, and consumers keep processing their other partitions during the transition. That's much better but more complex to implement.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rebalance_pause", "stop_the_world", "cooperative_rebalancing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good depth. Let's talk about replication. How do you keep data safe when brokers can fail?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each partition has a configurable replication factor — say 3. One replica is the leader, the others are followers. All writes go to the leader. Followers continuously fetch from the leader to stay in sync. Kafka calls the set of caught-up followers the 'in-sync replica set' or ISR. A follower that falls behind is removed from the ISR. When the producer writes with acks=all, the leader waits for all ISR members to acknowledge before confirming to the producer. So if ISR has 3 members and one is slow, we wait for all 3. If the slow one drops out of ISR, we only wait for 2. This gives us durability without being held hostage by a slow replica.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["replication_factor", "leader_follower", "isr", "acks_all", "durability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "If the leader dies, how does a new leader get elected?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "leader_election" }
+    },
+    {
+      "role": "candidate",
+      "content": "The controller — a specially elected broker — monitors all brokers via heartbeats. When a leader broker dies, the controller picks a new leader from the ISR for each affected partition. It prefers in-sync replicas because they have all committed data. If no ISR member is available, we have a choice: either wait for one to come back (which means the partition is unavailable) or elect an out-of-sync replica (which means potential data loss). This is the 'unclean leader election' trade-off — availability versus data loss. I'd default to disabling unclean election for critical topics and enabling it for best-effort topics.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["controller", "leader_election", "isr", "unclean_leader_election", "availability_vs_durability"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent trade-off analysis. Now — at 10M messages per second, how do you handle the disk I/O? Walk me through the storage layer.",
+      "annotation": { "action": "scaling_probe", "phase": "scaling_failures", "target_concept": "storage_layer" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 10GB/s peak write throughput, disk I/O is definitely the bottleneck. The storage layer: each partition is a directory containing segment files. Each segment is a fixed-size file, say 1GB. When a segment fills up, we close it and open a new one. Only the active segment is being written to — one sequential write stream per partition. For reads, we use the OS page cache heavily. Consumers reading recent messages (the common case — within the last few minutes) are served directly from the page cache, meaning zero disk I/O for reads. Only consumers reading old data (replay from days ago) actually hit disk. This is why Kafka can handle enormous read throughput — the OS is doing the caching for us, and we don't need an application-level cache. For network efficiency, we use sendfile() (zero-copy) to transfer data from the page cache directly to the network socket without copying through user space. This saves CPU cycles and memory bandwidth significantly.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["segment_files", "page_cache", "zero_copy", "sendfile", "sequential_writes"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "After 7 days, how do you clean up old data? And is deletion the only option?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two retention strategies. Time-based deletion: a background thread checks each segment's timestamps. If all messages in a segment are older than 7 days, delete the entire segment file. Simple and efficient since we're deleting whole files, not individual messages. The second strategy is log compaction — instead of deleting by time, we keep only the latest value for each key. Imagine a topic that stores user profile updates. You don't need every historical update; you just need the latest state for each user. Compaction runs in the background: it reads old segments, deduplicates by key (keeping the latest), and writes a new compacted segment. This is useful for 'changelog' topics where the message queue doubles as a key-value store of current state.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["time_based_retention", "log_compaction", "segment_deletion", "changelog_topics"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We mentioned exactly-once delivery as an option. How would you implement that? It's notoriously hard.",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "exactly_once" }
+    },
+    {
+      "role": "candidate",
+      "content": "It is hard, and honestly I'm not 100% sure I can design it from scratch, but I know the approach. The problem: if a producer sends a message, the broker saves it, but the acknowledgment is lost due to a network issue, the producer retries and we get a duplicate. Solution: idempotent producers. Each producer gets a unique producer ID, and each message gets a sequence number per partition. The broker tracks the latest sequence number for each producer-partition pair. If a message arrives with a sequence number it's already seen, it's a duplicate and gets rejected. That handles producer-side exactly-once. For consumer-side exactly-once, it's harder — you need to atomically commit the consumer's offset and the processing result in one transaction. Kafka does this with transactional producers that write offsets and output messages in the same atomic transaction.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotent_producers", "sequence_numbers", "exactly_once", "transactions", "deduplication"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good honesty about the complexity. We're almost out of time — anything you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. Monitoring: track under-replicated partitions, consumer lag (how far behind each consumer group is), broker disk utilization, and network throughput. Consumer lag is probably the most important operational metric — if it grows, either the consumer is slow or the producer is spiking. I'd also add quotas — per-producer and per-consumer byte rate limits to prevent a single misbehaving client from overwhelming the cluster. And for security, TLS for encryption in transit and SASL for authentication.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "consumer_lag", "quotas", "security", "tls", "sasl"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Really strong interview. You showed great depth on storage internals, replication trade-offs, and the exactly-once problem. Well done.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 78,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Excellent capacity estimation — did storage math unprompted and it influenced design decisions",
+      "Deep understanding of sequential I/O advantages and page cache mechanics",
+      "Honest about complexity boundaries while still demonstrating solid knowledge of exactly-once semantics"
+    ],
+    "weaknesses": [
+      "API design was implicit — didn't explicitly define producer/consumer API contracts",
+      "Could have discussed multi-datacenter replication for disaster recovery"
+    ]
+  }
+}

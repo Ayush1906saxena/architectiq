@@ -1,0 +1,153 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "principal",
+    "candidate_profile": "zero-downtime-migration",
+    "total_exchanges": 22,
+    "generation_id": "seed_433"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We have a legacy monolithic URL shortener that's been running for 8 years. It's hitting scaling limits and we need to migrate to a new architecture. Design the migration plan assuming zero downtime — these short URLs are embedded in millions of marketing emails, QR codes, and social media posts.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a migration problem, not a greenfield design problem — and that changes everything. The hardest constraint isn't the new architecture, it's the transition. We have 8 years of short URLs in the wild that must continue to resolve. I'd use the strangler fig pattern: build the new system alongside the old one, gradually route traffic from old to new, and eventually decommission the old system. No big bang cutover — that's how you end up on the front page of Hacker News for all the wrong reasons.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["strangler_fig_pattern", "zero_downtime_migration", "legacy_constraints", "incremental_migration"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What does the current legacy system look like, and what are the specific pain points driving this migration?",
+      "annotation": { "action": "probe", "phase": "requirements", "target_concept": "legacy_assessment" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me hypothesize based on typical 8-year-old systems. The monolith: a single Rails or Django application handling both URL creation and redirects. Single PostgreSQL database, maybe 2TB with 4 billion short URL records. The pain points: redirect latency is creeping up as the database grows — p99 went from 30ms to 200ms over 3 years. Deployments require downtime because the monolith couples redirect and admin logic. No horizontal scaling — they've vertically scaled the DB server to the maximum instance size. The caching layer (probably Memcached) was bolted on and has inconsistency issues. And the team is afraid to make changes because there are no integration tests and the code is poorly documented. My first step before designing anything: a thorough audit of the current system — traffic patterns, data model, API contracts, and most importantly, the hidden behaviors that aren't documented but that customers depend on.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["legacy_assessment", "pain_points", "technical_debt", "hidden_dependencies", "system_audit"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good assessment. Walk me through the migration phases.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "migration_plan" }
+    },
+    {
+      "role": "candidate",
+      "content": "Five phases over 12-18 months. Phase 1 — Observe (weeks 1-4): instrument the legacy system comprehensively. Add detailed logging on every redirect and creation request. Build a traffic replay capability — record production traffic so we can replay it against the new system. Establish baseline metrics: latency percentiles, error rates, throughput, and data consistency checks. Phase 2 — Build (weeks 5-16): design and implement the new microservices architecture alongside the monolith. The new system has three services: redirect service (stateless, optimized for reads), creation service (handles URL shortening), and analytics service. New data store: sharded PostgreSQL for the new URL mappings, Redis cluster for caching. Phase 3 — Dual Write (weeks 17-24): all new URL creations write to both the old and new databases simultaneously. The old system remains the source of truth. Phase 4 — Shadow Traffic and Cutover (weeks 25-36): gradually route redirect traffic to the new system while comparing results. Phase 5 — Decommission (weeks 37-52): migrate remaining reads to the new system, verify, and shut down the old monolith.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["phased_migration", "traffic_replay", "dual_write", "shadow_traffic", "baseline_metrics", "decommission_plan"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's go deep on the dual-write phase. How do you ensure consistency between the two databases?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "dual_write" }
+    },
+    {
+      "role": "candidate",
+      "content": "Dual-write is the most dangerous phase — two databases means two potential sources of truth. My approach: write-through with verification. On every URL creation: write to the legacy database first (this is the source of truth), then synchronously write to the new database. If the new database write fails, log the failure and retry asynchronously — the URL still works because the legacy system is serving redirects. A reconciliation job runs continuously: it scans recent entries in both databases and flags any discrepancies. Expected discrepancies: the new DB might lag by a few seconds during async retries. Unexpected discrepancies — different short codes or missing entries — trigger an alert. For the historical backfill: a separate migration pipeline reads all 4 billion records from the legacy DB and writes them to the new DB in batches. This runs for weeks because we rate-limit it to avoid impacting legacy performance. We verify the backfill with a sampling check — read 1 million random URLs from both databases and compare every field. The exit criteria for this phase: the reconciliation job reports zero discrepancies for 7 consecutive days.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dual_write", "write_through", "reconciliation", "data_backfill", "consistency_verification", "exit_criteria"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the shadow traffic comparison work?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "shadow_traffic" }
+    },
+    {
+      "role": "candidate",
+      "content": "Shadow traffic is our safety net before any real cutover. We fork every redirect request: the legacy system serves the actual response to the user, while simultaneously sending a copy of the request to the new redirect service. A comparison service records both responses and diffs them. Comparison criteria: HTTP status code must match exactly, redirect destination URL must match exactly, and response latency must be within acceptable bounds. We categorize mismatches: critical (different destination URL — this means we'd send users to the wrong page, which is a data bug), latency regression (new system is slower — performance tuning needed), and benign (different response headers that don't affect user experience). We run shadow traffic for at least 2 weeks before any real cutover. The comparison report becomes our confidence metric: 100% match rate on critical criteria for 14 days is the gate. During shadow mode, we discover issues we'd never find in testing — edge cases like URL-encoded characters handled differently, unicode normalization, expired URLs returning different codes, and custom alias collision handling. Each issue is fixed and verified before proceeding.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["shadow_traffic", "response_comparison", "mismatch_classification", "edge_case_discovery", "confidence_metric"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now walk me through the actual cutover. How do you gradually shift traffic?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "gradual_cutover" }
+    },
+    {
+      "role": "candidate",
+      "content": "The cutover uses feature flags to control the routing percentage at the load balancer level. Stage 1 — 1% canary: route 1% of redirect traffic to the new system. Monitor for 48 hours. Check: error rate delta, latency delta, and run the comparison service on the same requests against the legacy system (belt and suspenders). If any metric degrades beyond threshold, auto-rollback to 0%. Stage 2 — 10%: increase to 10% for 1 week. At this volume, we catch issues that don't appear at 1%. Stage 3 — 50%: run both systems at equal load for 2 weeks. This is the most critical phase — if the new system can't handle half the production traffic, we know before it becomes primary. Stage 4 — 90%: the new system handles nearly all traffic. The legacy system handles 10% as a fallback. Stage 5 — 100%: full cutover. The legacy system remains running but receives no traffic — it's our emergency rollback path for 30 days. The routing is controlled by a feature flag that's flippable in under 5 seconds. If at any point during any stage an on-call engineer sees an anomaly, they flip the flag back. We also have an automated circuit breaker: if error rate exceeds 0.1% or p99 latency exceeds 200ms on the new system, traffic auto-reverts.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feature_flags", "canary_deployment", "gradual_rollout", "auto_rollback", "circuit_breaker", "rollback_path"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What are the rollback criteria? When do you decide to abort?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "rollback_criteria" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rollback criteria must be defined before the migration starts — not decided in the heat of an incident. Immediate automatic rollback (seconds): error rate exceeds 0.1% for any 1-minute window, p99 redirect latency exceeds 300ms (3x our target), or any 5xx error rate exceeds 0.01%. Manual rollback decision (minutes): p50 latency regression greater than 20%, cache hit rate drops below 80% (indicates data issues), or any data inconsistency detected by the comparison service. Migration pause (days): more than 3 manual rollbacks in a week — this indicates systemic issues that need root cause analysis before proceeding. We also define success criteria for each stage: the stage is not complete until all criteria are green for the specified duration. No 'looks good enough, let's move on.' The rollback mechanism itself must be tested: before starting the migration, we practice the rollback procedure in staging. We also run a 'fire drill' during Phase 1 where we deliberately rollback from 1% to 0% to verify the mechanism works in production.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rollback_criteria", "automated_rollback", "success_criteria", "rollback_testing", "fire_drill", "risk_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the data migration for 4 billion URLs? That's a massive backfill.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "data_migration" }
+    },
+    {
+      "role": "candidate",
+      "content": "The backfill is a multi-week operation that must not impact production. Approach: a streaming pipeline that reads from the legacy database using change data capture (CDC) — something like Debezium reading the PostgreSQL WAL. This captures both the historical backfill and real-time changes, eliminating the dual-write complexity for ongoing writes. The pipeline processes in three stages. Stage 1 — bulk historical: read the legacy database in batches of 10,000 records, sorted by creation date. Transform each record to the new schema. Write to the new database. Rate-limited to 50,000 records/sec to avoid impacting legacy DB performance — at this rate, 4 billion records take about 22 hours. Stage 2 — real-time catch-up: once the bulk historical is complete, switch to streaming CDC events. These include any URLs created during the bulk backfill that were missed. Process until the CDC lag is zero — we're caught up. Stage 3 — verification: sample 10 million random records and compare field-by-field between old and new databases. Run a full count verification. Check edge cases specifically — the oldest URLs, the newest URLs, URLs with special characters, custom aliases, and expired URLs. The backfill is idempotent — if it fails midway, we restart from the last checkpoint. Each batch records a high-water mark in a progress table.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_migration", "change_data_capture", "debezium", "bulk_backfill", "verification", "idempotency", "checkpointing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens to the new URL creation flow during migration? Which system generates short codes?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "creation_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is one of the trickiest coordination problems. During the dual-write phase, the legacy system remains the authority for short code generation — it continues using its existing encoding logic. The new database receives these codes via the dual-write or CDC pipeline. The risk: if both systems independently generate codes, we could get collisions. The solution is sequential authority transfer. Phase 1-3: legacy generates all codes. The new system is read-only for code generation — it only receives codes from the legacy system. Phase 4 (during cutover): we transfer code generation authority to the new system. This is done by reserving a range of the ID space. The legacy system uses IDs up to N (its current high-water mark). The new system starts generating from N+1M (with a gap for safety). We shut off code generation in the legacy system first, wait for all in-flight creations to complete (30-second drain), then enable code generation in the new system. The gap ensures no collision even if there's a race condition. After the cutover, we verify no codes in the gap were generated by either system.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["authority_transfer", "collision_prevention", "id_space_partitioning", "drain_period", "sequential_cutover"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the team dynamics? The team that built the legacy system might resist the migration.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "change_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "The people side of migration is often harder than the technical side. Several strategies. Inclusive design: involve the legacy team in designing the new system. They have 8 years of institutional knowledge about edge cases, hidden behaviors, and why certain 'weird' decisions were made. Dismissing their input is both wasteful and demotivating. Skill development: the migration is a growth opportunity. Engineers who've only worked on a monolith get to learn microservices, new databases, and modern deployment practices. Frame it as career development, not as 'your old system sucks.' Shared ownership: the migration team should be a mix of legacy team members and new hires. The legacy engineers know the current system's quirks; the new engineers bring fresh perspectives. Neither group owns the new system alone. Clear timeline: uncertainty kills morale. Publish a clear migration timeline with milestones. When people can see the end state and their role in it, they're more likely to engage constructively. Celebrate the legacy: the old system served millions of redirects reliably for 8 years. That's an achievement. The migration isn't a condemnation — it's a graduation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["change_management", "inclusive_design", "skill_development", "shared_ownership", "team_morale"], "depth": "strategic", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What are the success metrics for the overall migration?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": "success_metrics" }
+    },
+    {
+      "role": "candidate",
+      "content": "Success metrics across four dimensions. Reliability: zero user-facing incidents caused by the migration. Zero data loss. Zero broken redirects (measured by comparing a sample of 1 million URLs before and after). Performance: p99 redirect latency at or below 50ms (4x improvement from legacy's 200ms). p50 URL creation time under 100ms. Operational: deployment frequency increases from monthly to daily. On-call incidents decrease by 50% within 3 months of cutover. Time-to-recover from incidents decreases because the new architecture isolates failures better. Business: no measurable impact on click-through rates or redirect success rates during any migration phase. The ability to ship new features (analytics, branded links) that were impossible on the legacy architecture — this is the revenue justification. The ultimate success metric: 6 months after decommissioning the legacy system, no one has needed to reference it, file a bug against it, or wish it was back. That means we migrated not just the code, but the institutional knowledge.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["success_metrics", "reliability_metrics", "performance_improvement", "operational_metrics", "business_impact", "knowledge_migration"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Very thorough migration plan. The phased approach with clear rollback criteria and the attention to both technical and organizational challenges was impressive. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 80,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 6,
+      "scalability": 8,
+      "failure_handling": 9,
+      "communication": 9,
+      "migration_planning": 10,
+      "risk_management": 10,
+      "organizational_awareness": 9
+    },
+    "strengths": [
+      "Exceptional migration planning with clear phases, exit criteria, and rollback mechanisms",
+      "Strong data migration approach using CDC with idempotent processing and verification",
+      "Thoughtful treatment of organizational and human factors in the migration"
+    ],
+    "weaknesses": [
+      "Could have explored the new architecture's caching strategy in more depth",
+      "Didn't discuss capacity estimation for the new system's scale requirements",
+      "Limited discussion of the API design for the new microservices"
+    ]
+  }
+}

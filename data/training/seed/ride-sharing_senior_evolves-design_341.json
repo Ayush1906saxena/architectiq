@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "senior",
+    "candidate_profile": "evolves-design",
+    "total_exchanges": 22,
+    "generation_id": "seed_341"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing system like Uber or Lyft. Users request rides, drivers accept them, and the system matches them. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "What's our geographic scope — single city, country, or global? How many concurrent riders and drivers? Do we need to handle ride pools (shared rides) or just single-rider? What's our matching latency target — how quickly should a rider see a driver assigned?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geographic_scope", "concurrency", "ride_pooling", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Single country with 50 cities. 1 million concurrent riders, 500K concurrent drivers at peak. Single-rider only for now. Matching within 10 seconds. Walk me through your design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me estimate traffic. If the average ride is 15 minutes and we have 1M concurrent rides, that's about 1M / 15 * 60 = 4 million rides per hour, or roughly 1,100 ride requests per second. Each ride involves location updates from both rider and driver every 3-4 seconds. With 1.5M active users (riders + drivers), that's about 400K location updates per second. That's our hottest data path.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "location_updates"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good numbers. Now how does the matching work? A rider requests a ride — what happens?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "driver_matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Version 1 — simple nearest driver matching. When a rider requests a ride, the Matching Service queries available drivers near the rider's location. I'd use a geospatial index — drivers are stored in a grid system where the map is divided into cells (like S2 cells or geohash). For a rider at location (lat, lng), we query their cell plus adjacent cells to find nearby available drivers. Sort by straight-line distance. Assign the nearest available driver. Notify the driver, who accepts or declines. If declined, move to the next closest. This is simple, fast, and works for the common case.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["geospatial_index", "nearest_driver", "s2_cells", "geohash"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "A driver 1 mile away might take 15 minutes to reach the rider due to traffic, while a driver 2 miles away on the highway arrives in 5 minutes. How does your system handle that?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "eta_matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good point — straight-line distance is a poor proxy for actual arrival time. Let me evolve the design. Version 2 — ETA-based matching. Instead of sorting by distance, we compute the estimated time of arrival for each candidate driver. The Matching Service calls a Routing Service that uses road network data and real-time traffic conditions to compute actual driving time from each driver to the rider. We sort by ETA, not distance. This requires a routing engine — something like OSRM or a custom implementation using Dijkstra on a road graph weighted by current travel times. The traffic data comes from our own drivers' GPS traces — we aggregate speed data per road segment in real-time. The trade-off is that ETA computation is more expensive than distance calculation, so we first filter by distance (say, 5km radius) to limit candidates, then compute ETA only for those 20-50 nearby drivers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["eta_matching", "routing_service", "real_time_traffic", "candidate_filtering"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Better. Now what happens during Friday evening rush hour when there are 3x more riders than drivers?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Supply-demand imbalance. If we just use ETA matching, riders in high-demand areas wait forever or never get a match. We need Version 3 — demand-aware pricing and matching. Surge pricing: we divide each city into hexagonal zones. A Demand Service tracks ride requests per zone per minute and available drivers per zone. When the demand-to-supply ratio exceeds a threshold (say 1.5), we apply a surge multiplier to the price. This does two things: reduces demand (some riders won't pay 2x) and increases supply (drivers see the surge and drive toward those zones). The matching algorithm also changes. Instead of just minimizing ETA, we optimize for global efficiency — batch matching. Every 2 seconds, we collect all pending ride requests and available drivers in a region and solve an assignment problem: minimize total wait time across all rider-driver pairs, not just for individual riders. A greedy nearest-match might assign Driver X to Rider A (2 min ETA) when Driver X is the only option for Rider B (also 2 min), leaving Rider B with a 10-minute wait. Batch matching considers all pairings simultaneously.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_pricing", "demand_zones", "batch_matching", "global_optimization", "supply_demand_balancing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The design has evolved nicely. How do you solve the batch matching assignment problem efficiently? It sounds computationally expensive.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "matching_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "The optimal solution is the Hungarian algorithm for bipartite matching, but it's O(n^3) — too slow for thousands of riders and drivers. In practice, we use a greedy approximation with constraints. First, partition by zone — matching is local, so we only consider rider-driver pairs within the same zone or adjacent zones. This reduces the problem size to maybe 50-100 pairs per zone. Second, within each zone, use a priority queue sorted by ETA. Assign the best pair first, remove both from the pool, repeat. Third, add constraints: don't assign a driver who's heading away from the rider (even if currently close), prefer assignments where the driver can complete this ride and then serve a known upcoming demand hotspot. The approximation typically achieves 90-95% of the optimal total wait time but runs in O(n log n) per zone — fast enough for our 2-second batch window.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hungarian_algorithm", "greedy_approximation", "zone_partitioning", "constraint_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the location tracking infrastructure. 400K updates per second is a lot.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "location_tracking" }
+    },
+    {
+      "role": "candidate",
+      "content": "The location pipeline needs to handle 400K writes per second with low latency reads for matching. I'd use a dual-write approach. For real-time matching: Redis with geospatial commands (GEOADD/GEOSEARCH). Each driver's latest location is stored as a geo-indexed point. The Matching Service queries nearby drivers using GEOSEARCH — Redis handles millions of geo ops per second. We only store current location — no history needed for matching. For analytics and traffic modeling: the location stream goes to Kafka, which feeds a time-series store like TimescaleDB. This stores the full location history for computing traffic patterns, road speeds, and driver behavior analytics. The separation is important — the matching path is optimized for low-latency point-in-time queries, while the analytics path handles high-throughput append and batch queries.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_geospatial", "dual_write", "kafka", "time_series_db", "read_write_separation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the ride lifecycle? Walk me through the states a ride goes through.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "ride_lifecycle" }
+    },
+    {
+      "role": "candidate",
+      "content": "A ride is a state machine: REQUESTED -> MATCHING -> DRIVER_ASSIGNED -> DRIVER_EN_ROUTE -> ARRIVED -> IN_PROGRESS -> COMPLETED (or CANCELLED at several points). Each transition triggers actions. REQUESTED->MATCHING: enter the batch matching pool. MATCHING->DRIVER_ASSIGNED: notify driver, start acceptance timer (15 seconds). If driver declines or times out, back to MATCHING. DRIVER_ASSIGNED->DRIVER_EN_ROUTE: driver accepted, share ETA with rider, start tracking. DRIVER_EN_ROUTE->ARRIVED: driver within 50 meters of pickup, notify rider, start wait timer. ARRIVED->IN_PROGRESS: rider confirmed pickup, start metering (distance + time). IN_PROGRESS->COMPLETED: driver marks trip ended, compute fare, trigger payment. Cancellation has different rules at each state — free cancellation before driver assigned, cancellation fee after driver is en route. All state transitions are logged for auditing and dispute resolution.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ride_state_machine", "state_transitions", "cancellation_policy", "audit_logging"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you compute the fare? And how do you handle fare disputes?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "fare_computation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fare = base_fare + (per_mile_rate * distance) + (per_minute_rate * duration) + surge_multiplier + tolls + booking_fee. The distance and duration come from the actual GPS trace during the ride, not the estimated route. We record the GPS trail and compute the actual path traveled. For disputes: we show the rider the map of the actual route taken. If the driver took a longer route, we compare against the optimal route and charge the lesser of (actual distance, optimal distance + 10% buffer). The surge multiplier is locked at the time of booking — even if surge ends during the ride. All fare components are stored per-ride for transparency. For edge cases like GPS drift or tunnel dead zones, we interpolate using the road network — snap GPS points to the nearest road and fill gaps with shortest-path routing.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fare_computation", "gps_trace", "route_comparison", "dispute_resolution", "gps_correction"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What failure scenarios worry you?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_scenarios" }
+    },
+    {
+      "role": "candidate",
+      "content": "The biggest risk is the Matching Service going down — no new rides can be created. I'd run it as a stateless service behind a load balancer with at least 3 instances per city, auto-scaling based on request volume. The state is in Redis, so any instance can serve any request. Second: Redis going down. All driver locations are lost, matching breaks. Mitigation: Redis Cluster with replicas, plus each gateway server maintains a local cache of recent driver locations as a fallback with degraded accuracy. Third: payment processing failure after a completed ride. We decouple payment — the ride completes and fare is computed immediately, but payment is async. If the payment processor is down, the charge is queued and retried. The rider sees 'payment processing' and is charged when the processor recovers. No ride should fail because of a payment issue.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["matching_availability", "redis_failure", "payment_decoupling", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Any final thoughts on the three versions of matching you described?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The evolution from V1 to V3 is actually how I'd ship this. V1 (nearest driver) is an MVP — simple to implement, works for low traffic. V2 (ETA-based) is the first real improvement — requires a routing engine but dramatically improves rider experience. V3 (demand-aware batch matching with surge) is the mature system — handles peak load and optimizes globally. Each version can be deployed incrementally, and we can A/B test each improvement against the previous version to validate it actually improves key metrics: average wait time, match rate, driver utilization, and rider satisfaction. The system design interview format encouraged this progressive deepening, but this is genuinely how I'd build it in production too — iteratively, measuring impact at each step.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["iterative_design", "ab_testing", "progressive_improvement", "metrics_driven_development"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "I really enjoyed watching the design evolve through your three versions. Each was a meaningful improvement with clear reasoning. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 73,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 9
+    },
+    "strengths": [
+      "Design evolved naturally through three increasingly sophisticated versions with clear motivation for each",
+      "Strong geospatial system design with Redis geo-indexing and dual-write architecture",
+      "Excellent matching algorithm progression from greedy to ETA-based to global batch optimization"
+    ],
+    "weaknesses": [
+      "Initial V1 design was overly simplistic for senior level before evolving",
+      "Limited API design discussion — didn't cover rider/driver app APIs",
+      "Didn't discuss multi-region architecture despite 50-city requirement"
+    ]
+  }
+}

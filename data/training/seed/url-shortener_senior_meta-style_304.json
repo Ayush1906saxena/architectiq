@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "senior",
+    "candidate_profile": "meta-style",
+    "total_exchanges": 20,
+    "generation_id": "seed_304"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service. Think about this at Meta scale — billions of users, integrated with products like Facebook, Instagram, WhatsApp. What would you build?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "That's a great framing. Before I dive in, I want to understand the product context. Is this a standalone service like bit.ly, or is it embedded in the Meta ecosystem? For example, when someone shares a link on Facebook, does it automatically get shortened? And are we thinking about link previews, OG tags, and click-through analytics for advertisers?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["product_requirements", "use_cases"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Both. It's a platform service that all Meta products use. Every link shared on Facebook, Instagram, Messenger, and WhatsApp goes through this service. We need link previews, click tracking for ads, and abuse detection for malicious URLs. Think about the scale implications.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "product_requirements" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, so at Meta's scale, we're talking about 3+ billion daily active users across all platforms. If even 10% share or click a link daily, that's 300 million link creations and potentially 10-50 billion click events per day. The service isn't just shortening — it's a link intelligence platform. I'd break this into several sub-systems: link creation and storage, redirect service, link preview generation, click analytics pipeline, and URL safety scanning.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "product_requirements", "system_decomposition"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "I like that you're thinking about it as a platform. Let's focus on the social sharing use case first. When a user pastes a URL into a Facebook post, what happens?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "link_preview" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a user pastes a URL, the client sends it to our link preview service. This service fetches the page, extracts Open Graph meta tags — title, description, image — and renders a preview card. Simultaneously, we check the URL against our safety database for known malicious domains. If it's clean, we generate a shortened version. The shortened URL is what gets stored with the post. When another user sees the post in their feed, the preview card is already cached — we don't re-fetch it. When they click, the redirect goes through our service for tracking.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["link_preview", "url_safety", "caching_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does this integrate with News Feed? If a link is going viral, how does the system handle that?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "viral_content" }
+    },
+    {
+      "role": "candidate",
+      "content": "Viral links create a massive read amplification problem. A single link shared by someone with millions of followers could generate millions of redirects in minutes. I'd handle this in layers. First, a CDN layer — the most popular short URLs get pushed to edge servers globally. The redirect can happen at the CDN without hitting our origin. Second, a hot-key detection system that monitors click rates in real-time. When a URL crosses a threshold — say 10,000 clicks per minute — we promote it to a hot tier that's replicated across all cache nodes. Third, we feed this signal back to News Feed ranking: if a link is viral, it influences distribution algorithms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_redirect", "viral_content", "hot_key_detection", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about the click analytics. Advertisers are paying for link clicks. How do you ensure accurate counting at 50 billion events per day?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "analytics_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "For advertiser-facing analytics, accuracy is critical because it affects billing. I'd separate the click counting into two paths. The real-time path: every redirect event goes to a Kafka topic partitioned by link ID. Stream processors like Flink consume these events, deduplicate using a bloom filter on user-session pairs, and maintain running counts in a fast store like Redis. This powers the real-time dashboard. The batch path: all raw events land in a data warehouse. A daily batch job does exact deduplication, removes bot traffic using ML classifiers, and reconciles with the real-time counts. The batch numbers are the source of truth for billing. The two systems should agree within 2-3%; if they diverge more, we alert.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["analytics_pipeline", "kafka", "stream_processing", "deduplication", "batch_processing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle URL safety? A malicious link can spread to millions before you detect it.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "url_safety" }
+    },
+    {
+      "role": "candidate",
+      "content": "URL safety needs both proactive and reactive defenses. Proactively: when a URL is first submitted, we check it against a database of known bad domains and run it through an ML classifier trained on phishing patterns. This check is synchronous and must complete in under 200ms. Reactively: we continuously re-scan URLs that are getting high traffic. If a previously safe domain starts serving malware, we flag it within minutes. The redirect service checks a URL's safety status on every click. If flagged, instead of redirecting, we show an interstitial warning page. For scale, the safety database is distributed as a bloom filter to every redirect server — the initial check is local, and only potential positives go to the full safety service.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["url_safety", "ml_classification", "bloom_filter", "real_time_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the storage layer. How do you store the URL mappings for this scale?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "At Meta's scale, I'd use TAO or a similar social graph-aware cache backed by MySQL shards, since that's the Meta infrastructure pattern. But thinking generally: the mapping is simple key-value. I'd use a sharded MySQL or RocksDB-based store. The partition key is the hash of the short code. With 300M new URLs per day, after 5 years we have about 550 billion records. At 500 bytes each, that's 275 TB. Sharded across 1,000 database hosts at roughly 275 GB each, which is comfortable. Each shard handles about 300K writes per day — trivial. Reads are overwhelmingly served from cache; the DB mostly handles cache misses.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "sharding_strategy", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you A/B test changes to the redirect service? Say we want to test whether showing a brief interstitial page before redirecting improves ad attribution.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "ab_testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "A/B testing on the redirect path is tricky because latency is critical. I'd use a feature flag system where each request is bucketed by a hash of the user ID or session ID. The experiment framework assigns users to control (instant redirect) or treatment (interstitial page). Key metrics: click-through rate to the destination, ad conversion rate within 24 hours, user rage-click rate, and time-to-destination. We need statistical significance at the 95% level. With 50 billion daily clicks, even a 0.01% traffic allocation gives us 5 million samples per day — plenty for detecting small effects. The critical guardrail: if p99 redirect latency increases by more than 100ms in the treatment group, we auto-kill the experiment.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ab_testing", "experimentation", "metrics"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "WhatsApp has end-to-end encryption. How does your URL shortening service work there?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "privacy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question. With E2E encryption, we can't see message contents server-side, so we can't shorten URLs in transit. The shortening and link preview would need to happen client-side. The WhatsApp client would call our link preview API before sending the message, generate the preview card locally, and embed it in the encrypted message. The shortened URL can be created client-side too, but this means we don't see the original URL on our servers until someone clicks the short link. This has a privacy trade-off: we can still track clicks at the redirect layer, but we can't do pre-emptive safety scanning on URLs shared in WhatsApp until someone actually clicks.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["privacy", "encryption", "client_side_processing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you measure the health and quality of this overall service? What dashboards would you build?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd have three tiers of dashboards. Operational health: redirect latency at p50, p95, p99 broken down by region, cache hit rate, error rate, and QPS by product (Facebook vs Instagram vs WhatsApp). Product quality: link preview success rate, safety scan coverage and false positive rate, time-to-detection for malicious URLs. Business metrics: click-through rates by link type, ad attribution accuracy, and A/B experiment velocity. I'd also set up anomaly detection: if any metric moves more than 3 standard deviations from its weekly baseline, page the on-call.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["monitoring", "alerting", "metrics"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "A major region goes down — say US-East. What happens to the redirect service?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "multi_region" }
+    },
+    {
+      "role": "candidate",
+      "content": "The redirect service should be active-active across at least 3 regions. If US-East goes down, DNS-based global load balancing — something like Route 53 health checks — detects the failure within 30-60 seconds and stops routing traffic there. Users get redirected to US-West or EU. The database is replicated across regions, so any region can serve reads. There will be a latency spike for US-East users now routing to farther regions, maybe going from 20ms to 80ms. The cache in the surviving regions will see more misses initially for traffic that used to be US-East local, but it warms up within minutes. We'd also increase the capacity of surviving regions — our auto-scaling should handle this, but we keep 30% headroom in each region for exactly this scenario.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_region", "dns_failover", "active_active", "auto_scaling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last topic: how do you handle link rot? Over years, the destination URLs die but the short links are still clicked.",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "link_rot" }
+    },
+    {
+      "role": "candidate",
+      "content": "We could periodically crawl destination URLs to check if they're still alive. For high-traffic links, check daily. For low-traffic ones, weekly or monthly. If a destination returns 404 or is unreachable for 3 consecutive checks, we mark the short link as potentially broken. On the product side, rather than just showing a 404, we could redirect to a cached version via the Wayback Machine integration, or show a page that says 'this link may be broken' with context from the original share. For links in ads, we'd notify the advertiser. This is a product differentiator — most URL shorteners just 404.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["link_rot", "content_crawling", "user_experience"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent product thinking throughout. Thanks for the discussion.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 70,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 9
+    },
+    "strengths": [
+      "Excellent product-oriented thinking — framed the problem as a link intelligence platform",
+      "Strong integration awareness across Meta's product ecosystem",
+      "Good A/B testing and experimentation framework design"
+    ],
+    "weaknesses": [
+      "Did not detail the API contract or REST endpoints",
+      "Capacity estimation was surface-level compared to what the scale demands",
+      "Encoding strategy and ID generation were glossed over"
+    ]
+  }
+}

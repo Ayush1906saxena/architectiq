@@ -1,0 +1,375 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "sde2",
+    "candidate_profile": "good",
+    "total_exchanges": 20,
+    "generation_id": "seed_506"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Hey, welcome! Today we're going to design a ride-sharing service like Uber. It's a big problem, so don't worry about covering every detail -- I'm more interested in how you think through the design. Take it wherever you'd like to start.",
+      "annotations": {
+        "action": "opening",
+        "phase": "requirements",
+        "target_concept": "ride_sharing_system"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Thanks! Okay, so before jumping into the design, I want to make sure I understand the scope. Are we designing the core ride-hailing flow -- rider requests a ride, gets matched with a driver, takes the trip, and pays? Or should I also include things like ride pools, scheduled rides, or the driver onboarding process?",
+      "annotations": {
+        "quality": "good",
+        "concepts_mentioned": ["ride_hailing_flow", "rider_driver_matching", "ride_pools", "scheduled_rides"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great instinct to scope it down. Let's focus on the core flow: rider requests a ride, we match them with a nearby driver, they complete the trip, and payment is processed. No pooling for now.",
+      "annotations": {
+        "action": "answer_requirements",
+        "phase": "requirements",
+        "target_concept": "scope_definition"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. Let me think about the key requirements. On the functional side: riders can request rides by specifying a pickup and destination, the system finds and matches a nearby available driver, both parties can see each other's real-time location during the trip, the trip has a fare calculated at the end, and payment is charged automatically. On the non-functional side: low latency for the matching -- riders shouldn't wait more than a few seconds to be matched. The location tracking needs to be near-real-time, and the payment system needs to be reliable and consistent. I'd also think about the system being available in many cities. Does that sound right?",
+      "annotations": {
+        "quality": "good",
+        "concepts_mentioned": ["ride_request", "driver_matching", "real_time_location", "fare_calculation", "payment_processing", "low_latency_matching", "availability"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a solid set of requirements. You mentioned a few seconds for matching -- do you have a sense of the scale we're dealing with? Number of rides, drivers, that kind of thing?",
+      "annotations": {
+        "action": "probe",
+        "phase": "requirements",
+        "target_concept": "capacity_estimation"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, let me think. Uber does something like 20 million rides per day globally, I think. Maybe a few million active drivers. In a given city, at peak time, there might be tens of thousands of drivers and a similar number of ride requests coming in over an hour. I don't have exact numbers off the top of my head for things like location update frequency or storage, but I'd estimate drivers send location pings every 3-5 seconds.",
+      "annotations": {
+        "quality": "good",
+        "concepts_mentioned": ["rides_per_day", "active_drivers", "peak_load", "location_ping_frequency"],
+        "depth": "surface",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Those are reasonable ballpark numbers, and the location ping frequency is a good callout. Don't worry about being exact -- the intuition matters more. Go ahead and walk me through the high-level architecture.",
+      "annotations": {
+        "action": "acknowledge",
+        "phase": "requirements",
+        "target_concept": "capacity_estimation"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Alright. At a high level, I'd have these main services: A Rider Service that handles ride requests and the rider-facing API. A Driver Service that handles driver availability, location updates, and the driver-facing API. A Matching Service that takes a ride request and finds the best available driver. A Trip Service that manages the lifecycle of a trip once matched -- from pickup to drop-off. A Payment Service that calculates fares and processes payments. And a Location Service that ingests and stores real-time driver locations.\n\nIn front of all this, there's an API gateway and load balancers. The rider and driver apps talk to the gateway. For real-time communication like location updates and trip status changes, I'd use WebSockets or something like MQTT since we're dealing with mobile devices.\n\nFor data stores, I'm thinking a relational database like Postgres for user profiles, trip records, and payment history. And some kind of spatial index for driver locations so we can do fast proximity queries.",
+      "annotations": {
+        "quality": "good",
+        "concepts_mentioned": ["rider_service", "driver_service", "matching_service", "trip_service", "payment_service", "location_service", "api_gateway", "websockets", "mqtt", "postgres", "spatial_index"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice breakdown. The spatial index is interesting -- that's central to the matching problem. How would you implement that proximity lookup? How do you efficiently find drivers near a rider?",
+      "annotations": {
+        "action": "deepen",
+        "phase": "high_level_design",
+        "target_concept": "proximity_matching"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "So, the naive approach would be to calculate the distance from the rider to every available driver, but that's obviously O(n) and way too slow at scale. I know there are spatial indexing techniques... I think geohashing is one common approach? The idea is you divide the map into grid cells, and each cell gets a hash. When a driver updates their location, you compute their geohash and store them in that cell. When a rider requests a ride, you compute the rider's geohash, look up all available drivers in that cell and the neighboring cells, and then rank them by actual distance.\n\nThe nice thing about geohashes is they're strings, so you can store them in a regular key-value store or even a Redis sorted set. And they have a hierarchical property -- shorter prefixes correspond to larger areas, so you can adjust the precision based on how wide you want to search.",
+      "annotations": {
+        "quality": "good",
+        "concepts_mentioned": ["geohashing", "grid_cells", "spatial_indexing", "neighboring_cells", "key_value_store", "hierarchical_precision"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a good explanation of geohashing. What happens at the boundary between two geohash cells? Could a driver one block away end up in a different cell?",
+      "annotations": {
+        "action": "challenge",
+        "phase": "high_level_design",
+        "target_concept": "geohash_edge_cases"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh yeah, that's the classic edge case with geohashing. Two points that are physically close can be in completely different geohash cells if they're on opposite sides of a boundary. That's why you can't just look up the rider's own cell -- you have to query the 8 neighboring cells too. So for any ride request, you're actually doing 9 lookups: the rider's cell plus all adjacent cells. That covers the boundary problem for most practical cell sizes.\n\nIf you're in a very sparse area and there are no drivers in those 9 cells, you could widen the search by going to a shorter geohash prefix, which gives you a larger area. You'd do this iteratively until you find enough candidates or hit a maximum search radius.",
+      "annotations": {
+        "quality": "good",
+        "concepts_mentioned": ["boundary_problem", "neighboring_cell_query", "iterative_widening", "search_radius"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good recovery on the boundary issue. Now, once you've found candidate drivers, how does the actual matching work? What factors go into choosing the best driver?",
+      "annotations": {
+        "action": "deepen",
+        "phase": "deep_dive",
+        "target_concept": "driver_matching_algorithm"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "The simplest approach is nearest-driver-first: just pick the closest available driver. But that's probably not optimal. I'd consider a few factors: ETA to the rider, which is more meaningful than straight-line distance since it accounts for traffic and road networks. Driver rating -- you might slightly prefer higher-rated drivers. And maybe the driver's heading direction -- a driver who's already driving toward the rider is better than one at the same distance driving away.\n\nThe matching service would score candidate drivers using a weighted combination of these factors. The top-scored driver gets the ride request first. If they don't accept within, say, 15 seconds, we move to the next best driver.\n\nI think at Uber's scale they do something more sophisticated -- like batching multiple ride requests and drivers and doing an optimal assignment across all of them to minimize total wait time globally. But for a basic implementation, the greedy approach with a timeout fallback works.",
+      "annotations": {
+        "quality": "good",
+        "concepts_mentioned": ["eta_based_matching", "driver_rating", "heading_direction", "weighted_scoring", "timeout_fallback", "batch_matching", "greedy_approach"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a really thoughtful answer. I like that you mentioned the batch optimization approach even if you went with the simpler version. Now let's talk about failure cases. What happens if a driver accepts a ride but then cancels?",
+      "annotations": {
+        "action": "failure_probe",
+        "phase": "scaling_failures",
+        "target_concept": "driver_cancellation"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "If a driver cancels after accepting, the Trip Service detects the cancellation event and immediately re-enters the ride request into the Matching Service. The rider gets a notification that their driver canceled and that we're finding them a new one. The re-matching should exclude the driver who just canceled, and ideally it's fast because we already know the rider's location and can quickly query the spatial index again.\n\nTo discourage frequent cancellations, the system should track cancellation rates per driver. If a driver exceeds a cancellation threshold -- maybe more than 10% of their accepted rides in a week -- they could face penalties like temporary suspension or reduced priority in future matching.\n\nFrom the rider's perspective, we want to make this as seamless as possible. If the cancellation happens quickly -- within 30 seconds of acceptance -- we just silently re-match. If it happens later, when the driver was supposed to be en route, the rider gets a notification and maybe a small credit for the inconvenience.",
+      "annotations": {
+        "quality": "good",
+        "concepts_mentioned": ["automatic_rematch", "cancellation_tracking", "driver_penalties", "rider_notification", "cancellation_threshold"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good handling of that case. What about payment failures? The trip is complete, but the rider's credit card is declined.",
+      "annotations": {
+        "action": "failure_probe",
+        "phase": "scaling_failures",
+        "target_concept": "payment_failure"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, this is important because we can't just not pay the driver. I'd handle it in a few ways. First, at the time of ride request, before we even start matching, we should do a pre-authorization on the rider's payment method -- basically place a hold for an estimated fare amount. This catches most payment issues upfront.\n\nIf the pre-auth succeeds but the final charge fails -- maybe the card was canceled during the ride or the fare exceeded the hold amount -- then we'd retry the charge a few times with exponential backoff. If it still fails, the system marks the rider's account with an outstanding balance. The rider can't request new rides until the balance is settled. We'd send them notifications to update their payment method.\n\nThe driver should still get paid regardless. The ride-sharing platform absorbs the risk for that trip. The payment to the driver goes through the platform's own funds, and the platform pursues collection from the rider separately.\n\nI'd use an async payment processing queue for this -- something like a separate payment worker that handles retries and reconciliation so it doesn't block the main trip flow.",
+      "annotations": {
+        "quality": "good",
+        "concepts_mentioned": ["pre_authorization", "payment_hold", "retry_with_backoff", "outstanding_balance", "platform_absorbs_risk", "async_payment_queue", "reconciliation"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a practical approach. I appreciate that you thought about paying the driver regardless -- that's the right call. Let me ask about the trip lifecycle. Walk me through the state machine for a trip.",
+      "annotations": {
+        "action": "probe",
+        "phase": "deep_dive",
+        "target_concept": "trip_state_machine"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. A trip goes through these states: REQUESTED -- the rider has submitted a ride request and we're looking for a driver. MATCHED -- a driver has been assigned and is en route to the pickup. ARRIVED -- the driver has arrived at the pickup location. IN_PROGRESS -- the rider has been picked up and the trip is underway. COMPLETED -- the rider has been dropped off at the destination. And then PAID -- payment has been processed.\n\nThere are also failure states: CANCELLED_BY_RIDER and CANCELLED_BY_DRIVER can happen from REQUESTED or MATCHED states. NO_DRIVERS_AVAILABLE if we can't find a match within a timeout. And PAYMENT_FAILED as a terminal state if payment can't be resolved.\n\nEach state transition is an event that gets persisted to the trip record and triggers downstream actions -- like MATCHED triggers a push notification to both parties, ARRIVED triggers a notification to the rider, COMPLETED triggers fare calculation and payment processing. I'd store these as an event log per trip, which is useful for debugging and auditing.",
+      "annotations": {
+        "quality": "good",
+        "concepts_mentioned": ["state_machine", "trip_states", "state_transitions", "event_log", "push_notifications", "audit_trail"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice state machine. What about surge pricing? How would you handle dynamic pricing when demand exceeds supply in a given area?",
+      "annotations": {
+        "action": "probe",
+        "phase": "deep_dive",
+        "target_concept": "surge_pricing"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, surge pricing. At a high level, the idea is to increase prices when demand is high and supply is low in a given area, which incentivizes more drivers to come to that area and also reduces demand from price-sensitive riders.\n\nI think you'd monitor the ratio of ride requests to available drivers per geographic zone. If the ratio exceeds some threshold, you apply a multiplier to the fare. The higher the imbalance, the higher the multiplier.\n\nI'm not super deep on the algorithmic details of how you compute the surge multiplier -- I think Uber has done a lot of work on this. But architecturally, I'd have a Pricing Service that the Rider Service calls when a ride is requested. The Pricing Service checks the current supply-demand ratio for the rider's zone and returns a fare estimate with any surge multiplier applied. The rider sees this before confirming, so there's transparency.",
+      "annotations": {
+        "quality": "mediocre",
+        "concepts_mentioned": ["supply_demand_ratio", "fare_multiplier", "pricing_service", "rider_transparency"],
+        "depth": "surface",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's the right high-level idea. Don't worry about the exact algorithm -- the architectural separation of a Pricing Service is the key insight. Let's talk about the database design. What does your schema look like for the core entities?",
+      "annotations": {
+        "action": "redirect",
+        "phase": "deep_dive",
+        "target_concept": "database_design"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "The core entities would be: A Users table with user_id, name, email, phone, type (rider or driver), and rating. A Drivers table extending users with vehicle info, license, current availability status, and current location. A Trips table with trip_id, rider_id, driver_id, pickup location, destination, status, fare, surge multiplier, timestamps for each state transition. A Payments table with payment_id, trip_id, amount, payment method, status, and timestamps.\n\nFor the relational tables -- users, trips, payments -- I'd use Postgres. Trips would be partitioned by time since most queries are for recent trips.\n\nFor driver locations, which update every few seconds, a relational database isn't a great fit. I'd store the current location in Redis using the geospatial data structures -- Redis has built-in support for GEOADD and GEORADIUS commands, which handle the proximity queries I mentioned earlier. This is faster than maintaining a separate geohash index manually.\n\nTrip history for analytics and reporting could be streamed to a data warehouse separately.",
+      "annotations": {
+        "quality": "good",
+        "concepts_mentioned": ["users_table", "drivers_table", "trips_table", "payments_table", "postgres", "time_partitioning", "redis_geospatial", "geoadd", "georadius", "data_warehouse"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Using Redis GEO commands is a nice practical choice. How would you handle the case where you're expanding to a new city? Any architectural considerations?",
+      "annotations": {
+        "action": "scaling_probe",
+        "phase": "scaling_failures",
+        "target_concept": "multi_city_scaling"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Good question. I think the main consideration is data isolation per city or region. Matching is inherently local -- a driver in San Francisco can't pick up a rider in New York. So it makes sense to partition the Location Service and Matching Service by city or region. Each city gets its own Redis instance for driver locations, which keeps the data set small and queries fast.\n\nThe user-facing services -- user profiles, payment -- can be global since a user might travel between cities. But the real-time operational data is partitioned geographically.\n\nFor deploying to a new city, it would mostly be a configuration change: define the city boundaries, spin up a new location Redis instance, configure the routing in the API gateway so requests from that city go to the right matching cluster. The core services are shared.\n\nI'd also want per-city configuration for things like fare rates, surge pricing parameters, and supported vehicle types, since these vary by market.",
+      "annotations": {
+        "quality": "good",
+        "concepts_mentioned": ["geographic_partitioning", "data_isolation", "per_city_redis", "global_user_data", "configuration_driven_deployment", "per_city_config"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a clean approach. One last thing -- what about ensuring the driver's location is accurate? What if the GPS data is noisy or delayed?",
+      "annotations": {
+        "action": "probe",
+        "phase": "deep_dive",
+        "target_concept": "location_accuracy"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "GPS can definitely be noisy, especially in cities with tall buildings. A few things I'd do: First, sanity checks on location updates. If a driver's location jumps 10 kilometers in 3 seconds, that's clearly a GPS glitch -- we should discard that update and maybe use the last known good location. Second, we could use a simple smoothing algorithm on the server side, like a Kalman filter or even a moving average, to reduce noise in the location stream. Third, we should factor in the road network -- snap the GPS coordinates to the nearest road using a map-matching service. This is important both for display and for ETA calculations.\n\nFor delayed updates, if we haven't received a ping from a driver in, say, 30 seconds, we should mark them as potentially offline and not include them in matching queries until we get a fresh update. This prevents matching riders with drivers whose last known location is stale.",
+      "annotations": {
+        "quality": "good",
+        "concepts_mentioned": ["gps_noise", "sanity_checks", "kalman_filter", "moving_average", "map_matching", "road_snapping", "stale_location_timeout"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great thinking on the practical details. We're running low on time. Any final thoughts on what you'd want to add if you had more time?",
+      "annotations": {
+        "action": "wrap_up",
+        "phase": "wrap_up",
+        "target_concept": "closing"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "If I had more time, I'd want to dig into a few things. First, the ETA estimation service -- that's a complex problem involving real-time traffic data, routing algorithms, and ML models. Second, I'd want to design the real-time tracking properly with WebSocket connection management and handling for when mobile connections drop. Third, fraud detection -- both from riders and drivers -- things like fake trips or manipulating GPS to inflate fares. And finally, I'd want to think more carefully about the data pipeline for analytics, since understanding supply-demand patterns is crucial for the business.",
+      "annotations": {
+        "quality": "good",
+        "concepts_mentioned": ["eta_estimation", "real_time_tracking", "websocket_management", "fraud_detection", "analytics_pipeline"],
+        "depth": "surface",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Those are all great areas to explore. You covered the core design really well -- solid service decomposition, good understanding of the spatial matching problem, and practical thinking on failure cases. Thanks for a great session!",
+      "annotations": {
+        "action": "wrap_up",
+        "phase": "wrap_up",
+        "target_concept": "closing"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Thank you, I really enjoyed it! The matching and location problems are really interesting to think through.",
+      "annotations": {
+        "quality": "good",
+        "concepts_mentioned": [],
+        "depth": "none",
+        "has_reasoning": false,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    }
+  ],
+  "scorecard": {
+    "overall": 63,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 68,
+      "capacity_estimation": 45,
+      "api_design": 55,
+      "database_design": 65,
+      "caching_strategy": 60,
+      "scalability": 62,
+      "failure_handling": 70,
+      "communication": 72
+    },
+    "strengths": [
+      "Asked good scoping questions upfront and identified clear functional and non-functional requirements",
+      "Understood geohashing well when prompted and correctly addressed the boundary problem with neighboring cell lookups",
+      "Handled driver cancellation and payment failure scenarios with practical and thorough solutions",
+      "Trip state machine was well-defined with appropriate failure states and event-driven transitions",
+      "Good practical instincts like using Redis GEO commands and GPS noise handling with map matching"
+    ],
+    "weaknesses": [
+      "Did not perform detailed capacity estimation -- no calculation of QPS, storage needs, or bandwidth requirements",
+      "Surge pricing discussion was surface-level; acknowledged the gap but couldn't provide architectural depth on pricing algorithms or real-time demand signal processing",
+      "Did not discuss caching strategy beyond the location store -- no mention of caching trip data, user profiles, or fare estimates",
+      "API design was implicit rather than explicit -- no endpoint definitions, request/response schemas, or versioning discussion",
+      "Did not address multi-region replication, disaster recovery, or data consistency across geographic partitions"
+    ]
+  }
+}

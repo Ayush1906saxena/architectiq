@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "staff",
+    "candidate_profile": "backend-strong-frontend-weak",
+    "total_exchanges": 22,
+    "generation_id": "seed_095"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed system. Users follow other users, and they see a feed of recent posts from people they follow. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "What's our scale? Number of DAUs, average follows per user, average posts per user per day? And what's the expected feed latency — how fast should the feed load?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "300 million DAUs, average user follows 200 people, average user posts 2 tweets per day. Feed load time should be under 200ms. Some users have millions of followers.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me run the numbers. 300M DAUs posting 2 tweets/day = 600M tweets/day ≈ 7,000 writes per second. For feed reads, if each DAU checks their feed 10 times/day, that's 3 billion feed reads/day ≈ 35,000 reads per second. But the real challenge is the fan-out — when a user with 10M followers posts, we need that tweet to appear in 10M feeds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "fan_out"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly. How would you handle that fan-out problem?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hybrid approach. For regular users — say under 10K followers — we do fan-out on write. When they post, a background worker pushes the tweet ID into each follower's pre-computed feed in Redis. This is a sorted set keyed by user ID, scored by timestamp. For celebrity users — over 10K followers — we do fan-out on read. Their tweets are fetched at read time and merged with the pre-computed feed. This avoids the pathological case of a 10M-follower user triggering 10M Redis writes on every tweet.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "hybrid_fan_out", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Walk me through the write path in detail — a normal user posts a tweet.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "write_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "User posts a tweet via the write API. The API server validates and persists the tweet to a Cassandra cluster — partitioned by user_id, clustered by timestamp descending. Cassandra is ideal here because tweets are append-only and we need fast writes at scale. After persisting, we publish an event to Kafka — topic partitioned by poster's user_id for ordering. A fan-out worker consumes from Kafka, looks up the poster's follower list from a followers service backed by a graph database, then pushes the tweet_id into each follower's Redis sorted set. We cap each feed at 800 entries and trim older ones.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka", "cassandra", "fan_out", "redis_caching", "graph_database"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if the fan-out worker falls behind? Say a celebrity with 500K followers posts 5 tweets rapidly.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "backpressure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several layers of protection. First, Kafka gives us buffering — the fan-out workers consume at their own pace and Kafka retains messages. We can have multiple consumer groups and scale workers horizontally — partition by user_id ensures ordering per poster. Second, we batch Redis writes — instead of individual ZADD commands, we pipeline 1000 at a time which dramatically increases throughput. Third, if a user crosses our celebrity threshold mid-session, we dynamically switch them to fan-out-on-read. Fourth, back-pressure: if consumer lag exceeds a threshold, we temporarily stop fan-out for celebrity-adjacent users (50K-100K followers) and switch them to read-time merge.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka", "backpressure", "fan_out", "redis_pipelining"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. Now let's talk about the data model for the follower graph. How is that stored and queried?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "graph_database" }
+    },
+    {
+      "role": "candidate",
+      "content": "The follower graph is stored in two places. For the fan-out service, we need fast lookup of 'all followers of user X' — I'd use Cassandra with a table partitioned by followed_user_id, so fetching all followers is a single partition scan. For the social graph queries like 'does A follow B?' and 'mutual followers', I'd use a dedicated graph store like TAO — Facebook's approach — essentially a sharded MySQL-backed graph with aggressive caching. The follower list is also cached in Redis as a set for the most active users. On follow/unfollow, we update both the persistent store and invalidate the Redis cache.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["graph_database", "cassandra", "redis_caching", "cache_invalidation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great backend depth. Now let's switch gears. How does the mobile app actually fetch and display the feed? Walk me through the client-side experience.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "api_pagination" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure... the mobile app makes a GET request to our feed endpoint and gets back a list of tweets. We'd return them as JSON with the tweet content, author info, and timestamps. The client renders them in a list view.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["api_design"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's pretty high-level. How does pagination work? The user scrolls down — how do they get the next page? And what happens when new tweets arrive while they're reading?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "api_pagination" }
+    },
+    {
+      "role": "candidate",
+      "content": "Pagination... we could use offset-based pagination? Like page=1, page=2? And for new tweets, maybe we poll every few seconds?",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["api_pagination"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Offset-based pagination has problems with feeds that change frequently. What happens if 10 new tweets arrive between page 1 and page 2 requests?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "api_pagination" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh — the user would see duplicates because everything shifted. We should use cursor-based pagination instead. The cursor would be... the timestamp or tweet ID of the last item in the current page. So the next request says 'give me tweets older than this ID.' That way inserts at the top don't affect the scroll position. Though I'm less sure about the exact API contract for this.",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["cursor_pagination", "api_design"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Better. What about caching on the client side? If the user closes the app and reopens it, should they see their old feed instantly while new data loads?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "client_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "That makes sense from a UX perspective. I imagine the mobile app would cache the last fetched feed locally... in SQLite or something? And on app open, show the cached version first while fetching fresh data in the background. I'm honestly less familiar with the mobile caching patterns here — maybe a stale-while-revalidate approach similar to what we do on the backend with HTTP caching headers?",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["client_caching"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's the right general direction. What about push notifications for new tweets versus pull-based refresh?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "push_vs_pull" }
+    },
+    {
+      "role": "candidate",
+      "content": "For real-time updates, I think we'd use a long-polling or WebSocket connection from the app. When the feed service detects new tweets for a user, it pushes a notification through the WebSocket saying 'you have 5 new tweets.' The client shows a 'New tweets' banner and fetches them on tap. For users not currently connected, we don't push — they get fresh data on next open. I know the concept but I'm less certain about managing millions of persistent WebSocket connections from mobile clients specifically — battery implications and reconnection on network switches.",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["websocket", "push_vs_pull", "long_polling"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair enough. Let's go back to your strength. How would you handle a Redis cluster failure that wipes out the pre-computed feeds?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good scenario. If Redis goes down, we fall back to fan-out-on-read for everyone — the feed service queries the follower graph, fetches the latest tweets from each followed user's timeline in Cassandra, merges and sorts them. This is expensive: for a user following 200 people, that's 200 Cassandra queries per feed load. At 35K reads/sec, that's 7M Cassandra queries/sec — a lot but doable with our cluster if we limit the merge to top 50 followees by recent activity. Meanwhile, we rebuild the Redis cache in the background by replaying from Kafka — we retain 7 days of messages. Full cache recovery takes about 2-3 hours for 300M users.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_failure", "fan_out", "kafka", "disaster_recovery"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid recovery strategy. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few: content ranking beyond chronological — we could add an ML scoring layer that re-ranks the feed based on engagement signals, but that's a separate deep dive. Rate limiting on the post API to prevent spam. Content moderation pipeline running async on new tweets. And I acknowledge my frontend and mobile gaps — in a real system I'd work closely with the mobile team on the client-side caching and pagination contracts.",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["ranking", "rate_limiting", "content_moderation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good self-awareness. Strong backend design overall. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 62,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 4,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 5
+    },
+    "strengths": [
+      "Exceptional backend architecture — hybrid fan-out, Kafka pipeline, Cassandra data model",
+      "Strong capacity estimation with concrete numbers throughout",
+      "Thorough failure handling with Redis recovery strategy"
+    ],
+    "weaknesses": [
+      "Very weak on API pagination — initially suggested offset-based before being corrected",
+      "Couldn't articulate mobile client caching patterns or API contracts",
+      "Vague on push notification architecture and WebSocket management for mobile"
+    ]
+  }
+}

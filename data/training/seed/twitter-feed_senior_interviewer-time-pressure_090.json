@@ -1,0 +1,132 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "interviewer-time-pressure",
+    "total_exchanges": 20,
+    "generation_id": "seed_090"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed. 200 million DAU, real-time feed. Go.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure, let me ask some clarifying questions. What's the average number of follows per user? Do we need ranked feed or chronological? What about media — images, videos?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["social_graph", "feed_ranking"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Average 300 follows. Chronological. Text and images. Let me jump ahead — we only have 10 minutes left for this problem, so let's move fast.",
+      "annotation": { "action": "time_pressure", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh, okay. Let me quickly outline the approach. The key decision is fanout-on-write versus fanout-on-read. With 200M DAU, fanout-on-write — pre-computing feeds — makes reads fast. When someone tweets, push to all followers' feed caches. I'd use Redis sorted sets for the feed cache, Kafka for async fanout, and — ",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fanout_on_write", "fanout_on_read", "redis_caching", "kafka"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Quick — what about celebrities with millions of followers? That fanout is enormous.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "celebrity_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right — hybrid approach. Celebrities use fanout-on-read. Normal users use fanout-on-write. The threshold could be, uh, 500K followers? When a user opens their feed, we merge the pre-computed feed with live queries for celebrity tweets. The merge is — ",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fanout_on_write", "fanout_on_read", "celebrity_problem"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you store tweets? Be specific about the database.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "Tweets in a sharded MySQL — no wait, I should think about this. Actually, tweets are write-heavy, append-only. Maybe Cassandra would be better for the write pattern. But MySQL is simpler to operate. Let me go with MySQL sharded by user_id — no, by tweet_id because we need to look up individual tweets for feed hydration. Actually...",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["database_choice", "sharding_strategy", "cassandra"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You're going back and forth. Pick one and commit.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "MySQL sharded by user_id. Each user's tweets are on one shard, which makes the fanout-on-read path for celebrities efficient — query one shard per celebrity. For feed hydration, we have the tweet IDs from Redis and batch-fetch from the tweet cache, which sits in front of MySQL. Cache miss goes to the database.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["database_choice", "sharding_strategy", "redis_caching"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the feed for a new user who just signed up and followed 300 people? Their feed cache is empty.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cold_start" }
+    },
+    {
+      "role": "candidate",
+      "content": "Cold start — we need to backfill their feed. On first follow, or when the feed cache is empty, we do a fanout-on-read: fetch recent tweets from all 300 followed users, merge and sort, populate the cache, and return. This is slow — maybe 500ms to 1 second — but it only happens once. After that, the fanout-on-write keeps the cache updated. We could also pre-populate with trending or popular content while the feed backfill happens in the background.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cold_start", "fanout_on_read", "backfill"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running out of time. Quickly — what's the capacity estimation for the Redis feed cache?",
+      "annotation": { "action": "time_pressure", "phase": "deep_dive", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, fast math. 200M DAU, each user's feed cache stores last 500 tweet IDs. Each tweet ID is 8 bytes. 500 * 8 = 4KB per user. 200M * 4KB = 800GB. With Redis overhead, call it 1.2TB. That's maybe 40 Redis nodes at 32GB each. But we also need to account for — actually, we're probably fine with that cluster size.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["capacity_estimation", "redis_caching"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the write path? How many fanout writes per second?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "If 5% of users tweet daily, that's 10M tweets per day from non-celebrities. Average 300 followers, so 3 billion fanout writes per day — about 35,000 writes per second to Redis. That's... that's manageable for a Redis cluster. But wait, celebrities are fanout-on-read, so the actual fanout is less. Maybe 20,000 writes per second. The Kafka layer between the tweet write and the fanout service absorbs any spikes.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "kafka"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last 30 seconds. What would you add if you had more time?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Failure handling — what happens when Redis goes down, how to rebuild feed caches. Image storage and CDN for media tweets. Real-time notifications via WebSocket. And I'd want to revisit the database choice more carefully — I rushed that decision and I'm not fully confident in the sharding strategy.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cache_failure", "cdn_redirect", "websocket", "database_choice"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair enough. I appreciate the honesty about the database decision. You covered a lot of ground quickly but the time pressure showed — some decisions were less structured than they could have been. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 55,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 6,
+      "api_design": 3,
+      "database_design": 4,
+      "caching_strategy": 6,
+      "scalability": 5,
+      "failure_handling": 3,
+      "communication": 5
+    },
+    "strengths": [
+      "Good understanding of hybrid fanout approach",
+      "Reasonable capacity estimation done quickly under time pressure",
+      "Honest about areas where the design was rushed — self-awareness is valuable"
+    ],
+    "weaknesses": [
+      "Waffled on database choice under time pressure — MySQL vs Cassandra vs sharding key",
+      "No API design — never specified endpoints or data flow",
+      "Failure handling completely skipped due to time — acknowledged at the end but not addressed",
+      "Communication became fragmented and less structured as time pressure increased",
+      "No discussion of social graph storage, search, or notifications"
+    ]
+  }
+}

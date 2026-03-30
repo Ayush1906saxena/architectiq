@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "staff",
+    "candidate_profile": "overcomes-nervousness",
+    "total_exchanges": 20,
+    "generation_id": "seed_340"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a web search engine — the core search infrastructure that takes a query and returns ranked results. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Um, okay. So... how many web pages are we indexing? And what's the query volume? Is that right... I mean, are those the right questions to ask?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["scale"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Those are exactly the right questions. 10 billion web pages in our index, 100,000 queries per second. P99 query latency under 500ms. You're on the right track — keep going.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay... thanks. So we need a web crawler, an indexer, and a query serving layer. Is that... I mean, those are the main components, right?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["crawler", "indexer", "query_serving"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes, that's exactly right. Those are the three core pillars. You clearly know the architecture — walk me through each one. Start wherever you're most comfortable.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, let me start with the crawler since it's the data pipeline. The crawler needs to discover and fetch 10 billion pages. It starts with a seed set of URLs, fetches each page, extracts links, and adds new URLs to a frontier queue. The key challenges are: politeness — we can't hammer any single domain, so we need per-domain rate limiting with a delay between requests, maybe 1 second per domain. Prioritization — we should crawl popular and frequently-changing pages more often than obscure static pages. And deduplication — we need to detect and skip duplicate or near-duplicate content. The frontier is a priority queue sharded by domain, so all URLs for a domain are processed by the same crawler worker, making rate limiting simple.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["web_crawler", "politeness", "url_frontier", "deduplication"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good — that's a solid crawler overview. Now tell me about the indexing layer. How do you go from raw HTML to something queryable?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "indexing" }
+    },
+    {
+      "role": "candidate",
+      "content": "The indexer takes crawled pages and builds an inverted index. For each page, we parse the HTML, extract text, tokenize it, apply stemming and stop-word removal, then for each token, we add an entry to the inverted index: token -> [(doc_id, position, field_type), ...]. The field_type marks whether the term appeared in the title, headers, body, anchor text — this matters for ranking later. The inverted index is the core data structure. For 10 billion pages, it's massive. If each page has 1000 unique tokens on average, that's 10 trillion term-document entries. Even at 12 bytes each (4-byte doc_id, 4-byte position, 4-byte metadata), that's 120TB. We'd need to partition the index across many machines.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["inverted_index", "tokenization", "stemming", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great sizing. How do you partition the index?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "index_partitioning" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two approaches. Term-based partitioning: each shard holds the complete posting list for a subset of terms. Advantage: a single-term query hits only one shard. Disadvantage: multi-term queries need a scatter-gather across multiple shards, and popular terms like 'the' create hot shards. Document-based partitioning: each shard holds the index for a subset of documents. Every query hits every shard (each shard searches its documents), and results are merged. Advantage: more uniform load distribution. Disadvantage: every query fans out to all shards. I'd choose document-based partitioning. With 120TB of index data and, say, 500GB per shard, we need 240 shards. Each query fans out to all 240 shards, but each shard's work is small and local. At 100K QPS, that's 100K * 240 = 24M shard queries per second. With 3 replicas per shard, each replica handles 24M / (240 * 3) = ~33K queries per second — manageable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["index_partitioning", "document_based_sharding", "term_based_sharding", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong analysis. Now the most interesting part — ranking. How do you decide which results appear first?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Ranking is multi-stage. First, retrieval — find all documents containing the query terms. This comes from the inverted index. Second, scoring — rank those documents by relevance. The classic scoring function is BM25, which I can explain in detail. BM25 computes a relevance score based on three factors: term frequency (TF) — how often the query term appears in the document, with diminishing returns (a term appearing 100 times isn't 100x more relevant than appearing once). Inverse document frequency (IDF) — terms that appear in fewer documents are more discriminative. And document length normalization — longer documents naturally have more term occurrences, so we normalize to avoid bias toward long pages. The formula is: score(q, d) = sum over query terms of IDF(t) * (TF(t,d) * (k1 + 1)) / (TF(t,d) + k1 * (1 - b + b * |d|/avgdl)). The parameter k1 controls TF saturation — typically 1.2. The parameter b controls length normalization — typically 0.75. IDF is computed as log((N - n(t) + 0.5) / (n(t) + 0.5)) where N is total documents and n(t) is documents containing term t.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["bm25", "tf_idf", "relevance_scoring", "document_length_normalization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a confident explanation. How does BM25 fit into the broader ranking pipeline?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "ranking_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "BM25 is just the text relevance signal — phase one of a multi-phase ranker. Phase 1: BM25 scoring on each shard, returning the top-K documents per shard. This is fast because it only uses the inverted index. Phase 2: Feature enrichment — for the top results (say top 1000 after merging from all shards), we look up additional signals: PageRank (link-based authority), click-through rate from historical query logs, page freshness, domain authority, anchor text signals. Phase 3: ML re-ranking — a learned-to-rank model (LambdaMART or a neural model) that combines all these features into a final relevance score. The ML model is trained on click data: queries where users clicked result #3 but skipped #1 and #2 tells us #3 was more relevant for that query. Phase 4: Post-processing — deduplication, diversity injection (avoid showing 5 results from the same domain), spell correction suggestions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_phase_ranking", "pagerank", "learn_to_rank", "click_through_rate", "diversity"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. How do you keep the index fresh as web pages change?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "index_freshness" }
+    },
+    {
+      "role": "candidate",
+      "content": "The crawler needs to re-crawl pages periodically, but not all pages at the same frequency. News sites change hourly; a personal blog from 2015 might not change for years. I'd assign each URL a recrawl priority based on: historical change frequency (how often has this page changed in past crawls), page importance (PageRank — important pages should be fresher), and content type (news, social media get higher priority). The index update itself can be handled two ways. Batch: periodically rebuild the entire index from the latest crawl data. This gives a clean, optimized index but introduces staleness — hours between updates. Incremental: apply deltas to the live index as pages are re-crawled. Faster freshness but the index accumulates fragmentation over time. I'd use both: incremental updates for freshness during the day, and a nightly batch rebuild for optimization. The serving layer switches between index versions atomically — new version warms up in the background, then we swap traffic.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["crawl_scheduling", "incremental_indexing", "batch_rebuilding", "index_versioning"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle query latency? 500ms p99 with 240 shards is tight.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "query_latency" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 240 shards, the query latency is dominated by the slowest shard — the tail latency problem. A few strategies. First, replicas: with 3 replicas per shard, the query broker can send the request to the replica with the shortest queue, reducing tail latency. Second, early termination: each shard doesn't need to score all matching documents. Using a technique like WAND (Weak AND), we maintain a running threshold of the current top-K scores and skip documents that can't possibly beat it. This dramatically reduces work for broad queries. Third, tiered index: keep the top 1 billion most important pages in a 'premium' tier with faster storage (SSDs, more memory for caching). Most queries are satisfied by this tier. Only fall through to the full 10 billion page index for rare or long-tail queries. Fourth, caching: cache results for popular queries — the same queries are searched millions of times. A query result cache with 10 million entries covers a significant fraction of traffic.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tail_latency", "wand_algorithm", "tiered_index", "query_caching", "early_termination"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What failure scenarios concern you most?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_scenarios" }
+    },
+    {
+      "role": "candidate",
+      "content": "The scariest failure is losing an entire shard group — all 3 replicas of one shard going down simultaneously. That means 1/240th of our index is missing. Users would see incomplete results but wouldn't know it. My mitigation: the query broker detects missing shard responses and notes it in the response metadata. We can show a degradation indicator or boost results from other shards to compensate. For recovery, the shard is rebuilt from the index build pipeline. Second concern: the query broker itself as a single point of failure. I'd run multiple stateless broker instances behind a load balancer. Third: cascading failures — if one shard is slow, it slows down every query (since we wait for all shards). The broker should use aggressive timeouts per shard (say 100ms) and return partial results if a shard doesn't respond in time, rather than waiting for the full 500ms budget.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["partial_results", "cascading_failure", "aggressive_timeouts", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few additions. Spell correction and query suggestion using n-gram models and historical query logs — this catches a huge percentage of queries that would otherwise return poor results. Personalization — incorporating user search history and location to improve relevance. And abuse prevention — detecting and demoting SEO spam, link farms, and content farms that try to game the ranking. Also, I'd invest heavily in offline evaluation infrastructure — being able to measure ranking quality through metrics like NDCG on labeled query-result pairs. Without good evaluation, you can't safely iterate on the ranking model. I want to acknowledge that I was nervous at the start. I know this material well — I've worked on search systems for years — but the interview format threw me off initially. I'm glad I was able to settle in.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["spell_correction", "personalization", "abuse_prevention", "offline_evaluation", "ndcg"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "No need to apologize — the depth you showed on BM25, WAND, and the ranking pipeline was excellent. The technical substance was clearly there. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 69,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 4,
+      "capacity_estimation": 8,
+      "api_design": 5,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 6
+    },
+    "strengths": [
+      "Deep expertise on BM25 scoring with parameter-level understanding",
+      "Strong index partitioning analysis with concrete sizing and tradeoff comparison",
+      "Excellent query optimization knowledge including WAND algorithm and tiered indexing"
+    ],
+    "weaknesses": [
+      "Visibly anxious start with constant self-doubt diminished first impression",
+      "Requirements gathering was minimal — didn't ask about geographic scope, languages, or content types",
+      "No API design discussion — didn't cover query API, autocomplete, or response format"
+    ]
+  }
+}

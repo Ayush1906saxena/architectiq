@@ -1,0 +1,173 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "staff",
+    "candidate_profile": "analysis-paralysis",
+    "total_exchanges": 24,
+    "generation_id": "seed_134"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed system. Users post tweets, follow others, and see a home timeline. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Good. What's the user base? How many tweets per day? What's the follow graph density? Do we need real-time updates or pull-to-refresh? What about rich media? And should the feed be ranked or chronological?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "social_graph", "real_time", "feed_ranking"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "200 million DAU, 400 million tweets per day. Average follows 300 people, celebrities up to 80 million. Pull-to-refresh. Text and images. Chronological for now. Let's design.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, the core problem is feed generation. There are fundamentally two approaches. Fan-out-on-write: when a user tweets, push it into all followers' timelines. Fan-out-on-read: when a user requests their timeline, pull tweets from all people they follow at query time. Now, there are pros and cons to each. Fan-out-on-write gives fast reads because the timeline is pre-computed. But writes are expensive, especially for celebrities. Fan-out-on-read is cheap on writes but slow on reads because you're querying hundreds of users' tweet lists. We could also do a hybrid. Let me think about which is best...",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["fan_out_on_write", "fan_out_on_read", "hybrid_fanout"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've laid out the options well. Which approach would you choose and why?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "So fan-out-on-write has the advantage of O(1) timeline reads. But the write amplification for a user with 80 million followers is 80 million writes per tweet. That's huge. Fan-out-on-read avoids this but timeline reads become O(N) where N is the number of followees — 300 on average. That's 300 lookups per timeline request. With caching that could be fast, but the tail latency... And the hybrid approach adds complexity — you need to manage two code paths, decide on thresholds, handle edge cases. There's also the question of whether to use a push model with WebSockets or pure pull...",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["fan_out_on_write", "fan_out_on_read", "hybrid_fanout", "write_amplification"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've analyzed the options thoroughly, but you haven't committed to one. This is a design interview — I need you to make a decision and we can iterate on it. Which approach?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, sorry. Let me go with... actually, let me think about the numbers one more time. 400 million tweets per day with an average of 300 followers is 120 billion timeline writes per day for fan-out-on-write. That's 1.4 million writes per second just for fan-out. That's a lot but probably feasible with a distributed system. But the celebrity spike — a single celebrity tweet causing 80 million writes... okay, I'll go with the hybrid approach. Fan-out-on-write for normal users, fan-out-on-read for celebrities. Let me define the celebrity threshold... it could be 10K followers, or 50K, or maybe we should make it dynamic...",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["fan_out_on_write", "fan_out_on_read", "celebrity_problem", "capacity_estimation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Pick a threshold and let's move forward. We can revisit it later.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fine, 10K followers as the celebrity threshold. So for the 99% of users under 10K followers, we do fan-out-on-write. For celebrities, fan-out-on-read at query time. Now for the timeline storage — this is where it gets interesting because there are several options. We could use Redis sorted sets — fast, in-memory, ordered by timestamp. Or Cassandra — handles high write throughput, can store more data per user. Or even a custom time-series store optimized for this access pattern. Each has different characteristics...",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["redis_caching", "cassandra", "timeline_storage"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "I see a pattern here — you present options but don't commit. Pick one for the timeline store and explain your reasoning.",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "timeline_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay. Redis sorted sets. Reason: timeline reads need to be fast — under 100ms. Redis gives us sub-millisecond reads. The timeline is a sorted set of tweet IDs scored by timestamp. We keep the last 800 tweet IDs per user. The memory cost... 200M users times 800 IDs times 16 bytes per entry is about 2.5 TB. That's a lot for Redis but feasible with a cluster. Actually, wait — do we even need all 200M users in Redis? Inactive users could be evicted... but then their first timeline load is slow... on the other hand, we could lazy-load...",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["redis_caching", "capacity_estimation", "cache_eviction"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let me help. Keep active users in Redis, lazy-load inactive users from a persistent store. Now please move to the tweet storage — where do you store the actual tweets?",
+      "annotation": { "action": "guide", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "For tweets, the access pattern is primarily by tweet ID — point lookups. Options include MySQL/Postgres with sharding, Cassandra, DynamoDB, or even a custom store. MySQL gives us ACID and is well-understood, but sharding is manual. Cassandra gives high write throughput and auto-sharding but eventual consistency. DynamoDB is managed and auto-scales but has vendor lock-in. Hmm...",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["database_choice", "cassandra", "dynamodb", "sharding_strategy"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You need to make a choice. Right now. What database for tweet storage?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "Cassandra. High write throughput matches our 400M tweets per day. Partition key is tweet_id for even distribution. Replication factor 3 for durability. It handles the scale without manual sharding.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["cassandra", "partitioning", "replication"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now walk me through the full request flow for loading a home timeline.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "feed_generation" }
+    },
+    {
+      "role": "candidate",
+      "content": "User opens the app. GET /timeline with a pagination cursor. Load balancer routes to an app server. App server checks Redis for the user's pre-computed timeline — gets the next 20 tweet IDs. In parallel, fetches recent tweets from celebrities the user follows — queries a celebrity tweets cache or Cassandra. Merges both lists by timestamp, takes top 20. Multi-gets full tweet objects from Cassandra. Multi-gets author profiles from a user cache. Assembles response and returns. Total latency: Redis 1ms + Cassandra multi-get 5-10ms + user cache 2ms, all parallelized. Under 20ms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_generation", "redis_caching", "cassandra", "latency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good, that was decisive. How do images work? Storage and delivery.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "image_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Images go to S3. When a tweet includes an image, the client uploads it directly to S3 via a pre-signed URL, then includes the S3 key in the tweet payload. We generate thumbnails asynchronously — a Lambda function or worker triggered by the S3 upload event. Delivery through a CDN — CloudFront in front of S3. The tweet response includes CDN URLs for the image. For image format, we'd serve WebP where supported for smaller sizes, JPEG as fallback.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["blob_storage", "cdn", "image_processing", "pre_signed_url"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How about the social graph? Where do you store follow relationships?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "social_graph" }
+    },
+    {
+      "role": "candidate",
+      "content": "The social graph... this is interesting. We could use a graph database like Neo4j for natural graph queries. Or a relational table — followers(follower_id, followee_id) — sharded by follower_id for 'who do I follow' queries and a reverse index for 'who follows me' queries. Or Cassandra with two tables for each direction. The choice depends on — sorry, I'm doing it again. Let me just decide. MySQL sharded by follower_id. Simple, proven, efficient for the two main queries: get followees (for timeline) and get followers (for fan-out). Two indexes, one per direction.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["social_graph", "database_choice", "sharding_strategy"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good self-correction. What failure scenarios concern you?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three main ones. Redis failure: timelines become unavailable. Mitigate with Redis Cluster and replicas. On total failure, fall back to fan-out-on-read from Cassandra — slower but functional. Fan-out pipeline lag: if the fan-out workers can't keep up, timelines show stale data. Monitor queue depth and auto-scale workers. Cassandra node failure: with RF=3, losing one node is handled transparently. But if a whole rack goes, we need rack-aware placement.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["cache_failure", "graceful_degradation", "fan_out_lag", "rack_awareness"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's wrap up. Any final additions?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Rate limiting on tweet creation, a notification service for mentions and likes, content moderation pipeline, and monitoring on timeline latency, fan-out lag, and cache hit rates. I also want to acknowledge that I spent too much time on analysis without committing to decisions. In a real design, speed of iteration matters more than finding the theoretically optimal choice.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["rate_limiting", "monitoring", "content_moderation"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Self-awareness is good. Your analysis was always correct — you clearly understand the trade-offs. The issue is that in a 45-minute interview, you need to make decisions quickly and move on. Several times I had to force a decision. At staff level, decisiveness under uncertainty is critical. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 44,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 6,
+      "api_design": 4,
+      "database_design": 5,
+      "caching_strategy": 5,
+      "scalability": 5,
+      "failure_handling": 5,
+      "communication": 4
+    },
+    "strengths": [
+      "Excellent understanding of trade-offs — every option was accurately analyzed",
+      "Strong timeline request flow once committed to a design",
+      "Good capacity math when finally applied"
+    ],
+    "weaknesses": [
+      "Severe analysis paralysis — unable to make decisions without interviewer pressure",
+      "Listed alternatives for almost every component instead of choosing one",
+      "Wasted significant time on deliberation that could have been spent on depth",
+      "At staff level, inability to make and defend decisions is a critical gap",
+      "No API design discussion — endpoint structure was never formalized",
+      "Self-awareness about the problem didn't translate to behavioral change during the interview"
+    ]
+  }
+}

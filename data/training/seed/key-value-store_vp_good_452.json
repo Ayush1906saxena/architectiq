@@ -1,0 +1,141 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "vp",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_452"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's discuss designing a distributed key-value store from a strategic leadership perspective. When does it make sense for a company to build a custom KV store versus using DynamoDB, Cassandra, or Redis? Frame the build-vs-buy decision.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "build_vs_buy" }
+    },
+    {
+      "role": "candidate",
+      "content": "The default answer is buy — DynamoDB or managed Cassandra covers 95% of use cases. Building your own is only justified when you have extreme scale where managed service costs are prohibitive, unique performance requirements that existing solutions don't meet, or strategic reasons — the KV store is a core differentiator in your product. For example, if you're running a CDN and need sub-millisecond lookups with custom eviction policies tuned to your access patterns, the performance gap might justify the investment. But the bar should be very high — building a distributed database is a multi-year, 20+ engineer commitment.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["build_vs_buy", "managed_services", "cost_threshold", "strategic_differentiation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's say we're at that scale — we've outgrown DynamoDB and the bill is $50M/year. You've been given the go-ahead to build. What's your technical vision and how do you scope the first release?",
+      "annotation": { "action": "redirect", "phase": "requirements", "target_concept": "phased_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "V1 needs to be a credible DynamoDB replacement for our top 3 use cases — probably session storage, feature flags, and user preferences. That means: simple get/put/delete API, tunable consistency (strong and eventual), automatic partitioning with consistent hashing, replication factor 3 with quorum reads/writes, and sub-5ms p99 latency. I'd explicitly exclude: secondary indexes, transactions, time-to-live, and cross-region replication from V1. The migration path matters more than the feature set — V1 must have a DynamoDB-compatible API layer so teams can switch with a config change, not a code rewrite. Timeline: 6-9 months to production readiness with a team of 15.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["use_case_driven_scope", "api_compatibility", "migration_path", "feature_exclusion", "team_size", "timeline"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good scoping. Walk me through the core architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three layers. The routing layer: stateless nodes that accept client requests, determine which partition owns the key (via consistent hashing), and route to the correct storage nodes. These can scale horizontally behind a load balancer. The storage layer: stateful nodes that own partitions and store data. Each node manages multiple partitions, each partition is an LSM-tree based storage engine (similar to RocksDB). Data is replicated across 3 storage nodes per partition. The metadata layer: a small Raft cluster (3-5 nodes) that maintains the partition map — which storage nodes own which hash ranges — and handles partition reassignment when nodes join or leave. Clients can cache the partition map locally to reduce metadata lookups.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["routing_layer", "storage_layer", "metadata_layer", "consistent_hashing", "lsm_tree", "raft", "partition_map"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You chose LSM trees. Why not B-trees? What's the trade-off at your expected workload?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "storage_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "LSM trees are optimized for write-heavy workloads — writes go to an in-memory buffer (memtable), then flush to sorted files on disk. The write path is sequential I/O, which is fast. Reads are slower because you might need to check multiple levels of sorted files. B-trees give faster reads (single disk seek) but slower writes (random I/O for page updates). Our use cases — session storage, feature flags — are write-heavy. Sessions are created and updated frequently but read only on the next page load. So LSM trees are a better fit. The trade-off: LSM trees need compaction — a background process that merges sorted files — which consumes CPU and I/O. If compaction falls behind, read performance degrades. We'd need to monitor compaction throughput carefully.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["lsm_tree", "b_tree", "write_amplification", "memtable", "compaction", "workload_analysis"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the consistency model? You said tunable consistency. Walk me through how strong and eventual consistency work differently in your system.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "consistency_model" }
+    },
+    {
+      "role": "candidate",
+      "content": "With replication factor N=3, the client chooses consistency per request. Strong consistency: write to W=2 replicas, read from R=2 replicas. Since W+R > N (2+2=4 > 3), at least one replica in the read set participated in the latest write. The read returns the most recent value. Latency is bounded by the second-fastest replica. Eventual consistency: write to W=1 (just the leader, replicate async), read from R=1 (any replica). Faster because we don't wait for replication. But the read might hit a replica that hasn't received the latest write yet. For session storage, eventual consistency is fine — a session read returning data that's 100ms stale is acceptable. For feature flags that control billing logic, we'd use strong consistency.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["quorum", "tunable_consistency", "w_r_n", "async_replication", "use_case_mapping"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about conflict resolution? Two clients write to the same key at the same time, routed to different replicas under eventual consistency.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "conflict_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "Under strong consistency with quorum writes, conflicts are serialized by the leader — not a problem. Under eventual consistency, we can get conflicting writes. Options: last-write-wins using a wall-clock timestamp — simple but can lose data if clocks are skewed. Vector clocks — track the causal history of each value, detect true conflicts, and let the application resolve them. Or CRDTs — conflict-free replicated data types that merge automatically. For V1, I'd go with last-write-wins and NTP-synchronized clocks. It's the simplest and sufficient for our initial use cases. Vector clocks add significant complexity to the client API — the client has to handle conflict resolution callbacks. We can add that in V2 if we have use cases that need it.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["last_write_wins", "vector_clocks", "crdts", "clock_skew", "pragmatic_choice"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Pragmatic choice. Now, how do you staff and organize the team? You mentioned 15 engineers.",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "team_structure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three sub-teams. Storage engine team (5 engineers): owns the LSM tree implementation, memtable, compaction, WAL, and local node performance. This is the deepest systems programming work. Distributed systems team (5 engineers): owns replication, consistency protocols, partition management, the Raft metadata cluster, and failure detection. They work closely with storage but focus on the multi-node coordination. Platform and client team (5 engineers): owns the routing layer, client SDKs (Java, Python, Go), the DynamoDB compatibility shim, monitoring dashboards, and operational tooling. One tech lead per sub-team, and I'd act as the overall architect making cross-cutting design decisions.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["team_decomposition", "skills_mapping", "cross_cutting_leadership"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle data residency and compliance? If you operate globally, some data must stay in certain regions.",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "compliance" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's... a good question and honestly where I'm less certain of the exact approach. At a high level, we'd need to tag data with its residency requirement — like 'EU only' — and ensure that replicas for those partitions only exist in EU data centers. The partition placement logic in the metadata layer would need to be region-aware. For cross-region reads, we'd either serve from the local region (if the data's allowed there) or proxy to the correct region. I'd want to consult with our legal and compliance team on the exact GDPR requirements before locking down the architecture. What I do know is this needs to be designed in from the start — retrofitting data residency is extremely painful.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["data_residency", "region_aware_placement", "gdpr"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Honest answer. How do you migrate traffic from DynamoDB to your new system without downtime?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "migration" }
+    },
+    {
+      "role": "candidate",
+      "content": "A dual-write, shadow-read approach. Phase 1 — Shadow: the DynamoDB compatibility layer forwards all writes to both DynamoDB and our new system. Reads still go to DynamoDB. We compare read results from both systems to verify correctness. Phase 2 — Canary: shift 1% of reads to the new system. Monitor latency, error rates, and data consistency. Phase 3 — Gradual rollover: increase read traffic to 10%, 50%, 100% on the new system. DynamoDB still receives writes as backup. Phase 4 — Cutover: stop dual-writing to DynamoDB. The new system is the primary. Keep DynamoDB data for 30 days as a safety net. This takes 2-3 months per service. With 50+ services to migrate, we'd need a dedicated migration engineering team and a service-by-service rollout plan prioritized by cost savings.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["dual_write", "shadow_traffic", "canary_rollout", "gradual_migration", "verification"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid migration plan. We're out of time. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The success metric isn't just 'we built a KV store' — it's cost per operation compared to DynamoDB, adoption rate across internal teams, and operational burden (number of pages per week). If we build it but nobody wants to migrate, or it pages more than DynamoDB did, it's a failure regardless of how technically elegant it is. I'd set up a quarterly review comparing TCO of our system versus DynamoDB for the same workload, and be willing to shut it down if the ROI doesn't materialize.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["success_metrics", "tco_comparison", "adoption_rate", "operational_burden", "kill_criteria"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Mature perspective on measuring success. Good interview — strong technical foundation with some gaps in the compliance area. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 70,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 5,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 6,
+      "scalability": 7,
+      "failure_handling": 6,
+      "communication": 8
+    },
+    "strengths": [
+      "Strong V1 scoping — explicitly excluded features and prioritized migration path over feature richness",
+      "Good migration strategy with phased dual-write approach and concrete timeline",
+      "Mature success metrics thinking — tied project success to cost savings and adoption, not just technical delivery"
+    ],
+    "weaknesses": [
+      "Data residency and compliance discussion was shallow — a VP should have a clearer framework for global data governance",
+      "No cost modeling — didn't estimate the hardware, network, and engineering cost to compare against the $50M DynamoDB bill",
+      "Failure handling was implicit — didn't discuss disaster recovery, multi-AZ deployment, or backup strategy",
+      "Team structure was reasonable but didn't address oncall, hiring plan, or skill gaps"
+    ]
+  }
+}

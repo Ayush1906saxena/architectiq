@@ -1,0 +1,172 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "staff",
+    "candidate_profile": "argues-with-interviewer",
+    "total_exchanges": 24,
+    "generation_id": "seed_129"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a video streaming platform like YouTube or Netflix. Users upload videos and others can watch them on demand. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. How many videos are uploaded per day? How many concurrent viewers? Do we need live streaming or just VOD? What's our target video quality — SD, HD, 4K? And what geographies?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "video_quality", "geographic_distribution"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500,000 new videos per day, 100 million concurrent viewers at peak. VOD only. Support up to 4K. Global — US, EU, and Asia. Let's start.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "video_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, so for storage, I'd keep it simple. All videos go into a PostgreSQL database as binary large objects — BLOBs. Postgres can handle binary data natively with the bytea type or large objects. Metadata goes alongside it in the same database. This way everything is in one place — easy to manage, easy to query, full ACID guarantees on our video data.",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["database_choice", "video_storage"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Storing videos as BLOBs in PostgreSQL — that's an unusual choice at this scale. An average video might be 500 MB. With 500K uploads per day, that's 250 TB per day going into a relational database. PostgreSQL isn't designed for that kind of large binary workload. Have you considered object storage like S3?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "blob_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "I disagree. Postgres is extremely capable. With proper configuration — large shared_buffers, parallel workers, tablespace management — it can handle binary data efficiently. The advantage is you get transactions, foreign keys, and you can join video data with metadata in a single query. S3 means you have a separate system to manage, and you lose transactional guarantees between the video and its metadata. I've used Postgres for binary storage at my current company and it works great.",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["database_choice"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "At your current company, what was the data volume? Because at 250 TB per day of binary ingestion, PostgreSQL's VACUUM process alone would become unmanageable. The WAL (write-ahead log) would be enormous. Object storage like S3 is purpose-built for this — it handles durability, replication, and can serve directly to CDNs. I'd strongly encourage you to reconsider.",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "blob_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Look, I understand S3 is popular, but I think the industry over-relies on it. You can shard PostgreSQL across many nodes. If you have 1,000 Postgres instances, each handles 250 GB per day — that's trivial for a single Postgres node. The benefit of keeping everything in the database is enormous for data consistency. What if your S3 upload succeeds but the metadata write to Postgres fails? Now you have an orphaned video. With everything in Postgres, one transaction handles both.",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["sharding_strategy", "database_choice", "consistency"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Managing 1,000 PostgreSQL instances storing BLOBs with replication, backups, and VACUUM across all of them is operationally extraordinarily expensive compared to S3 which handles all of that automatically. And the orphaned video problem is solved by a simple reconciliation job. This is a staff-level interview — I need to see that you can select the right tool for the job. Let's move forward. Can you separate video storage and metadata, using object storage for the videos?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "blob_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fine, I'll go with S3 for the raw video files and Postgres for metadata, but I want to note that I think the complexity cost of two systems is being underestimated. Anyway. Videos go to S3, organized by video_id. Metadata in Postgres — title, description, uploader, timestamps, S3 path, processing status. To solve the consistency issue I mentioned, I'd write metadata first in 'pending' state, upload to S3, then update metadata to 'active.'",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["blob_storage", "database_choice", "consistency"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now, videos need to be transcoded into multiple resolutions and formats for different devices. How does that pipeline work?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "video_transcoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a video is uploaded, we put a transcoding job into a queue — SQS or similar. Worker nodes pick up jobs and transcode the original into multiple renditions: 360p, 720p, 1080p, 4K. Each rendition is stored back in S3. I'd use adaptive bitrate streaming — HLS or DASH — which breaks each rendition into small segments, typically 2-10 seconds each. This allows the player to switch quality mid-stream based on bandwidth. The segment manifest file lists all available qualities and their segment URLs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["video_transcoding", "adaptive_bitrate", "hls", "message_queue"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you deliver these segments to 100 million concurrent viewers globally?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "cdn" }
+    },
+    {
+      "role": "candidate",
+      "content": "CDN — content delivery network. Popular videos get cached at edge nodes close to users. With 100 million concurrent viewers, we'd need multiple CDN providers — CloudFront, Akamai, Cloudflare — and route users to the nearest, least-loaded CDN using DNS-based load balancing. For popular videos, CDN cache hit rates should be 95%+, so only 5% of requests hit our origin servers. For less popular long-tail content, we might need a mid-tier cache between the CDN edge and S3 origin.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn", "caching_strategy", "load_balancing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the bandwidth. What's the total egress bandwidth for 100 million concurrent viewers?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the average viewer is watching at 5 Mbps (a mix of HD and 4K), that's 100 million times 5 Mbps = 500 Tbps total. That's an enormous number — for reference, a single CDN PoP might handle 10-50 Tbps. So we'd need the video distributed across hundreds of CDN edge locations globally. This is why Netflix uses their own CDN appliances (Open Connect) placed directly in ISP networks — it reduces transit costs dramatically.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "cdn", "bandwidth"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good numbers. How do you handle the video upload pipeline? A user uploads a 2 GB 4K video — what's the user experience?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "upload_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "For large uploads, we use multipart upload. The client splits the file into chunks — say 5 MB each — and uploads them in parallel. If a chunk fails, only that chunk is retried. S3 natively supports multipart uploads. The client gets a pre-signed URL from our API, uploads directly to S3 (bypassing our servers for the heavy lifting), and notifies our backend on completion. Our backend verifies the upload, triggers transcoding, and the user sees a progress bar followed by a 'processing' status.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["upload_pipeline", "multipart_upload", "pre_signed_url"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you prioritize transcoding? If 500K videos are uploaded daily, how do you manage the queue?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "transcoding_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "Priority queue based on expected viewership. Videos from popular creators get transcoded first. New users go into a standard queue. I'd also do progressive transcoding — generate the lowest resolution first so the video is watchable quickly, then higher resolutions in the background. For capacity, if transcoding a 10-minute video takes 5 minutes on average and we have 500K videos per day, that's about 5,800 concurrent transcoding jobs. With auto-scaling GPU instances, we adjust capacity based on queue depth.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["transcoding_pipeline", "priority_queue", "auto_scaling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the recommendation and search system? How do users find videos?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "search_and_recommendations" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two systems. Search uses Elasticsearch — index video metadata, titles, descriptions, tags. Support autocomplete, typo tolerance, and relevance ranking. Recommendations are a separate ML pipeline — collaborative filtering based on viewing history, content-based features from video analysis, and real-time signals like trending topics. The recommendation service pre-computes personalized feeds and caches them, updating periodically and on user actions.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["search_engine", "recommendations", "elasticsearch"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What failure scenarios worry you most in this system?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three big ones. First, CDN failure — if a CDN region goes down, viewers in that region lose service. Mitigation: multi-CDN strategy with automatic failover; DNS health checks detect failures and reroute to alternate CDNs in under a minute. Second, transcoding pipeline backup — if the queue grows faster than we can process, new videos are delayed for hours. Mitigation: auto-scaling with queue depth triggers, and alert when queue exceeds 30 minutes. Third, S3 origin overload — a viral video that isn't yet cached everywhere hammers the origin. Mitigation: origin shield (a caching layer between CDN and S3) that coalesces duplicate requests.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_failure", "auto_scaling", "origin_shield", "failure_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid failure analysis. Let's wrap up. Anything else you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things: DRM (digital rights management) for copyrighted content, content moderation pipeline to scan uploads for policy violations before publishing, real-time viewer analytics for creators, and a cost optimization layer that moves older, rarely-watched videos to cheaper storage tiers like S3 Glacier. Also, I want to acknowledge — you were right about S3 versus PostgreSQL for video storage. At this scale, object storage is clearly the right tool. I was anchoring on a pattern that works at smaller scale.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["drm", "content_moderation", "storage_tiering", "monitoring"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "I appreciate the self-correction. Your design was strong once you moved past the storage decision, particularly the CDN strategy and transcoding pipeline. The pushback on a clearly suboptimal approach was the main concern. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 35,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 5,
+      "database_design": 3,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 2
+    },
+    "strengths": [
+      "Strong CDN and bandwidth analysis with concrete numbers",
+      "Excellent transcoding pipeline design with priority queuing and progressive transcoding",
+      "Good failure analysis covering CDN, transcoding, and origin overload"
+    ],
+    "weaknesses": [
+      "Insisted on storing videos in PostgreSQL BLOBs despite three rounds of pushback — very poor judgment for staff level",
+      "Argued with interviewer rather than engaging constructively with the feedback",
+      "Wasted significant interview time defending an indefensible position",
+      "Self-corrected only at the very end — should have pivoted after the first challenge",
+      "Communication style was confrontational rather than collaborative"
+    ]
+  }
+}

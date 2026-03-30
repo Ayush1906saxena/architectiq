@@ -40,6 +40,22 @@ def _load_curriculum() -> dict[str, dict]:
     return lookup
 
 
+def _get_module_lessons(topic_id: str) -> list[dict]:
+    """Get ordered list of lessons in a module with titles."""
+    curriculum_path = Path(settings.content_dir) / "curriculum.json"
+    if not curriculum_path.exists():
+        return []
+
+    with open(curriculum_path) as f:
+        data = json.load(f)
+
+    for tier in data.get("tiers", []):
+        for module in tier.get("modules", []):
+            if module["slug"] == topic_id:
+                return module.get("lessons", [])
+    return []
+
+
 @router.get("/lessons/{topic_id}/{lesson_id}")
 async def get_lesson(topic_id: str, lesson_id: str) -> LessonData:
     curriculum = _load_curriculum()
@@ -61,6 +77,15 @@ async def get_lesson(topic_id: str, lesson_id: str) -> LessonData:
         lesson_data = json.load(f)
 
     return LessonData(**lesson_data)
+
+
+@router.get("/lessons/{topic_id}/module-lessons")
+async def get_module_lessons(topic_id: str):
+    """Get all lessons in a module with navigation info."""
+    lessons = _get_module_lessons(topic_id)
+    if not lessons:
+        raise HTTPException(status_code=404, detail=f"No lessons found for topic '{topic_id}'")
+    return {"topic_id": topic_id, "lessons": lessons}
 
 
 @router.get("/lessons/{topic_id}/{lesson_id}/diagram-states")

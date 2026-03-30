@@ -1,0 +1,130 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "staff",
+    "candidate_profile": "database-failover",
+    "total_exchanges": 20,
+    "generation_id": "seed_373"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortener. I want to drill into a very specific failure: database failover with replication lag. Give me your database architecture first.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "database_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the URL shortener at scale — 100M URLs created per day — I'd use PostgreSQL with a primary-replica setup. The primary handles all writes and a subset of reads. We have 2-3 asynchronous read replicas for the heavy read traffic (115K reads/sec). Async replication is chosen over sync because we don't want write latency to depend on replica acknowledgment. Typical replication lag under normal conditions is 10-50ms, but can spike to 500ms or more under load.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["postgresql", "async_replication", "read_replicas", "replication_lag"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now the scenario: your primary database fails. A hardware crash — instant death, no graceful shutdown. Your monitoring detects it and promotes one of the async replicas to be the new primary. Replication lag was 500ms at the time of failure. What happened to those 500ms of writes?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failover_data_loss" }
+    },
+    {
+      "role": "candidate",
+      "content": "Those 500ms of writes are lost. They were committed on the old primary but hadn't been shipped to any replica via the WAL (Write-Ahead Log) stream. At 1,150 writes per second, 500ms of lag means approximately 575 URLs that were successfully created — the user got a 200 OK response with a short URL — but now those URL mappings don't exist in the new primary. Anyone who tries to use those short URLs will get a 404 Not Found. The users who created them saw a success response, so they believe the URLs work.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["wal_replication", "data_loss_window", "phantom_urls", "user_perception"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "575 URLs that the user thinks work but return 404. How do you handle this?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "lost_url_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several recovery approaches. First, check if the URLs are in the Redis cache. Our cache layer would still have the mapping for recently created URLs. If the user clicks the short URL, it hits Redis first, gets a cache hit, and redirects correctly — the user never notices the DB loss. We can then backfill the database from the cache for these URLs. Second, check application server logs. If we log the URL creation events (short_code, long_url, timestamp), we can replay the lost writes from the logs. This is essentially using application logs as a secondary WAL. Third, if the old primary's disk is still intact (hardware failure was the motherboard, not the disk), we can mount the disk, recover the WAL segments that weren't replicated, and apply them to the new primary.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_recovery", "log_replay", "wal_recovery", "backfill"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The Redis cache approach is clever. But Redis entries have TTLs. If the user doesn't click the URL for a week and it's evicted from cache, then what?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "cache_eviction_gap" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, we can't rely on cache alone. We need a more durable recovery path. The application log replay is the reliable approach. But to make it work, we need to design for it upfront. Every URL creation should write to both the database AND an append-only audit log — this could be Kafka, a separate log file, or even a secondary database. The creation response should be gated on both writes succeeding. During recovery, we identify the failover timestamp, query the audit log for all creations in the 500ms window before it, and replay them into the new primary. This is essentially a change data capture (CDC) pattern — we're maintaining a durable event stream alongside the database.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["audit_log", "kafka_cdc", "change_data_capture", "dual_write", "event_stream"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "But now you have a dual-write problem. Writing to Postgres AND Kafka atomically is hard. What if the write succeeds in Postgres but fails in Kafka, or vice versa?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "dual_write_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes, dual-write is a trap. The solution is to avoid it entirely. Use the transactional outbox pattern. Write the URL mapping to Postgres in a single transaction that also writes to an outbox table in the same database. A separate CDC connector — like Debezium reading the Postgres WAL — streams changes from the outbox table to Kafka. This way, the Kafka write is derived from the database write, not independent. If the database write commits, the event will eventually appear in Kafka. If it doesn't commit, no event. For our failover scenario: the Debezium CDC stream from the OLD primary is our source of truth for what was committed. If Debezium had already read those WAL entries before the primary died, we have the events in Kafka even though the replica doesn't. That's our recovery path.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["outbox_pattern", "debezium", "cdc_connector", "wal_streaming", "transactional_outbox"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting. But Debezium reads the WAL stream — the same WAL that had 500ms of lag to the replica. If the primary died, those WAL entries might not have been sent to Debezium either.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "cdc_lag" }
+    },
+    {
+      "role": "candidate",
+      "content": "You're right — Debezium connects to the primary's WAL stream just like a replica does. If the primary dies, Debezium loses the same 500ms. So CDC doesn't fully solve this either. The only way to guarantee zero data loss is synchronous replication — at least one replica must confirm the write before we respond to the client. With synchronous replication, the replica is always caught up. Failover loses zero writes. The trade-off is latency: every write now waits for a network round-trip to the replica. At cross-AZ latency of 1-2ms, this adds 1-2ms to every write. At 1,150 writes/sec, that's acceptable for a URL shortener. I'd use Postgres synchronous_commit = remote_write for a balance — the replica has received the WAL but hasn't flushed to disk, giving us protection against primary failure without the full flush latency.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["synchronous_replication", "zero_data_loss", "remote_write", "latency_tradeoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. So synchronous replication solves data loss but adds latency. What if the replica itself becomes slow? Doesn't that block all writes on the primary?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "sync_replica_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes, that's the danger of sync replication. If the synchronous replica goes down or becomes slow, all writes on the primary block waiting for acknowledgment. To mitigate: use synchronous_standby_names with 'FIRST 1 (replica1, replica2, replica3)'. This means the write is confirmed when ANY one of the three replicas acknowledges. If replica1 is slow, replica2 or replica3 can acknowledge. Only a failure of ALL replicas blocks writes. Additionally, set a timeout: if no replica acknowledges within, say, 50ms, fall back to async mode temporarily and alert. This is a policy decision: we accept a brief window of potential data loss during replica failures rather than blocking all writes indefinitely.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["synchronous_standby", "any_replica_ack", "timeout_fallback", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the failover process itself. How do you detect the primary failure and promote a replica? What's the timing look like?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "failover_process" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use Patroni — a Postgres HA framework that uses etcd or ZooKeeper for leader election. Patroni runs on each Postgres node and maintains a leader lock in etcd. The primary renews the lock every few seconds. If the primary crashes, the lock expires after the TTL — say 10 seconds. Patroni on the replicas detects the expired lock, the most caught-up replica triggers a promotion. The promotion itself takes 1-2 seconds. Then DNS or a connection proxy like PgBouncer or HAProxy needs to be updated to point to the new primary — another few seconds. Total failover time: roughly 15-30 seconds. During this window, all writes fail. Reads can still be served from the remaining replicas.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["patroni", "leader_election", "etcd", "failover_timing", "connection_proxy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "During those 15-30 seconds of write unavailability, users are trying to create short URLs. What do they experience?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "failover_user_experience" }
+    },
+    {
+      "role": "candidate",
+      "content": "Without mitigation, they get errors — connection refused or timeout. To improve this: use a write queue. When the app server detects DB write failure, instead of returning an error, queue the URL creation request in an in-memory buffer or Kafka. Return a 202 Accepted to the user with the short URL — we can pre-generate the short code without the database using our ID generation scheme. The URL won't redirect until the DB write completes, but the user has the short URL immediately. Once the new primary is available, drain the queue and write the pending URLs. The user experiences a brief delay in their short URL working, but doesn't see an error.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["write_queue", "async_creation", "pre_generation", "eventual_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You demonstrated deep understanding of database replication, failover mechanics, and the practical trade-offs between consistency and availability. The progression from async to sync replication with its trade-offs was well-articulated. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 9,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent depth on PostgreSQL replication modes and their trade-offs",
+      "Strong understanding of the transactional outbox pattern and its limitations",
+      "Practical failover user experience design with write queuing"
+    ],
+    "weaknesses": [
+      "Didn't discuss split-brain scenarios where old primary comes back thinking it's still primary",
+      "Cache-based recovery was mentioned but TTL/eviction risks were only addressed when prompted",
+      "Multi-region failover was not discussed — single-region design limits"
+    ]
+  }
+}

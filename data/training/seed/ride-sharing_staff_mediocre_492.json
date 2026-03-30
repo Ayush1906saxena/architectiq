@@ -1,0 +1,152 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "staff",
+    "candidate_profile": "mediocre",
+    "total_exchanges": 20,
+    "generation_id": "seed_492"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a ride-sharing platform like Uber. At staff level, I expect you to drive the conversation and go deep on trade-offs.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Let me start with requirements. We need a system where riders request rides, drivers accept them, and we match them in real time. Key questions: what's the scale, what's the matching latency target, and do we need surge pricing?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["matching", "scale", "surge_pricing"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10 million rides per day, 50 cities, matching within 10 seconds, yes to surge pricing. Go.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "The core services would be: a Rider Service for the rider app, a Driver Service for the driver app, a Matching Service to pair riders with drivers, a Location Service to track driver positions, a Trip Service for the ride lifecycle, and a Pricing Service for fare calculation and surge. For the Location Service, drivers send GPS updates every few seconds. We store these in Redis using geospatial indexes. When a rider requests a ride, the Matching Service queries nearby drivers from Redis, picks the best one, and sends the ride offer to the driver.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["service_decomposition", "location_service", "redis_geospatial", "matching_flow"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You said 'picks the best one.' How? What makes one driver better than another for a given ride request?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "matching_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "Shortest distance to the rider. We find all drivers within a radius — say 5km — sort by distance, and offer to the closest one.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["nearest_driver", "radius_query"], "depth": "surface", "has_reasoning": false, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Straight-line distance or driving distance? A driver 1km away across a river might take 20 minutes. And is matching one-at-a-time globally optimal?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "matching_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, we should use ETA not distance — call a routing API for each candidate driver. And globally optimal... you mean like batch matching? Instead of matching each request individually, batch requests over a few seconds and solve for the best overall assignment?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["eta_matching", "batch_matching", "global_optimization"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly. How would you implement batch matching?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "batch_matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Collect ride requests for a 3-second window. For each request, find candidate drivers and compute ETAs. Then solve an assignment problem — minimize total pickup time across all rider-driver pairs. The Hungarian algorithm solves this optimally but might be expensive. A greedy approach — assign the shortest ETA pair first, remove both from the pool, repeat — is simpler and probably good enough.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["batching_window", "assignment_problem", "hungarian_algorithm", "greedy_approach"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about the trip state machine. What states does a ride go through?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "trip_state_machine" }
+    },
+    {
+      "role": "candidate",
+      "content": "REQUESTED, MATCHED, DRIVER_EN_ROUTE, ARRIVED, IN_PROGRESS, COMPLETED. Plus CANCELLED. We store the trip and its current state in a database — PostgreSQL. Each state transition is an update to the trip row with a timestamp.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["trip_states", "postgresql", "state_transitions"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "At staff level, I'd expect more rigor. What prevents invalid state transitions? And how do you handle concurrent updates — the rider cancels while the driver is completing?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "state_machine_safety" }
+    },
+    {
+      "role": "candidate",
+      "content": "We'd validate transitions — define which transitions are legal. REQUESTED can go to MATCHED or CANCELLED but not directly to COMPLETED. For concurrency, use optimistic locking — the state update includes a WHERE clause checking the current state. If someone else changed it first, the update fails and we return an error. But I'm not sure how to handle the race between rider cancel and driver complete gracefully...",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["transition_validation", "optimistic_locking", "race_condition"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The standard approach: last valid write wins. If the trip is IN_PROGRESS and the driver hits 'complete,' that transitions to COMPLETED. A subsequent cancel attempt sees state=COMPLETED and rejects the cancel — the trip was already finished. Clear rules about which state wins. How about surge pricing?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing increases the fare when demand exceeds supply in an area. We divide the city into zones — maybe using geohashing or H3 hexagons. Every minute, compute the ratio of pending ride requests to available drivers per zone. If the ratio exceeds a threshold, apply a multiplier — 1.5x, 2x, etc. The multiplier is shown to the rider before they confirm so there are no surprises.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["zone_based_pricing", "supply_demand_ratio", "h3_hexagons", "transparency"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if a driver's app crashes mid-trip? The rider is in the car, the trip is IN_PROGRESS, but we lose contact with the driver.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "driver_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "We detect lost heartbeats — if the driver stops sending location updates for 60 seconds, we alert the system. We don't cancel the trip because the rider is physically in the car. Instead: try to reach the driver via push notification. If the app restarts, it syncs the trip state and resumes. The fare is computed based on GPS data we already collected before the crash. If the driver is completely unreachable, we flag the trip for manual review and use the last known route to estimate a fair fare.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["heartbeat_detection", "push_notification_recovery", "gps_based_fare", "manual_review"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle payments? The trip ends but the rider's card is declined.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "payment_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "We should pre-authorize the card at the start of the trip — a hold for an estimated fare amount. If the card can't be pre-authorized, we don't start the trip. At trip end, we capture against the pre-authorization. If capture fails (card expired since pre-auth, insufficient funds for the actual amount which exceeded the estimate), we retry. If retries fail, we add it to the rider's outstanding balance and block new rides until paid.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["pre_authorization", "capture", "retry_logic", "outstanding_balance"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost done. Anything else you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Safety features — emergency button, trip sharing with contacts. A rating system for both riders and drivers to maintain quality. And driver incentives — bonuses for driving during peak hours to help with supply-demand balance.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["safety", "ratings", "driver_incentives"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thanks. Solid fundamentals on the core flow, but the depth on state machine safety and matching optimization needed more rigor for staff level.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 56,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 3,
+      "api_design": 5,
+      "database_design": 6,
+      "caching_strategy": 5,
+      "scalability": 6,
+      "failure_handling": 6,
+      "communication": 6
+    },
+    "strengths": [
+      "Good batch matching discussion — understood assignment problem and greedy vs optimal trade-off",
+      "Practical failure handling for driver crash and payment failure scenarios",
+      "Clean surge pricing design with zone-based supply-demand computation"
+    ],
+    "weaknesses": [
+      "No capacity estimation — didn't calculate QPS, location update throughput, or storage",
+      "State machine design was shallow — needed prompting for concurrency handling and couldn't resolve the cancel/complete race",
+      "Didn't drive the conversation as expected at staff level — mostly responsive rather than proactive",
+      "No discussion of multi-city architecture, data partitioning, or regional deployment",
+      "Matching initially proposed simple nearest-driver without considering ETA or global optimization"
+    ]
+  }
+}

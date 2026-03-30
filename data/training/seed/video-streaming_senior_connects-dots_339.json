@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "senior",
+    "candidate_profile": "connects-dots",
+    "total_exchanges": 22,
+    "generation_id": "seed_339"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a video streaming platform like YouTube or Netflix. Users upload videos, and millions of viewers stream them. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few key questions. What's the scale — daily active viewers and video uploads per day? Do we need to support live streaming or just on-demand? What video quality levels do we need — SD, HD, 4K? Is there a recommendation system or is this just about the streaming infrastructure?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "video_quality", "live_vs_ondemand"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "100 million DAU, 500K video uploads per day. On-demand only. SD through 4K with adaptive bitrate. Include the recommendation component at a high level. Go ahead.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do capacity estimation first. 100M DAU watching an average of 5 videos per day = 500M video views per day. At an average of 5 minutes per video at HD (3 Mbps bitrate), that's 5 * 60 * 3 Mbps = 900 Mb = ~112 MB per view. 500M views * 112 MB = 56 PB of data transferred per day. That's roughly 5.2 Tbps of sustained bandwidth. For uploads: 500K videos at average 100MB each = 50TB of new content per day before transcoding.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "bandwidth_calculation", "storage_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. Walk me through the major components.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "system_components" }
+    },
+    {
+      "role": "candidate",
+      "content": "I see four main subsystems. First, the Upload Pipeline — handles video ingestion and processing. Second, the Transcoding Service — converts uploaded videos into multiple formats and resolutions. Third, the Content Delivery layer — stores and serves video content to viewers globally. Fourth, the Recommendation Engine — suggests videos to users. Let me walk through each one.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["upload_pipeline", "transcoding", "cdn", "recommendation_engine"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Start with the upload and transcoding pipeline.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "upload_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a creator uploads a video, it goes to an Upload Service that handles chunked uploads — large videos are split client-side into, say, 5MB chunks uploaded in parallel. The Upload Service reassembles chunks and stores the raw video in object storage like S3. Once the upload is complete, it publishes a message to a transcoding queue. The Transcoding Service picks up the job and converts the video into multiple renditions: 240p, 480p, 720p, 1080p, and 4K if the source supports it. Each rendition is encoded in multiple bitrates. The transcoded segments are stored back in S3. For efficiency, we can split the video temporally and transcode segments in parallel — a 10-minute video split into 60 ten-second segments, each transcoded independently across a fleet of workers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chunked_upload", "object_storage", "transcoding", "parallel_processing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now how do you serve the video to viewers?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "video_serving" }
+    },
+    {
+      "role": "candidate",
+      "content": "Videos are served via a CDN — a global network of edge servers. When a viewer requests a video, DNS routes them to the nearest CDN edge. If the edge has the content cached, it streams directly. On cache miss, the edge pulls from the origin (our S3 storage) and caches it for subsequent requests. For adaptive bitrate streaming, we use HLS or DASH. The video is split into small segments, typically 2-6 seconds each, at each quality level. The client player downloads a manifest file listing all available segments and quality levels, then requests segments one at a time, dynamically switching quality based on available bandwidth.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn", "adaptive_bitrate", "hls_dash", "video_segmentation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the recommendation engine work at a high level?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "recommendation_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "The recommendation engine has two stages. Candidate generation: from millions of videos, narrow down to a few hundred candidates using collaborative filtering — users who watched similar videos to you also watched X. This runs offline as a batch job, precomputing candidate lists. Then ranking: a real-time ML model scores each candidate based on user features (watch history, demographics), video features (category, freshness, engagement metrics), and context (time of day, device). The top-ranked videos form the recommendation feed. The model is trained on user interaction data — views, watch time, likes, shares.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["collaborative_filtering", "candidate_generation", "ml_ranking", "feature_engineering"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've described four independent systems. Are there connections between them that matter?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "system_integration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Wait, actually, yes — and I should have seen this earlier. These systems aren't independent at all. The transcoding output feeds the CDN cache warming, which connects to the recommendation engine for preloading. Let me trace the connections. When transcoding completes for a new video, the system should immediately start warming CDN caches in regions where the video is likely to be popular. How does it know which regions? The recommendation engine knows which users are likely to be shown this video — based on the creator's existing audience distribution. So: transcoding finishes -> recommendation engine identifies target users -> geographic distribution of those users tells us which CDN edges to warm -> the CDN preloads the most likely quality renditions at those edges. By the time the video appears in anyone's feed, it's already cached at their nearest edge. Zero cold-start latency for viewers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_warming", "predictive_preloading", "system_integration", "cross_component_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a great insight. What other cross-system connections do you see?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "system_integration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several more. The CDN access logs feed back into the recommendation engine — actual viewing patterns, where viewers drop off, which quality levels are most used in each region. This improves both recommendations and transcoding priorities. For transcoding, the recommendation engine can inform which quality levels to prioritize. If a video is predicted to be viral, we should transcode all quality levels immediately. For a niche video, maybe just 480p and 720p initially, and add 4K later only if viewership demands it. This saves significant transcoding compute — at 500K videos per day, full transcoding for every video is expensive. And viewer bandwidth patterns from the CDN tell us which renditions to precompute. If 80% of viewers in India watch at 480p, we should ensure that rendition is always cached at Indian edge nodes, while 4K gets priority in markets with faster internet.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feedback_loops", "adaptive_transcoding", "cost_optimization", "regional_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong systems thinking. Let's go deeper on the CDN. How do you handle a video that suddenly goes viral?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "viral_content" }
+    },
+    {
+      "role": "candidate",
+      "content": "A viral video creates a sudden, massive spike in requests to specific CDN edges. The challenge is the thundering herd on cache miss — thousands of requests arriving simultaneously before the edge has cached the content. My approach: request coalescing at the CDN edge. When the first request for a viral video arrives and triggers a cache miss, all subsequent requests for the same video are queued rather than each independently fetching from origin. The first fetch populates the cache, then all queued requests are served from cache. We also need tiered caching — if the edge doesn't have it, check a regional mid-tier cache before going to origin. This reduces origin load from potentially millions of requests to a handful — one per edge per mid-tier per region. For origin protection, I'd add rate limiting on origin pulls and serve stale content (slightly lower quality) while the fresh content propagates.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["thundering_herd", "request_coalescing", "tiered_caching", "origin_protection"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle video storage costs? 50TB per day adds up fast.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "storage_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Storage tiering based on video popularity. Hot tier (first 30 days, or popular videos): S3 Standard, replicated across 3 AZs, fast access. Warm tier (30-180 days, moderate traffic): S3 Infrequent Access — same durability, lower cost, small retrieval fee. Cold tier (180+ days, rarely watched): S3 Glacier — significantly cheaper, retrieval takes minutes. The tiering is driven by access frequency — a background job tracks view counts and moves videos between tiers. For very old, rarely watched videos, we can also reduce the number of stored renditions — keep only 480p and 720p, delete 4K, since very few people will watch a 5-year-old video in 4K. At 50TB/day, that's 18PB per year raw. With tiering and rendition pruning, the cost profile is dramatically better — maybe 60% of content is in the cheapest tier after 2 years.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["storage_tiering", "cost_optimization", "access_frequency_based_tiering"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about content moderation? Some uploaded videos may violate policies.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "content_moderation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Content moderation plugs into the upload pipeline — between upload completion and transcoding start (or in parallel with transcoding). An automated moderation service runs ML models on the raw video: nudity detection, violence detection, copyright fingerprinting against a known content database (like Content ID). Videos flagged by the automated system are held from publishing and queued for human review. This connects back to the system integration theme — if a video passes moderation but is later flagged by users, the recommendation engine should immediately reduce its distribution while a re-review happens. The CDN should be able to quickly purge a video if it's taken down, which means we need a fast cache invalidation mechanism across all edges — an event-driven purge system where a takedown event propagates to all CDN edges within seconds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["content_moderation", "ml_classification", "copyright_detection", "cache_invalidation", "system_integration"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss failure scenarios. What happens if the transcoding service goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "transcoding_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If transcoding goes down, new uploads queue up but aren't processed. The impact: new videos aren't available for viewing but existing content continues streaming normally (already in CDN/S3). The transcoding queue (backed by something durable like SQS or Kafka) retains all pending jobs. When transcoding recovers, it drains the backlog. For the creator experience, we show 'processing' status on their dashboard. To minimize blast radius, I'd run transcoding in multiple independent pools — maybe by video resolution or by region. A failure in the 4K pool doesn't affect HD transcoding. Each pool has auto-scaling based on queue depth. The connection back to our system: during a transcoding outage, the recommendation engine should be notified to stop featuring creators who frequently upload (since their new content won't be available), preventing a poor user experience.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["graceful_degradation", "durable_queues", "blast_radius", "auto_scaling", "cross_system_coordination"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running out of time. What would you prioritize if you had to ship this in phases?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Phase 1: Core upload and streaming — chunked upload, basic transcoding (480p, 720p, 1080p), S3 storage, CDN serving with HLS. No recommendations — just a chronological feed. Phase 2: Adaptive bitrate streaming, 4K support, content moderation pipeline, and the cache warming system connecting transcoding to CDN. Phase 3: Full recommendation engine with collaborative filtering and ML ranking, the feedback loops I described, and the predictive CDN preloading based on recommendation targeting. The key architectural decision is to build the event bus (Kafka) from Phase 1 — even if we don't use all the events yet. This makes the cross-system integrations in later phases straightforward because the event infrastructure is already there.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["phased_delivery", "event_driven_architecture", "prioritization"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The moment where you connected transcoding, CDN warming, and recommendations into a unified system was the highlight of this interview. Strong systems thinking. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 71,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 6,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional systems thinking — connecting transcoding, CDN warming, and recommendations into a feedback loop",
+      "Strong capacity estimation with concrete bandwidth and storage calculations",
+      "Good viral content handling with request coalescing and tiered caching"
+    ],
+    "weaknesses": [
+      "Initially treated each subsystem independently before realizing the connections",
+      "Limited API design discussion — didn't detail upload or streaming APIs",
+      "Database design was underexplored — video metadata storage, user data, etc."
+    ]
+  }
+}

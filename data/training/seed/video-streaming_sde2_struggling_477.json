@@ -1,0 +1,196 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "sde2",
+    "candidate_profile": "struggling",
+    "total_exchanges": 22,
+    "generation_id": "seed_477"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Hey, thanks for coming in! Today we're going to design a video streaming platform like YouTube. Users can upload videos and other users watch them. Take a moment to think about what you'd want to clarify before diving in.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, so like... YouTube. How many users are we talking about? And do we need to support both uploading and watching videos?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["scale", "scope"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great start! Let's say 50 million daily active users. Yes, both upload and playback. About 100,000 videos uploaded per day, and users watch an average of 20 minutes per day. What else would you want to know?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Um, do we need to support different video qualities? Like HD and SD? And is search part of the scope?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["video_quality", "search"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes, support multiple quality levels -- 360p through 1080p. Let's keep search out of scope and focus on the core upload and playback flow. Go ahead and start laying out the high-level design!",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay so the basic idea is: a user uploads a video file, we store it somewhere, and then when another user wants to watch it, we send them the file. I'd have an upload service that takes the video via an API endpoint -- like POST /upload with the video file in the body. The service saves the video to some kind of storage, probably S3. Then we store the video metadata -- title, description, uploader -- in a database like MySQL. For watching, the user hits GET /videos/{id} and we return the video file from S3.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["upload_api", "object_storage", "metadata_database"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a reasonable starting point for thinking about the flow. But there's something important missing -- you mentioned supporting multiple quality levels. If a user uploads a 1080p video, can someone with a slow connection just watch that same file at 360p?",
+      "annotation": { "action": "hint", "phase": "high_level_design", "target_concept": "transcoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh right, no. We'd need to create different versions of the video at different resolutions. So when it's uploaded, we need to convert it into 360p, 480p, 720p, and 1080p versions. I think that's called transcoding?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["transcoding", "multiple_resolutions"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly, transcoding! That's a critical piece. Can you describe how you'd build that transcoding pipeline? What happens after the raw video lands in S3?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "transcoding_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "So after it's in S3... we need something to convert it. I guess we'd have a service that takes the original file and runs it through some kind of converter. Maybe like... a server that downloads the file from S3, converts it to each resolution, and uploads the converted versions back to S3? I'm not sure what tool you'd use for the actual conversion though.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["transcoding_service"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You're on the right track with a service that processes the video. Tools like FFmpeg handle the actual encoding. But think about the scale -- 100,000 videos per day. If each transcode takes 10-20 minutes, how would you handle that volume? A single server wouldn't cut it.",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "transcoding_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, we'd need multiple servers. So maybe we put the transcoding jobs in a queue -- like SQS or something -- and have a bunch of worker servers pulling jobs off the queue. When a video is uploaded, we add a message to the queue, and any available worker picks it up and does the transcoding. We could auto-scale the workers based on how long the queue is.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["job_queue", "worker_pool", "auto_scaling"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good, a queue-based worker architecture is the right pattern. Now here's an important question: when a user watches the video, you said you'd send them the video file. But think about a 30-minute video that's 500MB. What happens if the user's network connection drops 15 minutes in?",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "video_segmentation" }
+    },
+    {
+      "role": "candidate",
+      "content": "They'd have to download the whole file again from the start? That sounds really bad. I guess we could use range requests -- like HTTP range headers -- so the player can resume from where it stopped. Download bytes 250MB to the end.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["http_range_requests"], "depth": "surface", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Range requests help with resuming, but there's a bigger issue. What if the user's network speed changes mid-video? They started on WiFi at 1080p, then switched to cellular. With a single monolithic file per resolution, what would the player need to do to switch quality?",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "adaptive_bitrate" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh, it would need to stop downloading the 1080p file and start downloading the 720p file from the same timestamp. That means the player would need to know the byte offset that corresponds to that timestamp, which seems complicated. Unless... we split the video into small pieces? Like instead of one big file, we have lots of little files, each a few seconds long. Then the player can just switch to a different quality version for the next chunk.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["video_chunking", "quality_switching", "segmented_delivery"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's exactly right! This is called adaptive bitrate streaming. The video gets split into small segments -- typically 2 to 10 seconds each -- and each segment is available in multiple quality levels. The player picks the right quality for each segment based on network conditions. There are protocols for this -- have you heard of HLS or DASH?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "hls_dash" }
+    },
+    {
+      "role": "candidate",
+      "content": "I've heard the term HLS before but I don't really know what it stands for or how it works. Is it something Apple made? I know DASH even less. I think the general idea is that there's some kind of file that tells the player where all the chunks are?",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["hls"], "depth": "buzzword", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's okay, let me explain briefly. HLS is HTTP Live Streaming, yes from Apple. It uses a manifest file -- called an m3u8 playlist -- that lists all available quality levels and their segment URLs. The player reads the manifest, picks a quality, and downloads segments one by one. Your intuition about a file listing the chunks was spot on. Now knowing this, how would the playback flow work end to end?",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "playback_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "So the user clicks on a video, and our API returns the video metadata plus a URL to the manifest file. The player fetches the manifest, which lists all the quality levels and the URLs for each segment at each quality. The player estimates its bandwidth, picks a quality, and starts downloading the first segment. As it plays, it keeps downloading the next segments. If the network gets slower, it picks a lower quality for the next segment. That way the user doesn't have to buffer, they just get a lower quality image for a bit. That's actually really clever.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["manifest_file", "quality_selection", "bandwidth_estimation", "adaptive_switching"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great, you've got the concept! Now, these video segments are small files that millions of users are requesting simultaneously. If they all go to your S3 origin, what happens?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cdn" }
+    },
+    {
+      "role": "candidate",
+      "content": "S3 would get crushed with that much traffic. We need a CDN -- content delivery network. Like CloudFront or Akamai. The CDN caches the video segments at edge locations all around the world. When a user requests a segment, it's served from the closest CDN edge instead of going all the way to S3. Popular videos would be cached at pretty much every edge, so most requests never hit our origin servers.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cdn", "edge_caching", "origin_offload"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's talk about the database side. What metadata do you need to store and what database would you use?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "We need to store video metadata: the video ID, title, description, who uploaded it, when, the duration, and... the processing status, like whether transcoding is done. I'd also need to store the manifest URL once transcoding is complete. I'd use MySQL or Postgres for this. Primary key on video_id. And an index on uploader_id so you can list a user's videos.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["video_metadata", "relational_database", "indexing", "processing_status"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Reasonable. What about view counts? A viral video might get thousands of views per second. Can you just UPDATE the view count in MySQL on every view?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "counter_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, thousands of UPDATEs per second to the same row... that would cause a lot of lock contention. I think. Actually I'm not sure how MySQL handles that. Could we just do it and let MySQL deal with it? No wait, that probably wouldn't work. Maybe we could batch the updates somehow? Like, count views in memory and flush to the database every minute? But if the server crashes we lose those counts...",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["lock_contention", "batching"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You're thinking in the right direction with batching. A common pattern is to use an in-memory counter service like Redis -- it handles high-frequency increments very well -- and periodically flush the accumulated count to MySQL. The view count displayed might be a minute or two stale, but that's acceptable for this use case. How about failure handling -- what if a transcoding job fails partway through?",
+      "annotation": { "action": "hint", "phase": "scaling_failures", "target_concept": "transcoding_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If it fails... we retry it? Put the job back on the queue and let another worker try. If it keeps failing, maybe after 3 retries, we mark the video as failed and tell the uploader something went wrong. We should probably keep the original file in S3 so they don't have to re-upload.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["retry_logic", "failure_status", "original_preservation"], "depth": "surface", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a solid basic approach. We're running out of time -- can you summarize what we've designed?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Upload: users upload videos to S3 through our upload service. A message goes to a queue, and transcoding workers pick it up and convert the video into multiple resolutions. The transcoded video gets split into segments, and a manifest file is generated. Playback: the player fetches the manifest, picks a quality level based on bandwidth, and downloads segments from a CDN. The CDN caches segments at edge locations to handle the scale. Metadata like titles and video status lives in MySQL. View counts go through Redis for performance. I know I struggled with the transcoding and streaming parts at the beginning, but the chunking approach and CDN delivery make a lot of sense to me now.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["architecture_summary", "upload_pipeline", "playback_pipeline", "cdn", "metadata"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice job pulling the summary together. You showed good thinking when guided to the chunking and adaptive bitrate concepts. For next time, I'd suggest studying streaming protocols like HLS and DASH more deeply, and thinking about what happens between upload and playback on your own. Thanks for your time!",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 32,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 4,
+      "capacity_estimation": 2,
+      "api_design": 4,
+      "database_design": 5,
+      "caching_strategy": 3,
+      "scalability": 3,
+      "failure_handling": 3,
+      "communication": 5
+    },
+    "strengths": [
+      "Showed good intuition when guided to video chunking -- independently reasoned that segments enable quality switching",
+      "Understood CDN purpose and basic caching mechanics without prompting",
+      "Reasonable database schema with appropriate indexing choices",
+      "Honest about knowledge gaps and receptive to guidance"
+    ],
+    "weaknesses": [
+      "Initial design was just 'upload to S3, download the file' with no awareness of transcoding pipeline",
+      "Could not design the transcoding pipeline independently -- needed multiple hints to get to queue-based workers",
+      "No knowledge of HLS or DASH protocols -- didn't know what HLS stands for",
+      "Proposed serving full monolithic video files instead of segments for playback",
+      "No capacity estimation attempted at any point in the conversation",
+      "View count scaling discussion was confused -- didn't know about Redis pattern without being told",
+      "No mention of content moderation, upload validation, or abuse prevention",
+      "Did not discuss video codecs, encoding formats, or compression"
+    ]
+  }
+}

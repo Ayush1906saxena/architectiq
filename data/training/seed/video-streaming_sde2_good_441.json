@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "sde2",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_441"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a video streaming platform like YouTube — users upload videos and other users watch them. What questions come to mind?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. How many users do we expect — both uploaders and viewers? What's the average video length and quality? Do we need to support live streaming or just pre-recorded video?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["user_scale", "video_properties", "live_vs_vod"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "100 million daily active viewers, 500K video uploads per day. Average video is 5 minutes, uploaded at 1080p. Pre-recorded only for now — no live streaming. Anything else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "What's our latency target for starting video playback? And do we need to support multiple resolutions — like auto-adjusting quality based on the viewer's connection speed?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["playback_latency", "adaptive_bitrate"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Playback should start within 2 seconds. And yes, we need adaptive bitrate — viewers should get the best quality their connection can handle. Let's start with the design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, I see two main flows: the upload pipeline and the viewing pipeline. For upload: the user's client uploads the raw video file to our servers. We store the original and then transcode it into multiple resolutions and formats — 360p, 480p, 720p, 1080p — so we can serve the right quality to each viewer. The transcoded files go into blob storage like S3. For viewing: the client requests a video, we serve the video metadata — title, description, available resolutions — and then stream the actual video content from storage or a CDN.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["upload_pipeline", "transcoding", "multiple_resolutions", "blob_storage", "cdn"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good overview. Let's dig into the upload flow. How does the actual file upload work? 1080p video at 5 minutes can be several hundred megabytes.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "chunked_upload" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, uploading a 500MB file in one shot is unreliable — if the connection drops at 90%, you'd lose everything. I'd use chunked uploading. The client splits the file into, say, 5MB chunks and uploads them individually. Each chunk gets an ID and sequence number. If a chunk fails, the client retries just that chunk. The server assembles the chunks into the full file once all are received. This is basically how the tus protocol or YouTube's resumable upload API works.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["chunked_upload", "resumable_upload", "retry_logic"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Once the file is assembled, what happens next?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "transcoding_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "Transcoding. We need to convert the uploaded video into multiple resolutions and codecs. I'd put a message onto a task queue — like SQS or RabbitMQ — that says 'video xyz is ready for transcoding.' Worker nodes pick up the task, download the raw file, and run FFmpeg or a similar tool to produce the different renditions. Each rendition is uploaded to S3. Once all renditions are done, we update the video's metadata in the database to mark it as 'ready' and available for viewing.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["transcoding_pipeline", "task_queue", "ffmpeg", "worker_nodes", "video_status"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned multiple resolutions. How does the client know which resolution to play? And how does it switch quality mid-stream if the network changes?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "adaptive_bitrate" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's adaptive bitrate streaming. The video isn't served as a single file — it's split into small segments, maybe 2-4 seconds each. We generate a manifest file — like an HLS .m3u8 playlist — that lists all available quality levels and the URL for each segment at each quality. The client starts by requesting the manifest, picks an initial quality based on estimated bandwidth, and starts downloading segments. If the bandwidth drops, the client switches to lower quality segments on the next download. If bandwidth improves, it steps up. The transition is seamless because each segment is independently decodable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["adaptive_bitrate", "hls", "video_segments", "manifest_file", "bandwidth_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice explanation. Now, 100 million viewers per day — where do the video segments actually get served from?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "cdn" }
+    },
+    {
+      "role": "candidate",
+      "content": "A CDN — content delivery network. We can't serve all traffic from our origin servers; the bandwidth and latency would be terrible for users far from our data center. The CDN has edge servers distributed globally. When a video is first requested from a region, the edge server fetches it from our origin (S3) and caches it. Subsequent requests from the same region are served from the edge cache. Popular videos stay cached; unpopular ones eventually get evicted. This means a viral video in India gets served from an Indian edge server, not from a US data center.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cdn", "edge_caching", "origin_fetch", "geographic_distribution"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How much of the traffic do you expect the CDN to handle versus origin? Can you estimate the bandwidth?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, let me think. 100M viewers per day. If each watches, say, 3 videos of 5 minutes... at an average bitrate of 3Mbps for mixed quality, that's 3 × 5 × 60 × 3Mbps = 2.7Gb per user per day. Wait, let me redo that. 3 videos × 5 min × 60 sec = 900 seconds of video. At 3Mbps average, that's 900 × 3Mbits = 2,700 Megabits = about 337.5 MB per user per day. Total egress: 100M × 337.5 MB = about 33.75 petabytes per day. That's massive. The CDN should handle 95%+ of that — a good CDN cache hit rate for popular content is 95-99%. So maybe 1-2 PB per day from origin.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["bandwidth_estimation", "cdn_cache_hit_rate", "origin_traffic"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good attempt at the math. Now let's talk about the database side. What data do we need to store besides the video files?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Video metadata: title, description, uploader, upload timestamp, duration, thumbnail URL, status (processing, ready, failed), view count. User data: profile, subscriptions, watch history. I'd use a relational database like PostgreSQL for this — the data is structured and we need joins for things like 'show me my subscriptions' latest uploads.' View counts could get tricky at scale since every video play is a write — I might use a separate counter service or Redis for that to avoid hot rows in the database.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["video_metadata", "user_data", "postgresql", "view_counting", "hot_rows", "redis"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good call on view counts. What about the thumbnail — when does that get generated?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "thumbnail_generation" }
+    },
+    {
+      "role": "candidate",
+      "content": "During the transcoding step. As part of the processing pipeline, we can extract frames at regular intervals — like every 10 seconds — and generate candidate thumbnails. We could use a heuristic to pick the most visually interesting one, or let the uploader choose. The thumbnails are small images — maybe 320x180 — stored in S3 and served via the CDN. Since thumbnails appear on the browse/search pages, they're actually accessed more frequently than videos, so CDN caching for thumbnails is critical.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["thumbnail_generation", "processing_pipeline", "cdn_thumbnails"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk failures. Your transcoding worker crashes halfway through processing a video. What happens?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "transcoding_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The task queue handles this with visibility timeouts. When a worker picks up a transcoding job, the message becomes invisible to other workers for, say, 30 minutes. If the worker finishes, it deletes the message. If the worker crashes, the message becomes visible again after 30 minutes and another worker picks it up. The key is that transcoding must be idempotent — running it twice on the same input produces the same output, so retries are safe. The video stays in 'processing' status until all renditions are complete. If a job fails repeatedly — say 3 times — we move it to a dead letter queue and alert the team.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["visibility_timeout", "idempotent_processing", "retry_logic", "dead_letter_queue"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if the CDN goes down in a region? Millions of viewers suddenly can't stream.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cdn_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "We should use multiple CDN providers — a multi-CDN strategy. DNS-based routing can detect if one CDN is down in a region and redirect traffic to another provider. Some companies use a CDN load balancer that health-checks edges continuously. If all CDN options in a region fail, we'd fall back to serving from the nearest healthy region, accepting higher latency. The video quality might auto-downgrade due to the latency, but playback still works. We should also have monitoring and automated failover — not rely on manual switching.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["multi_cdn", "dns_routing", "health_checks", "automated_failover", "graceful_degradation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good thinking on multi-CDN. We're almost out of time — anything you'd want to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things: content moderation — we need to scan uploaded videos for prohibited content before making them public, probably using ML models as a first pass and human review for edge cases. Search and discovery — an Elasticsearch index on video metadata for the search feature. And a recommendation engine to suggest videos based on watch history, but that's probably a separate deep dive.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["content_moderation", "search", "recommendation_engine"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice job. You covered the end-to-end flow well and showed good understanding of the upload and streaming paths. Thanks!",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 64,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 6,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 6,
+      "failure_handling": 6,
+      "communication": 7
+    },
+    "strengths": [
+      "Clear explanation of adaptive bitrate streaming with HLS segments and manifests",
+      "Good end-to-end understanding of upload pipeline from chunking to transcoding to storage",
+      "Practical failure handling with visibility timeouts and dead letter queues"
+    ],
+    "weaknesses": [
+      "Capacity estimation was attempted but with some stumbling — needed prompting",
+      "Didn't discuss video encoding formats or codec trade-offs (H.264 vs H.265 vs VP9)",
+      "Missing depth on CDN cache warming and origin shield architecture"
+    ]
+  }
+}

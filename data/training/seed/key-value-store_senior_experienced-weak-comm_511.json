@@ -1,0 +1,133 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "senior",
+    "candidate_profile": "experienced_weak_communicator",
+    "total_exchanges": 22,
+    "generation_id": "seed_511"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed key-value store. What questions do you have about the requirements?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "So the thing is — consistency model matters a lot here. Because like, Dynamo and etcd are completely different beasts. If you want strong consistency you go Raft-based, if you want availability you go gossip with — um. OK. What's the use case? And how many ops per second?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["consistency_model", "dynamo", "etcd", "raft", "gossip"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good distinction. Multi-use: session storage, feature flags, caching. Tunable consistency. 500K ops/sec, billions of keys. Sub-5ms reads.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "OK so tunable consistency is the Dynamo model — W and R quorums. Not etcd/Raft which is always strongly consistent. For the storage engine — actually let me talk about partitioning first because that's — well, no, it all connects. Consistent hashing for partitioning, each key hashes to a position on the ring, walk clockwise to the first N nodes. I ran a system like this at my previous company — 2TB of session data, 200K reads per second. The virtual nodes thing was critical because without them you get hot spots when a node goes down and its neighbor absorbs all the — anyway. Architecture. Three layers.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["dynamo_model", "quorum", "consistent_hashing", "virtual_nodes", "hot_spots"], "depth": "surface", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Take a breath. Three layers — go ahead, but try to structure your answer.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, sorry. Layer 1: routing. Stateless proxy nodes. Client sends request, proxy hashes the key, routes to the correct storage node. Or the client itself caches the ring and goes direct — we did that at my company and it cut p50 latency by 0.8ms. Layer 2: storage. These hold the data. LSM-tree engine — memtable in RAM backed by WAL, flush to SSTables on disk. Bloom filters on each SSTable level to skip disk reads. We used RocksDB under the hood. Layer 3: metadata. Small Raft cluster — 3 or 5 nodes — that stores the partition map and handles membership changes. When a node joins or dies, the metadata cluster updates the ring and the routing layer picks up the change.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["routing_layer", "client_direct_routing", "storage_layer", "lsm_tree", "memtable", "wal", "sstable", "bloom_filter", "rocksdb", "metadata_raft"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good structured answer. Tell me about the replication model.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "N=3 replicas. One is designated leader for writes, others are followers. But here's where it gets interesting — the quorum config changes the behavior entirely. W=2, R=2: strong consistency. Every read sees the latest write because the read set and write set overlap. We used this for auth tokens at my company — can't serve stale auth data. W=1, R=1: fast but eventually consistent. We used this for session data where staleness of 100ms was fine. The leader processes the write, returns immediately, replicates async. The thing I learned the hard way — there's a gotcha with W=2 in practice. If one replica is slow (GC pause, disk contention), every write waits for it. The p99 becomes the slowest replica's p99. We solved it with — we tracked per-replica latency and temporarily removed slow replicas from the write quorum. Like the ISR concept in Kafka.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["quorum_replication", "w_r_configurations", "strong_vs_eventual", "slow_replica_problem", "gc_pause", "dynamic_quorum", "isr_analogy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That ISR-like approach for the KV store is a great production insight. How do you handle conflict resolution under eventual consistency?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "conflict_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "So with W=1, two clients can write to the same key on different replicas. Classic Dynamo problem. We used — OK actually this is where I messed up once. We used last-write-wins with NTP timestamps. Worked fine for 6 months. Then NTP drifted on a handful of nodes during a leap second event and we had silent data loss — the 'newer' write according to wall clock was actually the older one. After that we switched to hybrid logical clocks — HLC. Combines physical time with a logical counter. Provides causal ordering without depending on perfectly synchronized clocks. The logical component breaks ties when physical clocks agree. Much safer. Vector clocks are the textbook answer but they're heavy — the clock grows with the number of writers. For our use case, HLC was the right trade-off.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["last_write_wins", "ntp_drift", "leap_second", "silent_data_loss", "hybrid_logical_clocks", "causal_ordering", "vector_clocks", "clock_size_tradeoff"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The NTP drift story is exactly the kind of production lesson that's valuable. How does compaction work in your LSM-tree engine? It can cause latency spikes.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yeah, compaction is — so this is the bane of LSM-tree systems. You have L0 SSTables from memtable flushes, then they merge down into L1, L2, etc. Each level is 10x the size of the previous. During compaction, you're reading and rewriting entire SSTables which competes for disk I/O with foreground reads. At my company — this was a 4AM pager — compaction fell behind and L0 accumulated 50 files. Read latency spiked 20x because each read had to check all 50 L0 files through their bloom filters. The fix: rate-limit compaction I/O to 40% of disk bandwidth during peak hours, unlimited during off-peak. We also switched from size-tiered to leveled compaction — leveled has higher write amplification (about 10-30x) but much more predictable read performance because each level has non-overlapping key ranges.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lsm_levels", "compaction_io_contention", "l0_accumulation", "bloom_filter_overhead", "io_rate_limiting", "size_tiered_vs_leveled", "write_amplification"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Another great war story. How do you detect and repair divergent replicas?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "anti_entropy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two mechanisms. Read repair — during a quorum read, if one replica returns a stale value, the coordinator sends the latest value to the stale replica. This is opportunistic — fixes hot keys that are read frequently. Background anti-entropy — a periodic job (every few hours) that compares Merkle trees between replica pairs. The Merkle tree is a hash tree over the key space — if the root hashes differ, drill down to find divergent subtrees and only sync those. We had to tune the anti-entropy interval carefully — too frequent and it consumed too much I/O, too infrequent and divergence accumulated. We settled on every 4 hours with a jitter to avoid all pairs syncing simultaneously.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_repair", "merkle_tree", "background_anti_entropy", "hash_tree_drill_down", "interval_tuning", "jitter"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a storage node permanently fails?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "node_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The metadata cluster detects it via heartbeat timeout — usually 30 seconds of missed heartbeats. It marks the node as dead, removes it from the ring, and assigns its partitions to other nodes. Remaining replicas (2 of 3) keep serving. A repair process streams data from surviving replicas to the new owners. The repair uses the same Merkle tree mechanism — compare trees, stream the delta. For a node with 500GB of data, full streaming at 1Gbps takes about — ugh, math. 500GB × 8 bits = 4000Gb ÷ 1Gbps = about 67 minutes. During that window, those partitions run at reduced replication factor. We monitored under-replicated partitions as a Tier 1 alert — because a second failure during repair means data loss.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["heartbeat_timeout", "ring_update", "streaming_repair", "merkle_delta", "repair_time_calculation", "under_replicated_alert", "double_failure_risk"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "TTL support — keys that auto-expire, essential for session storage. Tombstones for deletes — mark as deleted, replicate the tombstone, then garbage collect later. And — this one bit us — don't forget to eventually remove tombstones or they accumulate and slow down reads. We had a bug where tombstones weren't being GC'd and a range scan that should have been fast was scanning millions of dead entries. Set a gc_grace_seconds and stick to it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ttl", "tombstones", "tombstone_gc", "gc_grace_seconds", "range_scan_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The tombstone GC story is a classic Cassandra-ism. Excellent depth throughout — your production experience really shines. The communication could be more structured, but the substance is among the strongest I've seen. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 64,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 4,
+      "capacity_estimation": 6,
+      "api_design": 4,
+      "database_design": 9,
+      "caching_strategy": 5,
+      "scalability": 8,
+      "failure_handling": 9,
+      "communication": 4
+    },
+    "strengths": [
+      "Outstanding production experience — NTP leap second data loss, L0 compaction storm, tombstone GC bug are all real-world lessons",
+      "Deep storage engine knowledge — leveled vs size-tiered compaction with concrete write amplification numbers",
+      "Excellent anti-entropy design with Merkle tree drill-down and tuned repair intervals",
+      "ISR-like dynamic quorum is an insightful production pattern most candidates miss"
+    ],
+    "weaknesses": [
+      "Communication was consistently disorganized — started multiple tangents, jumped between topics, needed interviewer to redirect",
+      "Requirements gathering was scattered — mentioned Dynamo and etcd before the problem was understood",
+      "No API design — didn't define the client interface or discuss SDK ergonomics",
+      "Capacity estimation was fragmented — mentioned numbers from previous experience but didn't size this specific system",
+      "Didn't discuss cross-region replication or global deployment"
+    ]
+  }
+}

@@ -1,0 +1,162 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "staff",
+    "candidate_profile": "misunderstands-then-recovers",
+    "total_exchanges": 22,
+    "generation_id": "seed_056"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing platform. Riders request rides, drivers pick them up and take them to their destination. Where would you start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Interesting. So ride-sharing — that's like BlaBlaCar or UberPool, right? People heading the same direction share a ride to split costs. Let me ask: are riders posting their routes in advance and drivers matching, or is it real-time matching? And what's the maximum detour a driver is willing to take to pick up an additional rider?",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["carpooling"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Sorry, I should clarify — I'm talking about something like Uber or Lyft. A rider requests a ride from point A to point B, and we match them with a nearby available driver. Not shared rides or carpooling.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Ah, got it — that's quite different. My apologies for the misunderstanding. An on-demand ride-hailing service. Let me reset. The core problem is real-time matching of riders with the nearest available driver, managing location tracking, ride lifecycle, pricing, and payments. Let me ask the right questions: what's our scale — cities, concurrent rides? Do we need surge pricing? ETA estimation?",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["matching", "location_tracking", "pricing"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "100 cities, 1 million concurrent rides at peak, yes to surge pricing and ETA. Go ahead with your design.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with capacity. 1 million concurrent rides means roughly 2 million active users on both sides — riders and drivers. Drivers send location updates every 3-5 seconds, so that's maybe 500,000 drivers * 1 update per 4 seconds = 125,000 location updates per second. Ride requests — if average ride is 15 minutes, 1M concurrent rides means about 67,000 new ride requests per minute, or roughly 1,100 per second. These are the two hot paths: ingesting driver locations and matching ride requests.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "location_tracking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good recovery on the math. How do you store and query driver locations efficiently?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "geospatial_indexing" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the core technical challenge. We need a geospatial index that supports two operations: update a driver's position (125K writes/sec) and find nearest available drivers to a rider (1.1K reads/sec). Options include PostGIS, Redis with geospatial commands, or a custom in-memory geospatial index. I'd go with a combination. For the real-time location store, Redis GEO commands using sorted sets with geohash-encoded scores. GEOADD to update positions, GEORADIUS to find nearby drivers. Redis handles the write throughput easily. Each city gets its own Redis key to partition the data — 'drivers:nyc', 'drivers:sf' — since we never need to search across cities.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geospatial_indexing", "redis_caching", "geohash"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the matching flow. A rider requests a ride — what happens step by step?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step 1: Rider opens the app, enters destination. The client sends a ride request with pickup lat/lng, destination lat/lng, and ride type (economy, premium, etc). Step 2: The matching service queries Redis GEORADIUS for available drivers within, say, 5km of the pickup point, filtered by ride type. Step 3: We rank candidates — closest by road distance (not straight-line), current heading (a driver heading toward the pickup is better than one heading away), driver rating, and acceptance rate. Step 4: We send the ride offer to the top-ranked driver. They have 15 seconds to accept. If they decline or timeout, we offer to the next driver. Step 5: On acceptance, we mark the driver as unavailable in Redis, create the ride record in the database, and notify the rider with driver details and ETA.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["matching", "geospatial_indexing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned road distance versus straight-line. How do you calculate that quickly?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "eta_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the initial filtering, straight-line distance via GEORADIUS is fine — it's just a rough filter. For the ranking of the top 10-20 candidates, we call a routing service (like an internal OSRM instance or Google Directions API) to get actual road-distance ETAs. OSRM can return travel time between two points in under 10ms from pre-computed routing tables. So for 20 candidates, that's 20 parallel calls taking ~10ms. Acceptable for the matching latency budget. We cache common route segments too — if multiple drivers are on the same highway, we don't recompute the full route for each.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["eta_estimation", "routing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How does surge pricing work?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing is about supply-demand imbalance. We divide each city into hexagonal zones — maybe 1-2km hexagons using H3 (Uber's open-source geospatial index). For each zone, we track supply (available drivers) and demand (recent ride requests) as counters in Redis. A background job runs every 30-60 seconds computing the surge multiplier: demand/supply ratio mapped to a pricing curve. If demand is 3x supply, maybe the multiplier is 1.8x. The surge is applied when the rider sees the price estimate. Key subtlety: surge should attract drivers into underserved areas, so we show the surge multiplier on the driver's map to incentivize repositioning.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_pricing", "geospatial_indexing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the ride lifecycle after matching? How do you track the ongoing ride?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "ride_lifecycle" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ride goes through states: REQUESTED -> MATCHED -> DRIVER_EN_ROUTE -> ARRIVED -> IN_PROGRESS -> COMPLETED. Each state transition is an event stored in the database and pushed to both rider and driver via WebSocket or push notification. During the ride, the driver's app continues sending location updates — these get streamed to the rider's app for the live map. We also store a sampled version of the route (every 15 seconds) for the trip record, which is needed for fare calculation (distance-based component), dispute resolution, and insurance claims. If GPS drops out (tunnels, parking garages), the client buffers locations and uploads when connectivity returns.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ride_lifecycle", "state_machine", "websocket"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you calculate the fare?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "The fare has multiple components: a base fare, a per-mile rate, a per-minute rate (for time in traffic), a booking fee, and the surge multiplier. We estimate the fare before the ride starts using the routing service's estimated distance and duration. This is the price the rider sees and agrees to. After the ride, we compute the actual fare from the GPS trace — actual distance traveled and actual time elapsed. If the actual fare is close to the estimate (within 20%), we charge the estimate to avoid surprises. If the driver took a significantly longer route, we cap it at the estimated fare. This protects riders from being overcharged due to wrong turns or intentional detours.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pricing", "eta_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the database architecture? You have location data, ride records, user data — different access patterns.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three storage layers. Redis for real-time state: driver locations, driver availability, surge multipliers, ride state for active rides. PostgreSQL for transactional data: ride records, user profiles, payment records, driver profiles — anything that needs ACID. This is sharded by city or region since most queries are city-scoped. And a time-series store — maybe InfluxDB or Cassandra — for the historical location traces. Those are high-volume writes (125K/sec) with occasional reads for dispute resolution or analytics. We definitely don't want location traces in Postgres — the volume would overwhelm it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "redis_caching", "sharding_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the scenario where a driver's app loses connection mid-ride?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "offline_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "The driver's app should be resilient to connectivity drops. It buffers location updates locally and uploads them when reconnected. For the rider, we show the last known position and a message like 'driver may be in an area with limited connectivity.' If the driver's app doesn't reconnect within 5 minutes, we flag the ride for review and send an SMS to the driver's phone (SMS works on basic cellular which might be available when data isn't). We also compute the fare from whatever GPS data we have — the buffered data from the driver's phone gets uploaded post-ride and we can retroactively correct the fare if needed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["offline_handling", "reliability"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good recovery from the initial misunderstanding. You've covered the system well. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. Safety features: trip sharing with trusted contacts, an emergency button that alerts authorities with the rider's location, driver background checks. Payment integration: pre-authorized charges when the ride starts, automatic charge on completion, dispute handling. And driver incentives — guaranteed minimums during low-demand periods, bonuses for completing N rides, which affect system economics. Looking back, sorry again about the initial carpooling confusion — hopefully the rest of the design demonstrated that I understand on-demand marketplace systems well.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["safety", "payment", "incentives"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "No worries about the start — you recovered gracefully and the technical depth was solid. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 62,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 4,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 6
+    },
+    "strengths": [
+      "Strong recovery after initial misunderstanding — capacity estimation and matching design were solid",
+      "Excellent geospatial indexing discussion with Redis GEO and H3 hexagons for surge zones",
+      "Practical fare calculation design with consumer protection against overcharging",
+      "Good multi-database architecture with clear rationale for each storage system"
+    ],
+    "weaknesses": [
+      "Initial misunderstanding of the problem wasted valuable interview time",
+      "Requirements gathering was weak — should have clarified the problem type before assuming",
+      "Didn't discuss multi-region deployment or handling drivers near city boundaries",
+      "Safety features and payment were only briefly mentioned at the end"
+    ]
+  }
+}

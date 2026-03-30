@@ -1,0 +1,141 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "senior",
+    "candidate_profile": "amazon-style",
+    "total_exchanges": 22,
+    "generation_id": "seed_310"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We're designing a real-time chat messaging system. I want to understand how you'd operate this in production. What metrics would you use to measure chat system health?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "operational_metrics" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd define health across three dimensions. Delivery health: message delivery latency at p50, p95, p99 — how long from send to recipient receiving. Message delivery success rate — percentage of messages successfully delivered within 30 seconds. Message ordering correctness — percentage of conversations with correct sequence ordering. Connection health: WebSocket connection success rate, reconnection time after disconnection, concurrent connection count vs capacity. Infrastructure health: CPU and memory utilization per service, database read/write latency, queue depth for the message delivery pipeline. The primary SLI would be: percentage of messages delivered to an online recipient within 500ms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["operational_metrics", "sli_definition", "delivery_latency", "connection_health"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What SLA would you commit to externally, and what's your internal SLO?",
+      "annotation": { "action": "probe", "phase": "requirements", "target_concept": "sla_slo" }
+    },
+    {
+      "role": "candidate",
+      "content": "External SLA: 99.95% availability for message delivery — the system accepts and eventually delivers messages. 99.9% of messages delivered within 2 seconds for online recipients. Internal SLO — tighter: 99.99% availability target, with 99.9% of messages delivered within 500ms. The gap between SLA and SLO is our error budget. If we consume 50% of our monthly error budget in one week, we shift engineering focus from features to reliability. I'd also set an SLO for message durability: zero message loss for persisted messages. If we lose a single message that was acknowledged to the sender, that's a SEV-1 incident regardless of the overall availability numbers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sla_slo", "error_budget", "message_durability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the high-level architecture with a focus on how you'd operate each component.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The architecture has four main services. The Gateway Service maintains WebSocket connections — it's the entry and exit point for all real-time communication. The Message Service handles message persistence, ordering, and routing. The Presence Service tracks online/offline status. The Notification Service handles push notifications for offline users. Each service runs in an auto-scaling group across 3 AZs. The data layer: DynamoDB for message storage — partitioned by conversation_id, sorted by message sequence. Redis for the connection registry and presence cache. SQS for the offline message queue. I'd run all of this in at least 2 regions with active-active.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["service_architecture", "multi_az", "database_choice", "active_active"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle a region-level outage? Say us-east-1 goes down completely.",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "region_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "With active-active, both regions serve traffic simultaneously. DynamoDB Global Tables replicate data across regions with eventual consistency — typically sub-second replication lag. When us-east-1 goes down: Route 53 health checks detect the failure within 30-60 seconds and stop routing traffic to us-east-1. All clients reconnect to us-west-2. The connection registry in us-west-2 is updated as clients reconnect. Messages sent during the transition: the sender's client retries if the first attempt fails. Messages in-flight to us-east-1 that were written to DynamoDB in that region but not yet replicated might appear to be lost temporarily. When the region recovers, DynamoDB Global Tables reconcile and those messages appear. The client should handle this by requesting messages since its last known sequence number on reconnection.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["region_failure", "global_tables", "dns_failover", "data_reconciliation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned messages might temporarily disappear during region failover. Walk me through the runbook for verifying no messages were lost after the region recovers.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "runbook" }
+    },
+    {
+      "role": "candidate",
+      "content": "The runbook for post-region-recovery message verification: Step 1 — Check DynamoDB Global Tables replication status. The AWS console shows replication lag and any conflicts. If replication is caught up with zero conflicts, we're likely fine. Step 2 — Run a reconciliation job. Compare message counts per conversation between regions. If region A has messages that region B doesn't, investigate the replication lag window. Step 3 — Use the message audit log. Every message write also emits an event to a Kinesis stream. We have a separate audit service that independently counts messages. Compare the audit log count to the database count. Discrepancies are flagged. Step 4 — Client-side verification. Each client tracks its last sent message ID. On reconnection, it sends a sync request with its last known state. The server responds with any messages the client is missing. This is the final safety net. If we find lost messages, the severity depends on how many. 1-10 messages: SEV-2, investigate root cause. More than 10: SEV-1, all-hands response.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["runbook", "data_reconciliation", "audit_log", "client_sync"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now let's talk about deployment. How do you deploy changes to the Gateway Service without disconnecting 200 million users?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "zero_downtime_deployment" }
+    },
+    {
+      "role": "candidate",
+      "content": "The Gateway Service is stateful — each instance holds hundreds of thousands of WebSocket connections. We can't just terminate an instance. I'd use a graceful drain approach. During deployment, we mark the old instance as draining — it stops accepting new connections but keeps existing ones alive. The load balancer routes new connections to the new instance. Old connections are gradually migrated: the gateway sends a control message to clients telling them to reconnect. We stagger this — migrate 10% of connections per minute over 10 minutes. Each client reconnects to the new fleet with exponential backoff and jitter. The old instance shuts down after all connections are drained or after a 15-minute timeout. We deploy one AZ at a time, with a 30-minute bake time between AZs to catch regressions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["zero_downtime_deployment", "connection_draining", "rolling_deployment", "canary"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "A deployment goes bad — the new version of the Message Service has a bug that silently drops 1 in 1000 messages. How do you detect this?",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "silent_data_loss" }
+    },
+    {
+      "role": "candidate",
+      "content": "Silent data loss is the worst kind of bug — no errors, no alerts. Detection strategies: First, end-to-end canary tests. A synthetic sender sends a message every 30 seconds through the production path, and a synthetic receiver verifies receipt. If the receiver misses a message, alert immediately. Second, the audit log reconciliation I mentioned — compare messages written to the Kinesis audit stream vs messages in DynamoDB. A 0.1% discrepancy would surface within an hour. Third, client-side receipts. When the server delivers a message to the recipient's gateway, the gateway sends an ACK back. We track the ratio of messages sent vs ACKs received. A 0.1% drop in ACK rate triggers an alert. Fourth, user reports. Even with all automation, some bugs are caught by users. We need a low-friction way for users to report missing messages, and those reports should be triaged with high priority.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["silent_data_loss", "canary_testing", "audit_reconciliation", "delivery_receipts"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle capacity planning for this system? You need to handle both steady-state and spikes.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "capacity_planning" }
+    },
+    {
+      "role": "candidate",
+      "content": "Capacity planning at three time horizons. Real-time: auto-scaling based on CPU utilization and connection count. If gateway servers hit 70% of connection capacity, scale out. The Message Service scales on message queue depth. Medium-term: weekly review of traffic trends. If we're growing 5% month-over-month, ensure we have 3 months of headroom. We also plan for known events — New Year's Eve sees 2-3x normal message volume. Pre-scale the fleet 24 hours before. Long-term: annual capacity planning tied to user growth projections. If we expect to go from 200M to 300M concurrent users in 12 months, we need 50% more gateway capacity, proportionally more database throughput, and the network bandwidth to match. I'd maintain a capacity model — a spreadsheet that maps user count to resource requirements for each service.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_planning", "auto_scaling", "traffic_prediction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "New Year's Eve. Midnight hits in each timezone. The message volume spikes 5x in a rolling wave. How does your system handle it?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "traffic_spike" }
+    },
+    {
+      "role": "candidate",
+      "content": "The New Year's spike is predictable, which is our advantage. Preparation: 48 hours before, we pre-scale all services to 5x capacity in every region. Freeze all deployments. Test the scaled fleet with a load test at 4x. Ensure the on-call team has a dedicated war room. During the event: as each timezone hits midnight, our monitoring shows the spike moving across the globe. The pre-scaled capacity absorbs it. If any service approaches 80% capacity, the auto-scaler adds more instances. For the database, DynamoDB on-demand mode handles the burst without pre-provisioning. We temporarily disable non-critical features: read receipts and typing indicators can be dropped if needed to preserve core message delivery. Post-event: after 24 hours, scale back down to normal levels. Write a post-event report comparing predicted vs actual traffic to improve next year's model.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["traffic_spike", "pre_scaling", "feature_degradation", "event_planning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the on-call experience like for the team running this service? How do you keep it sustainable?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "on_call" }
+    },
+    {
+      "role": "candidate",
+      "content": "On-call sustainability is critical for team health. Structure: primary and secondary on-call, rotating weekly. No more than one week in every 4 for any engineer. The on-call engineer gets a reduced feature work load during their week. Alert hygiene: every alert must be actionable. If an alert fires and the on-call doesn't need to do anything, it's a candidate for removal or conversion to a dashboard metric. We target fewer than 2 pages per on-call shift outside business hours. Every page that wakes someone up gets a follow-up ticket to investigate if it could be automated or prevented. Quarterly on-call review: look at page frequency, time to acknowledge, time to resolve, and engineer satisfaction surveys. If pages are increasing, that's a signal to invest in reliability over features. We also maintain runbooks for every known failure mode — the on-call should never be guessing what to do at 3 AM.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["on_call", "alert_hygiene", "operational_excellence", "team_sustainability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid operational thinking. Thanks for walking through this.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 70,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 6,
+      "api_design": 5,
+      "database_design": 7,
+      "caching_strategy": 6,
+      "scalability": 7,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent operational excellence mindset — runbooks, on-call sustainability, deployment safety",
+      "Strong region failure handling with practical reconciliation procedures",
+      "Proactive capacity planning across multiple time horizons"
+    ],
+    "weaknesses": [
+      "API design and WebSocket protocol were not discussed",
+      "Message ordering and consistency guarantees were superficially covered",
+      "Caching strategy and data model details were thin",
+      "Did not discuss end-to-end encryption or security"
+    ]
+  }
+}

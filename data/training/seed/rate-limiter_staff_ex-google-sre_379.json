@@ -1,0 +1,190 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "staff",
+    "candidate_profile": "ex-google-sre",
+    "total_exchanges": 22,
+    "generation_id": "seed_379"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a rate limiter. This should be a distributed system that can protect our APIs from abuse. What's your initial thinking?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Before I dive in, I want to reframe the problem slightly. At Google, rate limiting, load shedding, and circuit breaking are one system — we called it traffic management. A rate limiter in isolation is a partial solution. Can I ask: are we building a standalone rate limiter, or a broader traffic management layer? Because the design is fundamentally different.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "load_shedding", "circuit_breaker", "system_scope"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great framing. Let's design the broader traffic management system, with rate limiting as the primary focus. What requirements do we need to nail down?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Key requirements: First, what granularity of rate limiting — per user, per API key, per IP, per service? At Google we did all four, with a priority hierarchy. Second, what algorithms — fixed window, sliding window, token bucket, leaky bucket? Each has different fairness properties. Third, latency budget — how much overhead can the rate limiter add per request? At Google, our target was under 1ms p99 for the rate check. Fourth, what happens when we rate limit — hard reject with 429, graceful degradation, or priority-based queuing? Fifth, should rate limits be configurable at runtime without redeployment?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "token_bucket", "sliding_window", "latency", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "All levels of granularity. Token bucket as the primary algorithm. Under 2ms p99 overhead. Graceful degradation preferred over hard rejection. Runtime configurable. Scale: 500K requests per second across 200 services.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "500K RPS is serious but manageable. Let me do the math. If each rate check involves one Redis operation, that's 500K commands/sec. A single Redis instance handles about 100K ops/sec, so we need at least 5 Redis instances — I'd provision 10 for headroom. But here's the thing: hitting a central store for every request defeats the purpose if the store becomes a bottleneck. At Google, we used a hybrid approach — local rate counters on each server synced periodically to a central store. The local counter handles 99% of decisions with zero network overhead.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "redis_caching", "distributed_rate_limiting", "local_rate_limiting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me more about the hybrid approach. How does local-plus-central work in practice?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each application server runs a rate limiter sidecar — a local process with its own token bucket. Say we have 50 servers and a global limit of 10,000 requests/sec for a particular client. Each server gets a local budget of 200 req/sec (10K / 50). The sidecar enforces this locally with zero network calls — sub-microsecond latency. Every 5 seconds, each sidecar reports its actual usage to the central coordinator via gRPC. The coordinator redistributes unused budget. If server A only used 100 of its 200 allocation, that spare 100 gets redistributed to server B that's hitting its limit. We called this 'adaptive quota balancing' internally.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sidecar_pattern", "token_bucket", "distributed_rate_limiting", "adaptive_balancing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens during the 5-second sync interval? Could a client burst past its global limit?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Absolutely — that's the fundamental trade-off. In the worst case, all 50 servers could allow their full local budget simultaneously, giving 50 * 200 = 10K req/sec, which happens to equal our global limit. But if a client sends traffic unevenly — say 80% to 10 servers — those servers could temporarily allow 10 * 200 = 2K while the true global usage might be over limit. The over-admission window is bounded by the sync interval. We accepted this at Google because rate limiting is about protection, not metering. If a client exceeds their limit by 10% for 5 seconds, that's fine — we're preventing 100x abuse, not billing to the penny. For stricter guarantees, we'd shorten the sync interval to 1 second, at the cost of more coordinator traffic.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistency", "eventual_consistency", "distributed_rate_limiting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the full architecture — all the components and how they interact.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Four components. First, the Rate Limiter Sidecar — deployed alongside every application server, either as a sidecar container or a shared library. Intercepts every inbound request, performs local token bucket check, returns allow/deny in microseconds. Second, the Quota Coordinator Service — a small cluster of 3-5 servers running Raft for leader election. Receives usage reports from all sidecars every 5 seconds, computes optimal quota distribution, pushes new allocations back. Third, the Config Service — stores rate limit rules in etcd. Rules like 'client X gets 5000 req/sec on endpoint /api/search'. Operators update rules via an admin UI, changes propagate to sidecars within seconds via etcd watch. Fourth, the Load Shedding Layer — when overall system load exceeds capacity, this overrides individual rate limits. It uses CPU utilization and request queue depth as signals. At Google, this saved us during multiple cascading failures — individual rate limits don't help when the whole system is overloaded.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sidecar_pattern", "raft_consensus", "configuration_management", "load_shedding", "cascading_failure"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The Quota Coordinator running Raft — isn't that over-engineered? Why not just use Redis?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "coordinator_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fair pushback. Redis would work and is simpler operationally. Here's why I lean toward a custom coordinator: the quota redistribution algorithm is stateful and computationally non-trivial. It needs to track per-server usage patterns, detect hot spots, and solve an allocation optimization. Doing this in Redis Lua scripts is possible but painful. That said, for an MVP or a team without distributed systems expertise, I'd absolutely start with Redis. Use Redis sorted sets for sliding window counters, Lua scripts for atomic check-and-decrement. Get it working, then optimize. The SRE in me says: the system you ship beats the perfect system you're still building.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "sliding_window", "lua_scripting", "pragmatic_engineering"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the token bucket algorithm implementation. How does it work at the sidecar level?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Token bucket is elegant in its simplicity. Each rate limit rule creates a bucket with two parameters: capacity (max burst size) and refill rate (tokens per second). When a request arrives, we check if a token is available. If yes, consume one token and allow. If no, deny. Tokens refill at the configured rate. Implementation trick: don't use a background thread to refill. Instead, store the last_refill_timestamp and compute available tokens lazily on each request. tokens = min(capacity, stored_tokens + (now - last_refill) * refill_rate). This is O(1), lock-free with CAS, and works perfectly in a sidecar. One bucket per unique key — so for per-user rate limiting on 100K active users, we need 100K buckets in memory. At maybe 64 bytes per bucket, that's about 6MB. Trivial.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "lock_free", "memory_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the load shedding component you mentioned? How does that interact with rate limiting?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "load_shedding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Load shedding is the safety net when rate limiting isn't enough. Scenario: a new client with no rate limit configured suddenly sends 100K RPS. Rate limiter doesn't know to block them. Load shedding detects the server is overloaded — CPU above 85%, request latency above the SLO — and starts rejecting requests probabilistically. The shedding priority is based on request criticality: health checks and payment confirmations have higher priority than analytics writes. At Google, we used a 4-tier priority system: CRITICAL_PLUS, CRITICAL, SHEDDABLE_PLUS, SHEDDABLE. Under load, we shed from the bottom up. This is configured per-endpoint in the same config service. The key insight: rate limiting is proactive (prevent overload), load shedding is reactive (respond to overload). You need both.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["load_shedding", "request_priority", "slo", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the case where the Quota Coordinator itself goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "single_point_of_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is exactly why the sidecar has local state. If the coordinator is unreachable, each sidecar continues enforcing its last known quota allocation. The tokens refill at the last configured rate. The system becomes 'stale but functional' — rate limits are enforced, just not optimally redistributed. The coordinator runs as 3 replicas with Raft, so single-node failures are transparent. If all 3 go down — which in my SRE career I've seen maybe twice — the sidecars fall back to a static configuration baked into the deployment. We call this 'defense in depth' — three layers of fallback: live coordinator, cached allocation, static defaults.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["single_point_of_failure", "graceful_degradation", "defense_in_depth", "raft_consensus"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about observability? How do you monitor a rate limiting system?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Observability is where most rate limiter designs fail. Key metrics: rate of allowed vs denied requests (per client, per endpoint), token bucket utilization (are clients consistently near their limit?), coordinator sync latency, and load shedding activation events. Critical alerts: if denied request ratio for any client exceeds 50% for 5 minutes — they might need a quota increase. If load shedding activates — something is wrong at the system level. I'd expose all metrics via Prometheus endpoints on each sidecar, aggregate in Grafana. The most important dashboard: a real-time view of 'system headroom' — how much spare capacity does each service have before load shedding kicks in. At Google, that dashboard was the first thing we checked during any incident.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "alerting", "prometheus", "observability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you test a rate limiter? It's hard to simulate realistic traffic patterns in staging.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three levels of testing. Unit tests: verify the token bucket math, boundary conditions, clock edge cases. Integration tests: spin up a sidecar, coordinator, and a mock service — verify that rate limits are enforced end-to-end and that quota redistribution works. Load tests: this is where it gets interesting. I'd use a traffic replay tool — record production traffic patterns, anonymize them, and replay at 2x-5x speed against the staging rate limiter. The key thing to test isn't the happy path — it's the failure modes. What happens when a coordinator node dies mid-redistribution? When clock skew between servers exceeds 100ms? When a single client sends a burst 10x their limit? At Google, we had 'DiRT' exercises — Disaster Recovery Testing — where we'd intentionally kill components in production and verify the system degraded gracefully. I'd do the same here: chaos engineering specifically for the traffic management layer.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["testing_strategy", "chaos_engineering", "load_testing", "failure_injection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you roll this out to 200 services without disrupting existing traffic?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "rollout_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Phased rollout with shadow mode. Phase 1: deploy sidecars in 'observe only' mode — they log what they would rate limit but don't actually block anything. Run for 2 weeks, collect data on traffic patterns, identify clients that would be affected. Phase 2: enable rate limiting on 5 non-critical services with very generous limits — 10x the observed traffic. Tighten gradually. Phase 3: roll out to the next 20 services, then 50, then all. Each phase has a 1-week bake time. The kill switch: every sidecar has a feature flag that instantly disables enforcement and falls through to 'allow all'. If we see any unexpected impact, one config change stops all rate limiting globally. Total rollout timeline: 8-12 weeks. It's slow, but at Google I learned that rushing a traffic management rollout causes more incidents than it prevents.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["shadow_mode", "phased_rollout", "feature_flags", "rollout_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "One last question — how does this system handle multi-region deployments?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "multi_region" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multi-region adds a consistency challenge. Option A: global rate limiting — one coordinator handles the global view. Problem: cross-region latency (50-100ms) makes the sync too slow. Option B: per-region rate limiting — each region enforces independently. Problem: a client can get N times their limit by spreading traffic across N regions. Option C — what we did at Google: split the global quota across regions proportional to their traffic share. US-East gets 60% of the budget, EU-West gets 30%, AP-Southeast gets 10%. Each region's coordinator enforces independently. Cross-region sync happens at a slower cadence — every 30 seconds — to rebalance regional allocations as traffic patterns shift. This is eventually consistent but bounds the over-admission to a known factor.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_region", "consistency", "eventual_consistency", "quota_distribution"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. You've covered a tremendous amount of ground with real operational depth. Any closing thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "One thing I want to emphasize: the most important property of a rate limiter is that it must never become the bottleneck itself. If the rate limiter adds 50ms of latency or goes down and blocks all traffic, you've made the system worse, not better. Every design decision should be evaluated against this: does this increase the probability that the rate limiter itself causes an outage? That's why local enforcement with lazy sync is so critical — it degrades gracefully by design.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["reliability", "graceful_degradation", "system_design_principles"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Well said. Thank you for a thorough and experience-driven discussion.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 80,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 8,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Reframed rate limiting as part of a broader traffic management system — showed staff-level thinking",
+      "Deep operational experience from Google SRE — every recommendation backed by real-world incidents",
+      "Excellent failure mode analysis with defense-in-depth fallback strategy"
+    ],
+    "weaknesses": [
+      "API design was less detailed than expected — focused more on infrastructure than interface",
+      "Could have discussed rate limit response headers (X-RateLimit-Remaining, Retry-After) for client integration",
+      "Database design for persisting rate limit configurations was under-specified"
+    ]
+  }
+}

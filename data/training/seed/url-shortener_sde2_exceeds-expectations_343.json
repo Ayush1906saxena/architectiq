@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "sde2",
+    "candidate_profile": "exceeds-expectations",
+    "total_exchanges": 20,
+    "generation_id": "seed_343"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service like bit.ly. Walk me through how you'd approach this.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Before jumping in, I want to understand the scale. How many URLs are we shortening per day? And I know this seems simple on the surface, but I want to think about what happens at 100 million URLs per day. The design changes significantly at that scale compared to, say, 1 million.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scale_awareness", "capacity_estimation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good instinct. Let's go with 100 million URLs per day. What else do you want to know?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "What's the read-to-write ratio? I'd guess redirects outnumber URL creations by a large factor. Do short URLs expire? And do we need analytics — tracking how many times each URL was clicked?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_write_ratio", "url_expiration", "analytics"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "100:1 read-to-write ratio. URLs expire after 5 years by default. Basic click analytics. Go ahead with your design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the numbers because they drive every design decision. 100M writes per day = ~1,160 writes/sec. With 100:1 ratio, that's 116,000 reads/sec. Over 5 years, we'll store 100M * 365 * 5 = ~182 billion URLs. If each record is 500 bytes (short code, long URL, metadata), that's 91TB of storage. For the short code itself: a 7-character base62 code gives us 62^7 = 3.5 trillion possible codes — 19x our 5-year storage need. Plenty of headroom. These numbers tell me: writes are easy, reads need caching, and storage needs sharding.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation", "base62_encoding"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Impressive capacity analysis for your level. Walk me through the architecture.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two core APIs. POST /api/v1/urls with body {long_url, custom_alias?, ttl?} returns {short_url, created_at, expires_at}. GET /{shortCode} returns 302 redirect to the long URL. The architecture: a load balancer in front of stateless app servers. For writes, the app server generates a unique short code, stores the mapping in the database, and returns. For reads, the app server checks a Redis cache first — on hit, redirect immediately. On miss, query the database, populate cache, redirect. Given 116K reads/sec, the cache is essential. Following 80/20, 20% of URLs get 80% of traffic. 20M hot URLs * 500 bytes = 10GB — fits easily in Redis.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "load_balancing", "redis_caching", "cache_sizing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you generate unique short codes across multiple app servers without collisions?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "id_generation" }
+    },
+    {
+      "role": "candidate",
+      "content": "A few approaches. Random generation with collision check: generate a random 7-char base62 string, check the database for uniqueness, retry on collision. Simple but collision probability grows as the keyspace fills. At 182B URLs in a 3.5T keyspace, collision rate is ~5% — acceptable but wasteful. Better: counter-based. A central counter service hands out ID ranges to each app server. Server A gets range [1, 100000], Server B gets [100001, 200000]. Each server increments locally — no coordination per-request. Base62 encode the counter. Zero collisions by design. The counter service is a potential SPOF, but it's only called once per 100K URLs per server — very low traffic. I'd back it with a simple PostgreSQL row with SELECT ... FOR UPDATE.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["id_generation", "collision_handling", "counter_based_id", "range_allocation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good trade-off analysis. What database would you use?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "The access pattern is simple: point lookups by short_code for reads, single-row inserts for writes. Both PostgreSQL and a NoSQL store like DynamoDB would work. I'd choose PostgreSQL because the data model is simple and relational, we benefit from ACID for the counter service, and the team likely has more Postgres expertise. With a B-tree index on short_code, point lookups are O(log n). At 1,160 writes/sec, a single Postgres primary handles it easily. For reads, 2-3 read replicas behind the cache handle the cache-miss traffic.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "access_patterns", "read_replicas", "btree_index"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "With 91TB of data over 5 years, how does a single Postgres instance hold up?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "sharding" }
+    },
+    {
+      "role": "candidate",
+      "content": "It doesn't. We need to shard. I'd hash the short_code and distribute across, say, 16 shards initially. Each shard holds 91TB / 16 = ~5.7TB — manageable for Postgres. The app server computes hash(shortCode) % 16 to route to the right shard. Since every query includes the short_code, we always know which shard to hit — no scatter-gather needed. For growth, we can double to 32 shards by splitting each shard in half. But I'd plan the initial hash to map to 256 virtual shards assigned to 16 physical shards, so we can rebalance by moving virtual shards without rehashing.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding", "hash_based_sharding", "virtual_shards", "capacity_planning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned 302 redirects. Why not 301?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "redirect_codes" }
+    },
+    {
+      "role": "candidate",
+      "content": "301 means permanent redirect — the browser caches it and never hits our servers again for that URL. 302 means temporary — the browser always comes through us. Since we need click analytics, we need to see every request. If we used 301, browsers would bypass us on repeat visits, and our click counts would be wrong. The trade-off is more server load with 302, but we're already handling that with Redis caching. For users who don't need analytics, we could offer 301 as an option to reduce their redirect latency on repeat visits.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redirect_codes", "analytics_impact", "browser_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the analytics pipeline?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "analytics" }
+    },
+    {
+      "role": "candidate",
+      "content": "Analytics must not slow down the redirect. On each redirect, the app server asynchronously fires a click event — shortCode, timestamp, IP, user-agent — to a message queue like Kafka. A separate analytics consumer reads events, aggregates them (clicks per URL per hour), and writes to a time-series table. The redirect returns immediately; analytics processing is decoupled. If Kafka is down, we drop the analytics event rather than blocking the redirect. The analytics data is eventually consistent — a few seconds lag is fine for click dashboards.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["async_analytics", "kafka", "event_driven", "eventual_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if the Redis cache goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "All 116K reads/sec hit the database directly. Even with replicas, that's likely too much. My defenses: Redis Cluster with replicas for automatic failover — a single node failure triggers replica promotion in seconds. A small L1 in-process cache on each app server (maybe 100MB LRU) absorbs the hottest URLs during Redis failover. Rate limiting on reads to prevent the database from being overwhelmed — return 503 with Retry-After rather than let the DB crash. And the database read replicas provide a buffer. The system degrades but stays available.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_failure", "redis_cluster", "l1_cache", "rate_limiting", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final additions to the design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Rate limiting on the creation API to prevent abuse — token bucket per API key. A URL validation service that checks destination URLs against a malware/phishing blocklist before shortening. A TTL cleanup job that runs nightly, deleting expired URLs from the database and invalidating them from cache. And monitoring: cache hit ratio (should be >95%), redirect p99 latency, database query latency, and the counter service availability. One more thing — for truly global scale, I'd put a CDN in front that can handle the most popular redirects at the edge, eliminating the need to hit our infrastructure at all for the top 1% of URLs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "security", "ttl_cleanup", "monitoring", "cdn"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "This was really impressive for your level. The unprompted capacity estimation and the depth on sharding and failure handling exceeded my expectations. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 70,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Unprompted capacity estimation with detailed math — exceptional for SDE2 level",
+      "Every design decision was grounded in the numbers computed upfront",
+      "Virtual shard concept for future-proof sharding showed forward thinking"
+    ],
+    "weaknesses": [
+      "Could have discussed multi-region deployment for global latency",
+      "Security considerations came late — URL validation should be mentioned earlier",
+      "Limited discussion of custom alias handling and conflict resolution"
+    ]
+  }
+}

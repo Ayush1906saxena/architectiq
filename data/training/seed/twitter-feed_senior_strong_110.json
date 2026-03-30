@@ -1,0 +1,159 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 20,
+    "generation_id": "seed_110"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed system. Users follow other users, and they should see a timeline of tweets from people they follow. How would you approach this?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Before I design, let me clarify a few things. What's the scale — number of users, daily active users, average tweets per day? How fresh should the feed be — is near-real-time a requirement? Do we need to support multimedia tweets or just text? And do we need features like retweets, likes, or just the core feed?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "freshness", "feature_scope"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500 million users, 200 million DAU. 400 million tweets per day. Feed should be near-real-time — within a few seconds of posting. Text and images. Core feed only — no retweets or likes for now.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. Let me think about the feed delivery model. The classic approach is fan-out on write — pre-compute feeds when a tweet is posted. But I want to propose a different philosophy: a real-time push model using WebSockets. When a user opens the app, they establish a WebSocket connection. When someone they follow tweets, the tweet is pushed directly to their connection in real time. The feed isn't pre-computed and stored — it's assembled on the fly and updated live.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_on_write", "websocket", "real_time_push"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's an interesting approach. Walk me through how it would work architecturally.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "websocket" }
+    },
+    {
+      "role": "candidate",
+      "content": "There are three main components. First, a WebSocket Gateway — a fleet of servers maintaining persistent connections with online users. 200M DAU, assume 50M concurrent connections at peak. Each gateway server handles 500K connections, so about 100 gateway servers. Second, when a tweet is posted, a Fan-Out Service looks up the poster's followers, identifies which ones are online, determines which gateway server they're connected to, and pushes the tweet to those gateway servers. Third, for the initial feed load when a user opens the app, we still need a Feed Assembly Service that fetches recent tweets from followed users via a pull-based query — the WebSocket handles updates after that.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket", "real_time_push", "capacity_estimation", "fan_out_service"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the fan-out service know which gateway server a user is connected to?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "connection_routing" }
+    },
+    {
+      "role": "candidate",
+      "content": "We need a Connection Registry — a distributed mapping of user_id to gateway_server_id. When a user connects, the gateway registers them in this registry. When they disconnect, the entry is removed. I'd use Redis for this — it's fast for key-value lookups and supports TTL for cleanup. The fan-out service queries Redis: 'give me the gateway servers for these 1000 follower user IDs.' Redis handles this well with MGET or pipeline commands. For users who are offline, we skip them — they'll get the feed via the pull-based assembly when they come back online.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["connection_registry", "redis_caching", "offline_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's do some capacity estimation. A popular user has 10 million followers. They tweet. What happens?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "celebrity_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "With 10M followers, maybe 2M are online at any time. Looking up 10M follower IDs and finding 2M connections across 100 gateway servers is a lot of fan-out. This is the celebrity problem. My approach: tier users by follower count. For users under 10K followers, do the real-time push as described. For celebrities above 10K followers, switch to a hybrid model. Celebrity tweets are stored in a 'hot tweet' cache. When a user's feed is being assembled or when a WebSocket heartbeat occurs, the client-side or gateway checks the hot tweet cache for any new celebrity tweets. So regular users push, celebrities pull. The gateway merges both streams before sending to the client.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["celebrity_problem", "hybrid_fanout", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the client know which celebrities to pull from?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "celebrity_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each user has a 'celebrity follow list' — the subset of their follows that are above the celebrity threshold. This list is computed when the user connects and cached in the gateway's memory for that connection. It's a small list — most users follow maybe 5-20 celebrities. On a periodic interval — say every 5 seconds — the gateway batches all its connected users' celebrity lists, deduplicates, and checks the hot tweet cache for new tweets from those celebrities. Since many users follow the same celebrities, deduplication is very effective. One gateway server might have 500K connections but only check 5K unique celebrities.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["celebrity_problem", "batching", "deduplication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What data store do you use for tweets and the follow graph?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "For tweets, I'd use a sharded MySQL or Postgres cluster, sharded by user_id. This co-locates a user's tweets for efficient retrieval. The schema is simple: tweet_id, user_id, content, media_url, created_at. For the follow graph, I'd use a separate store — either a graph database like Neo4j for complex queries, or more practically, a sharded relational table with (follower_id, followee_id, created_at). Sharded by follower_id so we can efficiently answer 'who does user X follow?' Indexed on followee_id to answer 'who follows user Y?' — needed for fan-out. For the hot tweet cache and connection registry, Redis as discussed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "sharding_strategy", "database_schema", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the initial feed load work when a user opens the app?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "feed_assembly" }
+    },
+    {
+      "role": "candidate",
+      "content": "The Feed Assembly Service handles this. When a user connects, it fetches the user's follow list, then queries each followed user's recent tweets — last 24 hours or last 20 tweets, whichever is smaller. This is a scatter-gather: fan out queries to multiple shards, collect results, merge-sort by timestamp, and return the top N. For non-celebrities, this is the full query. For celebrities, we pull from the hot tweet cache instead. To optimize, we cache the assembled feed for frequently active users — if they opened the app 5 minutes ago, we only need to fetch the delta. After the initial load, the WebSocket handles all updates in real time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_assembly", "scatter_gather", "caching_strategy", "delta_updates"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a WebSocket connection drops? Users on mobile have flaky connections.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "connection_failover" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good concern. When the connection drops, the gateway removes the user from the connection registry. The client automatically attempts to reconnect with exponential backoff. On reconnection — potentially to a different gateway server — the client sends a 'last_seen_tweet_id' to indicate where they left off. The gateway does a mini feed assembly to fetch any tweets they missed during the disconnection gap, sends those as a catch-up batch, then resumes real-time push. For short disconnects under 30 seconds, the gateway can buffer the last few pushes in memory and replay them on reconnect, avoiding the database query entirely.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["connection_failover", "reconnection", "catch_up_mechanism", "exponential_backoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if a gateway server itself crashes? It has 500K connections.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "server_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "500K users would all disconnect simultaneously and reconnect to other gateways via the load balancer. That's a thundering herd reconnection scenario. To mitigate: first, client reconnect uses jittered exponential backoff — spread the 500K reconnections over 30-60 seconds instead of all at once. Second, the load balancer distributes reconnections evenly across remaining gateways. Third, each gateway has capacity headroom — if normal load is 500K, capacity is 700K. With 100 gateways, redistributing 500K users means about 5K extra per server, well within headroom. The connection registry entries have a TTL, so stale entries from the crashed server auto-expire.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["thundering_herd", "exponential_backoff", "capacity_planning", "connection_registry"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle ordering? Two tweets arrive at different gateways at slightly different times.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Tweets are assigned a globally ordered timestamp (or Snowflake-like ID) when they're created by the tweet ingestion service. The fan-out service pushes tweets with this ID. The client-side maintains the feed in sorted order by this ID. If tweet B arrives before tweet A due to network timing, but A has a lower ID (earlier), the client inserts A in the correct position. For the initial feed load, the server sorts by this ID. The key insight is that perfect ordering is a client-side merge problem, not a server-side guarantee. We just need a consistent ordering key — the tweet creation timestamp from a logical clock.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_ordering", "snowflake_id", "client_side_ordering"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's wrap up. What are the trade-offs of this WebSocket-first design compared to the traditional fan-out-on-write approach?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The advantages: real-time delivery — users see tweets within seconds, not on next refresh. Lower storage — we don't maintain a pre-computed feed per user, saving enormous amounts of storage at 200M DAU. Lower write amplification — a tweet by a user with 1000 followers doesn't trigger 1000 cache writes. The disadvantages: more operational complexity with WebSocket infrastructure. Higher memory per gateway server for connection state. The initial feed load is slower than reading a pre-computed feed — it's a scatter-gather instead of a single read. And offline users get no benefit — they still need the pull-based assembly. Overall, I think the real-time UX and reduced write amplification make it worthwhile for a modern feed system.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_on_write", "websocket", "write_amplification", "storage_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid design with a clear point of view. I appreciated the WebSocket-first approach and how you handled the celebrity problem within that model. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 73,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Bold WebSocket-first design with clear justification for real-time push over pre-computed feeds",
+      "Elegant celebrity problem solution using tiered push/pull hybrid within the WebSocket model",
+      "Thorough connection failure and reconnection handling"
+    ],
+    "weaknesses": [
+      "Capacity estimation was less rigorous — didn't fully estimate storage or compute for feed assembly",
+      "API design was underexplored — no discussion of pagination, filtering, or API contracts"
+    ]
+  }
+}

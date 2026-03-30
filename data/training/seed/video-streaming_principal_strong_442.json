@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "principal",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_442"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design the video streaming infrastructure for a platform like Netflix. At this level, I'm interested in architecture spanning multiple teams, cost analysis, and multi-region strategy. Where would you start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "First, I'd want to decompose the problem into domains. Video streaming isn't one system — it's at least five: ingestion and transcoding, content storage and delivery, playback and client experience, content discovery and recommendation, and the data platform that ties it all together. Each of these could be owned by a different team. Before designing, let me clarify scope: are we building for user-generated content at YouTube scale, or curated content at Netflix scale? The architectures diverge significantly.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["domain_decomposition", "team_ownership", "ugc_vs_curated"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's go Netflix-like — curated content, 200 million subscribers globally, 10,000 titles in the catalog, with originals being added weekly. Focus on delivery and cost efficiency.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good. Key numbers: 200M subscribers, maybe 100M concurrent streams at peak. If average stream is 5Mbps for HD, peak bandwidth is 500Tbps globally. That's a CDN bill measured in hundreds of millions per year. The catalog is relatively small — 10,000 titles × maybe 20 renditions each × 2GB average per rendition = 400TB of unique content. That's manageable for storage. The challenge isn't storage — it's delivery at 500Tbps. That's where all the architectural decisions and cost live.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["concurrent_streams", "bandwidth_estimation", "cdn_cost", "storage_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "500Tbps is enormous. How would you architect the delivery layer to handle that cost-effectively?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "cdn_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "At this scale, you don't use a third-party CDN — you build your own. Netflix did this with Open Connect. The economics: a third-party CDN charges roughly $0.01-0.02 per GB. At our bandwidth, that's potentially $2-4 billion per year. Building your own CDN with hardware placed in ISP data centers costs a fraction of that. The architecture: purpose-built appliances — commodity servers with high-density storage (200TB+ of SSDs per box) and 100Gbps NICs. We embed these appliances directly in ISP networks through peering agreements. Content is pre-positioned on these appliances during off-peak hours. When a subscriber in São Paulo hits play, the content streams from an appliance inside their ISP's network — zero transit hops, minimal latency, and the ISP is happy because the traffic stays internal to their network.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["custom_cdn", "open_connect", "isp_peering", "cdn_economics", "content_prepositioning", "appliance_architecture"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you decide what content to pre-position where? You can't put all 400TB on every appliance.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "content_placement" }
+    },
+    {
+      "role": "candidate",
+      "content": "Content popularity follows a power law — the top 100 titles account for maybe 80% of views. So the placement strategy is tiered. Tier 1 appliances (inside ISPs in major metros): store the top 500 most popular titles in all renditions. These appliances handle 80-90% of all streams. Capacity: about 20TB, easily fits. Tier 2 appliances (regional IXPs or colocation): store the full catalog tail. Handle the 10-20% of requests for less popular content. Tier 3 origin (our data centers): store everything, including all historical renditions and raw masters. Handles <1% of direct serving — mostly filling cache misses from Tier 2. The placement algorithm runs daily: pull viewing data per region, predict tomorrow's demand using a content popularity model (factoring in new releases, promotional placement, seasonal trends), and push delta updates to appliances overnight. For a new original series launch, we pre-push it to every Tier 1 appliance 24 hours before release.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["power_law", "tiered_placement", "popularity_prediction", "cache_warming", "pre_positioning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the transcoding pipeline work, and how do you optimize for cost there?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "transcoding_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "Transcoding is the second biggest cost after delivery. For 10,000 titles, each needs to be encoded in multiple resolutions (from 240p to 4K), multiple codecs (H.264 for broad compatibility, H.265/HEVC for efficiency, AV1 for next-gen devices), and multiple bitrate ladders. Netflix pioneered per-title encoding — instead of one fixed bitrate ladder for all content, analyze each title and find the optimal bitrate for each resolution. An animated show compresses much better than a live-action thriller with fast cuts. This can save 20-40% on bandwidth without quality loss. The pipeline itself: raw masters land in S3. An orchestrator (think Step Functions or Temporal) splits the work into chunks — each chunk is encoded independently on GPU or CPU instances, then stitched back together. We use spot instances for transcoding since it's batch work that's retry-friendly. Spot saves 60-70% on compute versus on-demand. The total transcoding cost for a 2-hour 4K movie across all renditions is roughly $200-500 depending on complexity. At 20 new titles per week, that's maybe $500K per year — significant but manageable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["per_title_encoding", "codec_strategy", "bitrate_ladder", "spot_instances", "chunked_encoding", "transcoding_cost"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned AV1. Why adopt a new codec when H.264 works? What's the organizational cost of that decision?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "codec_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "AV1 is 30-50% more efficient than H.264 — meaning the same quality at half the bitrate. At 500Tbps of delivery, a 30% bandwidth reduction saves $300M+ per year on CDN costs. That's the business case. The organizational cost: AV1 encoding is 10-50x slower than H.264. So transcoding costs go up massively. We need to invest in hardware encoders or ASIC acceleration. Client devices need AV1 decode support — modern phones and smart TVs have it, but older devices don't. So we can't drop H.264; we run parallel codec ladders and serve AV1 only to capable devices. That means the transcoding pipeline now produces 2-3x more renditions, the content placement system needs to be smarter about which codec variants to pre-position, and the client team needs to implement codec negotiation. It's a 3-team, 6-month initiative. But the ROI is massive — the $300M annual bandwidth saving easily justifies 50 engineers working on it for a year.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["av1_efficiency", "bandwidth_savings", "encoding_cost", "device_compatibility", "parallel_codec_ladders", "cross_team_initiative", "roi_analysis"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about multi-region. You're serving 200M users globally. How does the control plane work across regions?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "multi_region" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd separate the data plane from the control plane. The data plane — video delivery — is inherently regional, handled by the CDN appliances we discussed. The control plane — user accounts, billing, content metadata, viewing history, recommendations — runs in our cloud infrastructure. For the control plane, I'd run active-active in 3 regions: US, EU, and APAC. Each region serves requests for users geographically close to it. User data is partitioned by home region — a user in Germany has their primary data in EU. For reads, each region can serve from local replicas. For writes, they go to the primary region for that user. Cross-region replication lag is 50-200ms, which is acceptable for most operations. The exception: billing and entitlement checks must be strongly consistent. If a user's subscription lapses, they shouldn't keep streaming because the EU replica hasn't caught up. For these critical paths, we route to the primary region and accept the latency hit.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_plane_control_plane", "active_active", "regional_partitioning", "cross_region_replication", "strong_consistency_billing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about DRM and content protection? Studios won't license content without it.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "drm" }
+    },
+    {
+      "role": "candidate",
+      "content": "DRM is non-negotiable for licensed content. We need to support Widevine (Android, Chrome), FairPlay (Apple devices), and PlayReady (Windows, smart TVs). Each has its own license server protocol. The flow: when the client starts playback, it requests a DRM license from our license server. The license server checks the user's entitlement (is this title included in their plan? Are they in a licensed region?), generates a content key, wraps it in the DRM-specific license format, and returns it. The client uses this key to decrypt the video segments. Content is encrypted once during transcoding using CENC (Common Encryption) — the same encrypted file works with all three DRM systems, which saves storage. The license server must be highly available and low-latency — if it's down, no one can start a new stream. I'd rate it as a Tier 0 service with 99.999% availability target. License caching on the client helps for offline playback (download for airplane mode). The organizational implication: DRM compliance requires regular audits from the DRM providers. We need a dedicated security team that manages the relationship with Widevine/FairPlay, handles key rotation, and responds to piracy incidents.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["widevine", "fairplay", "playready", "cenc", "license_server", "entitlement_check", "offline_playback", "compliance_audits"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you structure the engineering organization around this platform? What teams exist?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "team_structure" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd organize around the domain decomposition I mentioned earlier. Ingestion & Encoding team (15-20 engineers): owns the upload pipeline, transcoding infrastructure, per-title encoding optimization, and codec adoption. They're the team running the AV1 migration. Content Delivery team (20-25 engineers): owns the CDN appliance software, content placement algorithms, ISP peering relationships, and the steering service that routes clients to the best appliance. This is where most infrastructure cost savings come from. Playback & Client team (25-30 engineers per platform): owns the player SDK, adaptive bitrate algorithm, DRM integration, and offline download. Separate sub-teams for iOS, Android, web, smart TV. Content Platform team (15-20 engineers): owns the content metadata store, search and discovery API, editorial tools, and content availability (which titles in which regions based on licensing). Data & ML Platform team (20-25 engineers): owns the recommendation engine, A/B testing infrastructure, viewing analytics, and the data warehouse. Cross-cutting: an SRE team (10-15 engineers) that partners with all teams on reliability, plus a security team (5-8) focused on DRM compliance and anti-piracy. Total: roughly 130-160 engineers for core video infrastructure. This doesn't include product managers, designers, or content acquisition.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["team_structure", "domain_ownership", "cross_cutting_teams", "headcount_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a well-thought-out org. What's the biggest technical risk to this platform over the next 3 years?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "strategic_risk" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three risks I'd track. First, ISP relationship fragmentation. Our CDN strategy depends on ISP cooperation. If ISPs start charging for rack space or throttling our appliances, our cost advantage disappears. Mitigation: diversify CDN strategy to include cloud CDN fallback, and maintain relationships with 100+ ISPs so no single one has leverage. Second, codec transition timing. AV1 adoption is still early. If we over-invest in AV1 hardware encoding and the industry pivots to a competing codec (VVC/H.266), we're stuck with single-purpose hardware. Mitigation: prefer software encoding on general-purpose GPUs where possible; limit ASIC investment to proven codecs. Third, regulatory fragmentation. Content licensing is per-region, and data privacy laws (GDPR, LGPD, etc.) constrain where we can process and store user data. As we expand to more countries, the complexity of 'which content can be shown where, and where can we store this user's data' becomes a combinatorial problem. Mitigation: invest in a content availability and compliance service that centralizes these rules, so individual teams don't need to reason about licensing geography.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["isp_risk", "codec_transition_risk", "regulatory_fragmentation", "strategic_mitigation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent strategic thinking. We're out of time — anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "One thing I'd emphasize: the biggest lever for this platform isn't any single technical decision — it's the feedback loop between viewing data and infrastructure optimization. Every stream generates telemetry: rebuffer events, quality switches, startup time, which CDN node served it. That data feeds back into content placement, ABR algorithm tuning, encoding quality targets, and ISP performance scorecards. The team that closes this loop fastest — from 'users in Bangalore are rebuffering on Airtel's network' to 'we've shifted those users to a different edge node' — wins on both cost and user experience. That's the platform's competitive moat.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["telemetry_feedback_loop", "data_driven_optimization", "competitive_moat"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Superb interview. You showed strong command of cost modeling, organizational design, and strategic risk assessment. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 84,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 9,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Outstanding cost analysis — calculated CDN costs, AV1 bandwidth savings ROI, and transcoding economics with real numbers",
+      "Excellent organizational thinking — decomposed the platform into clear team boundaries with headcount estimates",
+      "Strategic risk assessment was nuanced and included concrete mitigation strategies"
+    ],
+    "weaknesses": [
+      "API design was implicit — didn't discuss client-server contracts or API versioning",
+      "Could have discussed A/B testing for ABR algorithms and client-side experimentation",
+      "Database design was mentioned briefly but not deep-dived — content metadata store architecture was hand-waved"
+    ]
+  }
+}

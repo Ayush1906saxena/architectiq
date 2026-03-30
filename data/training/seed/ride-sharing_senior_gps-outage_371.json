@@ -1,0 +1,121 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "senior",
+    "candidate_profile": "gps-outage",
+    "total_exchanges": 20,
+    "generation_id": "seed_371"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing service like Uber. Today I want to focus on a specific failure: GPS becomes unreliable. Walk me through the location system first.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "location_service" }
+    },
+    {
+      "role": "candidate",
+      "content": "The location system is the backbone. Every driver's app sends GPS coordinates to our servers every 3-5 seconds. These updates hit a location ingestion service that writes to an in-memory geospatial index — something like a geohash-based grid or a quadtree. When a rider requests a ride, the matching service queries this index to find nearby available drivers. The location data is also streamed to Kafka for downstream consumers: ETA calculation, surge pricing, and analytics.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geospatial_index", "geohash", "location_ingestion", "real_time_streaming"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now the scenario: solar activity causes GPS to become unreliable in a major metropolitan area — say Manhattan. GPS accuracy drops from 5 meters to 500 meters, with some locations being completely wrong. This affects all phones in the area. What happens to your system?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "gps_degradation" }
+    },
+    {
+      "role": "candidate",
+      "content": "The system starts seeing locations that are wildly wrong. A driver sitting on 5th Avenue might show up as being in the middle of the Hudson River. The geospatial index gets polluted with bad data. Matching breaks down: we'd try to match a rider on 42nd Street with a driver who appears to be half a mile away but is actually next door. ETAs become meaningless — we're calculating routes from wrong starting points. Surge pricing goes haywire because driver supply appears to be distributed differently than it actually is. And navigation directions to the pickup point are based on the wrong driver location.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_pollution", "matching_failure", "eta_corruption", "surge_pricing_error"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you even detect that GPS is degraded? The phones are still sending coordinates — they're just wrong.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "anomaly_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several detection signals. First, physics-based validation: if a driver's location jumps 500 meters between two updates 3 seconds apart, that implies 370 mph — physically impossible for a car. Flag locations with speed anomalies. Second, road snapping: we snap GPS coordinates to the road network. If a large percentage of coordinates can't be snapped to any road within a reasonable distance, the GPS data is suspect. Third, aggregate anomaly detection: if the percentage of 'impossible' location updates in a geohash cell suddenly spikes from 1% to 30%, something is systematically wrong in that area — it's not just one bad phone. Fourth, cross-reference with cell tower triangulation data. If the GPS location disagrees significantly with the cell-based location estimate, flag it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["anomaly_detection", "physics_validation", "road_snapping", "cell_tower_triangulation", "aggregate_anomaly"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good detection strategies. Once you've detected the degradation, what do you do about matching? Riders still need rides.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "degraded_matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "We need to switch to a degraded matching mode. Instead of precise location-based matching, fall back to zone-based matching. Divide Manhattan into larger zones — say 500m x 500m blocks — and match riders to drivers in the same zone. The rider enters a pickup address (text-based, not GPS), and we geocode that to a zone. The driver's zone is estimated using the last known good GPS position, combined with cell tower data, and their trip history. We'd also increase the matching radius to account for uncertainty. And we should show the rider a message: 'GPS is currently unreliable in your area. Please confirm your pickup location and be prepared to call your driver for exact meetup coordination.'",
+      "annotation": { "quality": "good", "concepts_mentioned": ["zone_matching", "fallback_strategy", "cell_tower_location", "user_communication"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about active rides? Drivers are already navigating to pickup points or driving passengers to destinations. Their navigation is based on GPS.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "active_ride_mitigation" }
+    },
+    {
+      "role": "candidate",
+      "content": "For active rides, we have a few fallback options. First, use dead reckoning: based on the last known good GPS position, the current speed from the accelerometer, and the compass heading from the magnetometer, estimate the current position. Modern phones have IMU sensors that can maintain a reasonable position estimate for short periods. Second, fall back to turn-by-turn directions based on the planned route rather than real-time GPS. The driver follows the pre-calculated route, and we assume they're progressing along it at an estimated speed. Third, for fare calculation: use the planned route distance rather than the GPS trace distance. If GPS is unreliable, distance-based billing from GPS would either overcharge or undercharge randomly.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["dead_reckoning", "imu_sensors", "planned_route_fallback", "fare_calculation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Dead reckoning drifts over time. After 10 minutes, the accumulated error could be significant. How do you correct it?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "position_correction" }
+    },
+    {
+      "role": "candidate",
+      "content": "You're right — IMU drift accumulates. We can use map matching to correct. As the dead reckoning position advances, we snap it to the road network. If the estimated position is near an intersection and the driver turns, we can infer they took a specific road. This constrains the possible positions. We can also use Wi-Fi fingerprinting in dense urban areas — Manhattan has dense Wi-Fi coverage, and pre-mapped Wi-Fi signal patterns can give 20-50 meter accuracy without GPS. Combining dead reckoning, road network constraints, Wi-Fi, and cell tower data in a sensor fusion algorithm — like a Kalman filter — can maintain reasonable accuracy for 15-20 minutes of GPS outage.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["map_matching", "wifi_fingerprinting", "sensor_fusion", "kalman_filter"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the supply-demand balance? Surge pricing relies on knowing where drivers are. With unreliable locations, your surge zones might be completely wrong.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "surge_pricing_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd freeze surge pricing in the affected area and apply a flat moderate surge — say 1.5x — across all of Manhattan rather than trying to compute zone-by-zone surges with bad data. Applying normal surge algorithms to corrupted location data could create absurd price spikes in zones that appear to have no drivers (but actually do). The flat surge compensates drivers for the inconvenience of degraded navigation while avoiding randomly punishing riders in certain zones. Once GPS recovers, we gradually transition back to dynamic surge over 10-15 minutes as the location data re-stabilizes.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["surge_pricing_freeze", "flat_surge", "gradual_recovery"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you test your system's resilience to GPS degradation? You can't wait for solar activity.",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "testing_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "GPS simulation. In our testing environment, add a GPS degradation layer that injects noise into location updates before they reach the location service. We can simulate different failure modes: uniform noise (all positions off by 200m), sporadic jumps (10% of updates wildly wrong), and complete blackout (no GPS at all). Run the matching, ETA, and pricing algorithms against this degraded data and measure: match success rate, average pickup time, ETA accuracy, and pricing fairness. We should also test the detection system — inject degradation gradually and measure how quickly the system detects and activates the degraded mode. For production, we could deploy the GPS noise injection to a small percentage of simulated 'driver' clients to verify the detection pipeline works end-to-end.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["gps_simulation", "fault_injection", "detection_testing", "synthetic_drivers"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Decent interview. You covered the detection and mitigation well, but I felt the matching fallback was a bit thin and the sensor fusion approach was described without much depth. The surge pricing freeze was a practical decision. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 68,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 5,
+      "api_design": 6,
+      "database_design": 6,
+      "caching_strategy": 5,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 7
+    },
+    "strengths": [
+      "Strong multi-signal GPS anomaly detection approach",
+      "Practical surge pricing freeze decision during uncertainty",
+      "Good awareness of sensor fusion and alternative positioning technologies"
+    ],
+    "weaknesses": [
+      "Zone-based matching fallback was underspecified — no discussion of match quality metrics",
+      "Sensor fusion was mentioned but Kalman filter implementation details were thin",
+      "No capacity estimation for the location service under degraded conditions",
+      "Didn't address safety concerns — wrong driver locations could cause safety issues"
+    ]
+  }
+}

@@ -1,0 +1,183 @@
+{
+  "metadata": {
+    "problem_id": "message-queue",
+    "level": "senior",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_032"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed message queue — think Apache Kafka. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Is this a general-purpose message queue or optimized for a specific pattern — like event streaming vs. task queues? What are the durability requirements — can we lose messages? What's our throughput target — messages per second? And do we need strict ordering guarantees?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["requirements_gathering", "durability", "ordering", "throughput"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Event streaming — like Kafka. No message loss. 1 million messages per second. Ordering within a partition. Walk me through the design.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the core concepts. The system has topics, which are logical channels for messages. Each topic is split into partitions — a partition is an ordered, immutable sequence of messages. Producers write messages to partitions, and consumers read from them. The key design choice in Kafka's architecture is that partitions are the unit of parallelism. If a topic has 10 partitions, up to 10 consumers can read in parallel. Each message within a partition has an offset — a sequential number — and consumers track their position by storing their current offset.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["topics", "partitions", "offsets", "producers", "consumers", "parallelism"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good foundation. How are partitions distributed across brokers? And how is data replicated?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "partition_distribution" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each partition has a leader broker and one or more follower brokers. All reads and writes go through the leader. Followers replicate the leader's data to provide redundancy. If the leader fails, one of the in-sync followers is promoted to leader. The partitions are distributed across brokers to balance load — if we have a topic with 12 partitions and 4 brokers, each broker leads 3 partitions. Kafka tracks which followers are 'in-sync' (ISR — In-Sync Replicas). An ISR follower has replicated all messages up to the leader's current offset. When the leader fails, only an ISR follower can be promoted — this prevents data loss because the new leader has all committed messages. The replication factor is configurable per topic — typically 3, meaning each partition's data exists on 3 brokers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leader_follower", "isr", "replication_factor", "partition_assignment", "failover"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about the producer side. When a producer sends a message, what guarantees can it get about durability?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "producer_acks" }
+    },
+    {
+      "role": "candidate",
+      "content": "The producer configures the acks setting, which controls the durability guarantee. Three options: acks=0 — fire and forget. The producer doesn't wait for any acknowledgment from the broker. Fastest throughput, but messages can be lost if the broker crashes before writing to disk. This is suitable for metrics or logs where losing a few messages is acceptable. acks=1 — the producer waits for the partition leader to acknowledge the write. If the leader writes the message and then crashes before followers replicate, the message is lost when a follower takes over. This is a good balance of durability and latency for most use cases. acks=all (or acks=-1) — the producer waits for all in-sync replicas to acknowledge the write. This is the strongest guarantee — the message survives even if the leader crashes immediately after acknowledging, because at least min.insync.replicas brokers have a copy. The trade-off is higher latency — the write waits for the slowest ISR follower. For our requirement of no message loss, we'd use acks=all with min.insync.replicas=2 and replication factor 3.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["producer_acks", "durability", "acks_0", "acks_1", "acks_all", "min_insync_replicas"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent acks explanation. Now, how does a producer decide which partition to send a message to?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "partitioning" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three strategies. Default (round-robin): messages are distributed evenly across partitions. Good for throughput balance but no ordering guarantees across related messages. Key-based: the producer specifies a message key. The key is hashed (murmur2 hash mod number of partitions) to determine the partition. All messages with the same key go to the same partition, which guarantees ordering for that key. For example, if the key is user_id, all events for user 123 go to the same partition and are consumed in order. Custom partitioner: the producer implements custom logic — for example, routing high-priority messages to specific partitions. For most event streaming use cases, key-based partitioning is the right choice because related events need to be processed in order.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["round_robin", "key_based_partitioning", "message_ordering", "custom_partitioner", "murmur2"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about the consumer side. What are consumer groups and how do they work?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "consumer_groups" }
+    },
+    {
+      "role": "candidate",
+      "content": "A consumer group is a set of consumers that cooperatively consume a topic. Each partition is assigned to exactly one consumer within the group — this ensures each message is processed once by the group. If a topic has 6 partitions and a consumer group has 3 consumers, each consumer handles 2 partitions. If we add a 4th consumer, the partitions are rebalanced: some consumers get 2 partitions, one gets 1, and one gets 1. If we add more consumers than partitions — say 8 consumers for 6 partitions — 2 consumers sit idle because there aren't enough partitions to assign. Multiple consumer groups can read the same topic independently — each group maintains its own offsets. So group A can be a real-time analytics pipeline and group B can be an archival system, both reading the same messages without interference.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consumer_groups", "partition_assignment", "rebalancing", "independent_consumption", "offset_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "When a consumer crashes during a rebalance, or after reading a message but before processing it, what happens?",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "consumer_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the offset commit question. Consumers periodically commit their offset — telling the broker 'I've processed up to offset X.' If a consumer crashes before committing, when the partition is reassigned to another consumer, it starts from the last committed offset — reprocessing some messages. This is the at-least-once delivery guarantee. There are two commit strategies: auto-commit (every 5 seconds by default) — simpler but you can reprocess up to 5 seconds of messages after a crash. Manual commit — the consumer commits after successfully processing each batch, giving tighter control but requiring more code. The trade-off: committing too frequently adds latency and broker load. Committing too infrequently means more reprocessing after failures. For most applications, manual commit after each batch with at-least-once semantics is the right choice. The application should be idempotent — handle duplicate messages gracefully.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["offset_commit", "at_least_once", "auto_commit", "manual_commit", "idempotent_consumer"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned at-least-once. What about exactly-once semantics? Can Kafka provide exactly-once delivery?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "exactly_once" }
+    },
+    {
+      "role": "candidate",
+      "content": "Kafka does support exactly-once semantics — they introduced it in version 0.11. It's based on idempotent producers and transactions. Basically, Kafka handles it so that even with retries, messages aren't duplicated and consumers see each message exactly once. It's one of Kafka's more advanced features.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["exactly_once"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Can you explain how it works under the hood? What are idempotent producers and Kafka transactions specifically?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "exactly_once" }
+    },
+    {
+      "role": "candidate",
+      "content": "Honestly, I'm not deeply familiar with the implementation details. I know that idempotent producers assign a sequence number to each message, and the broker deduplicates based on that — so even if the producer retries, the same message isn't written twice. For transactions, I think it's about atomically writing to multiple partitions and committing offsets together, so that a consume-process-produce cycle either fully commits or fully rolls back. But I can't explain the exact protocol — how the transaction coordinator works, the two-phase commit, or the transaction markers. I've used at-least-once with idempotent consumers in production, which handles most use cases without needing Kafka's exactly-once.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["idempotent_producer", "sequence_number", "transactions", "two_phase_commit"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair enough. Let's talk about storage. How does Kafka store messages on disk efficiently?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Kafka uses a commit log — each partition is stored as a sequence of segment files on disk. New messages are appended to the active segment. When the segment reaches a configured size (default 1GB), it's closed and a new active segment is created. Each segment has two files: the log file (message data) and an index file (mapping offsets to byte positions in the log). Writes are sequential appends — no random I/O — which is why Kafka achieves high throughput on spinning disks. Kafka uses the OS page cache extensively — recently written messages are in the page cache and served to consumers without hitting disk. For our workload: 1M messages/sec at 1KB average is 1GB/sec of writes. With 3x replication, that's 3GB/sec of disk writes across the cluster. With retention of 7 days, total storage is about 600TB. Across a cluster of, say, 30 brokers with 20TB each, that fits comfortably.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["commit_log", "segment_files", "sequential_writes", "page_cache", "capacity_estimation", "retention"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How does Kafka achieve zero-copy for reads?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "zero_copy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Zero-copy is a Linux kernel optimization. Normally, to send a file to a network socket, the data goes: disk → kernel buffer → user space buffer → kernel socket buffer → network. That's 4 copies and 2 context switches. Kafka uses the sendfile() system call, which transfers data directly from the kernel page cache to the network socket, skipping user space entirely: disk → kernel buffer → network. This reduces CPU usage and memory copies significantly, especially for consumers reading recent data that's already in the page cache. It's one of the reasons Kafka can sustain such high throughput — consumers reading near the tail of the log get zero-copy performance because the data was just written and is still in the page cache.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["zero_copy", "sendfile", "page_cache", "kernel_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good systems knowledge. How do you handle the scenario where one consumer in a group is much slower than others?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "consumer_lag" }
+    },
+    {
+      "role": "candidate",
+      "content": "Consumer lag is a critical operational metric. If one consumer processes messages slower than the production rate, its lag grows — the offset falls further behind the latest message. Monitoring: we track consumer lag per partition — the difference between the latest offset in the partition and the consumer's committed offset. Alerting when lag exceeds a threshold (e.g., more than 1 million messages behind or more than 5 minutes of lag). Mitigation: first, check if the slow consumer has a processing bottleneck — maybe it's doing an expensive database write per message. Batching can help. Second, if the consumer can't keep up, we can repartition the topic to have more partitions and add more consumers to the group. But adding partitions is a forward-only operation in Kafka — you can increase partition count but not decrease. Third, if only one partition is hot (getting more messages than others due to a skewed key), we can change the partitioning strategy or split the hot key.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["consumer_lag", "monitoring", "partition_rebalancing", "hot_partition", "batching"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a broker goes down? Walk me through the failover process.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "broker_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a broker goes down, the controller (a designated broker that manages cluster metadata — elected via ZooKeeper or in newer Kafka, via KRaft) detects the failure through missed heartbeats. For each partition where the failed broker was the leader, the controller selects a new leader from the ISR (in-sync replicas). The new leader is announced to all brokers and clients. Producers and consumers get a 'leader not available' error for those partitions and refresh their metadata to discover the new leader. This failover takes a few seconds — during that window, writes to affected partitions fail and clients retry. For partitions where the failed broker was a follower, the only impact is reduced replication factor until the broker recovers or a new replica is assigned. In newer Kafka (KRaft mode), the controller consensus is built into Kafka itself using the Raft protocol, removing the ZooKeeper dependency. This simplifies operations significantly.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["controller", "zookeeper", "kraft", "leader_election", "failover", "isr"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's wrap up. What would you monitor for a production Kafka cluster?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Key metrics: consumer lag per group per partition (the most important operational metric), broker disk usage and I/O throughput, under-replicated partitions (ISR size < replication factor — indicates broker health issues), request latency at p99 for produce and fetch requests, network throughput in/out per broker, leader imbalance (if one broker has significantly more leader partitions, it's handling disproportionate load), and the controller active count (should always be exactly 1 — 0 means no controller, >1 means split brain). Alerting: under-replicated partitions > 0 for more than 5 minutes → P1. Consumer lag exceeding threshold → P2. Disk usage above 80% → P2. ISR shrink rate → P1 if multiple partitions shrink simultaneously (indicates a broker is failing).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "consumer_lag", "under_replicated_partitions", "disk_usage", "leader_imbalance", "alerting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. Solid understanding of Kafka's architecture and operations, with a gap on exactly-once semantics. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 64,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 6,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 7,
+      "domain_knowledge": 7
+    },
+    "strengths": [
+      "Strong understanding of partition-based architecture with clear explanation of consumer groups and partition assignment",
+      "Excellent producer acks explanation with concrete trade-offs between acks=0, 1, and all",
+      "Good systems-level knowledge — explained zero-copy, page cache, and sequential writes correctly",
+      "Solid operational awareness with comprehensive monitoring metrics"
+    ],
+    "weaknesses": [
+      "Couldn't explain exactly-once semantics beyond 'Kafka handles it' — should know idempotent producer mechanics and transaction protocol at senior level",
+      "Didn't discuss schema management (Schema Registry, Avro/Protobuf serialization)",
+      "No discussion of log compaction for stateful topics vs. time-based retention",
+      "API design for the message queue itself wasn't discussed — wire protocol, batching, compression"
+    ]
+  }
+}

@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "sde2",
+    "candidate_profile": "mediocre",
+    "total_exchanges": 20,
+    "generation_id": "seed_294"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing service like Uber. Users request rides and we match them with nearby drivers. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "How many users and drivers do we have? Is this for one city or multiple?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["scale_estimation"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "One city to start. 100K active drivers, 500K daily ride requests. How would you design the system?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd have a database with a drivers table that stores each driver's current latitude and longitude. When a rider requests a ride, we query the database to find the nearest driver. Something like: SELECT driver_id FROM drivers WHERE status = 'available' ORDER BY SQRT(POW(lat - rider_lat, 2) + POW(lng - rider_lng, 2)) LIMIT 1. That gives us the closest available driver.",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["database_query", "distance_calculation"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's think about this query. With 100K drivers, this computes the distance from the rider to every single driver in the table. That's a full table scan with a computation on every row. And drivers are sending location updates every few seconds, so you're also writing 100K rows every 3-4 seconds. How does this perform?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "spatial_indexing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yeah, that would be slow. Maybe we could add an index on the lat and lng columns? Like a composite index on (status, lat, lng) so we only scan available drivers and the index helps with the sort?",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["database_indexing"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "A B-tree index can only help with range queries on one dimension at a time — it can't efficiently find the nearest point in 2D space. There's a technique called geohashing that solves this. Have you heard of it?",
+      "annotation": { "action": "teach", "phase": "high_level_design", "target_concept": "geohashing" }
+    },
+    {
+      "role": "candidate",
+      "content": "I've heard the term but I'm not sure exactly how it works. Is it like dividing a map into grid cells?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["geohashing"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly. A geohash encodes a latitude and longitude into a string. The key property is that nearby points share a common prefix. So geohash 'abc123' and 'abc124' are in adjacent cells. You can choose the precision — a 6-character geohash gives cells of about 1km x 1km. Instead of scanning all 100K drivers, you compute the rider's geohash, and look up drivers in that cell and its 8 neighbors. If there are 1000 drivers per 9 cells, you're scanning 1000 rows instead of 100K. How would you use this?",
+      "annotation": { "action": "teach", "phase": "high_level_design", "target_concept": "geohashing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh that's clever. So I'd add a geohash column to the drivers table. When a driver sends a location update, I compute their geohash and update the row. When a ride request comes in, I compute the rider's geohash and query: SELECT driver_id FROM drivers WHERE geohash IN ('abc123', 'abc124', ... the 9 cells) AND status = 'available'. Then from those results I pick the closest one by actual distance.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["geohashing", "database_query"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's the right idea. But you still have 100K drivers sending location updates every 3-4 seconds. That's 25-30K writes per second to your database just for location updates. Is the database the right place for this?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "in_memory_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "30K writes per second is a lot for a regular database. Maybe we should use something faster — like Redis? We could store the driver locations in Redis since it's in-memory and can handle high write throughput.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["redis", "in_memory_storage"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good instinct. Redis actually has built-in geospatial commands — GEOADD, GEOSEARCH — that do exactly what we need. GEOADD stores a member at a lat/lng, and GEOSEARCH finds all members within a given radius. So we can skip the manual geohash column entirely. How would the system flow look end to end?",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "redis_geospatial" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay so the driver app sends location updates to our backend every 3-4 seconds. Our Location Service takes the update and calls GEOADD on Redis with the driver's coordinates. When a rider requests a ride, the Matching Service calls GEOSEARCH on Redis to find available drivers within, say, 3km. Then we pick the closest one and send them a ride request. The driver accepts or declines. If they accept, we create a trip record in the database.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["redis_geospatial", "matching_flow", "trip_creation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good flow. You said 'pick the closest one.' But the closest driver by straight-line distance might not be the fastest to arrive — they could be on the other side of a highway with no exit nearby. How do you handle that?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "eta_calculation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh right. We'd need to use actual driving distance, not straight-line. We could call the Google Maps API to get the driving time from each nearby driver to the pickup point. Then pick the driver with the shortest ETA instead of shortest distance.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["eta_calculation", "routing_api"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That works but calling Google Maps for each of 20 candidate drivers on every ride request could get expensive and add latency. What might you do?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "routing_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "We could batch the request? Send all 20 driver locations and the pickup point in one API call and get all the ETAs back at once. Or we could pre-compute rough ETAs using straight-line distance as a first filter — only call the routing API for the top 5 closest drivers.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["batch_api_calls", "filtering_optimization"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good thinking — the two-phase approach is smart. Let's talk about the database. What do you store and in what database?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use PostgreSQL. A users table for both riders and drivers with user_id, name, phone, email, and a role field. A trips table with trip_id, rider_id, driver_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, status, fare, created_at, and completed_at. And a vehicles table linking drivers to their cars.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["database_schema", "postgresql"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Reasonable schema. What happens if Redis goes down and you lose all driver location data?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "fault_tolerance" }
+    },
+    {
+      "role": "candidate",
+      "content": "That would be bad — we couldn't match anyone. I guess we'd need a Redis replica that can take over if the primary fails. And since drivers are sending updates every few seconds, the new primary would be populated within a few seconds as updates come in.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["redis_replication", "failover"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. We're out of time. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add push notifications to keep riders informed about driver status, and a rating system so riders and drivers can rate each other after each trip.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["push_notifications", "rating_system"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thanks for the discussion. You showed good problem-solving when working through the geohashing concepts.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 35,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 3,
+      "capacity_estimation": 3,
+      "api_design": 4,
+      "database_design": 5,
+      "caching_strategy": 3,
+      "scalability": 3,
+      "failure_handling": 3,
+      "communication": 5
+    },
+    "strengths": [
+      "Receptive to learning — absorbed the geohashing concept when taught and applied it correctly",
+      "Good instinct on the two-phase filtering for ETA computation"
+    ],
+    "weaknesses": [
+      "Initial approach of full-table-scan SQL ORDER BY distance shows lack of spatial data knowledge",
+      "No capacity estimation performed at any point in the interview",
+      "Required interviewer to introduce key concepts like geohashing and Redis geospatial",
+      "Trip lifecycle, surge pricing, and safety were never discussed"
+    ]
+  }
+}

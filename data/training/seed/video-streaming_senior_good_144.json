@@ -1,0 +1,140 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "senior",
+    "candidate_profile": "good",
+    "total_exchanges": 20,
+    "generation_id": "seed_144"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a video streaming platform like YouTube or Netflix. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few questions: Is this user-generated content like YouTube, or curated content like Netflix? What are the upload and viewing volumes? Do we need to support live streaming, or just on-demand video? What video quality levels do we need to support — SD, HD, 4K?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["content_type", "scale", "live_vs_vod", "quality_levels"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "User-generated like YouTube. 500 hours of video uploaded per minute, 1 billion video views per day. Primarily on-demand, but we may touch on live streaming. Support up to 4K. Let's start.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me estimate storage. 500 hours/min = 720,000 hours/day of raw video. Raw 1080p video is roughly 3GB per hour, so that's about 2.16PB of raw uploads per day. After transcoding to multiple bitrates, total storage per hour of content is roughly 5-10GB (multiple renditions). So we're looking at about 3.6-7.2PB per day of transcoded content. That's enormous — we need a cost-effective object storage solution and aggressive content lifecycle management. For bandwidth: 1 billion views per day. If average video duration is 5 minutes and average bitrate is 3 Mbps (720p), that's 5 * 60 * 3 Mbps = 900 Mb per view = ~112MB. Total bandwidth: 112PB per day or about 10 Tbps sustained.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "storage_estimation", "bandwidth_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Impressive math. Walk me through the upload and processing pipeline.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "upload_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The upload pipeline has several stages. Step 1 — Upload: the client uploads the raw video file to an upload service. For large files, we use chunked/resumable uploads — the client splits the video into 5MB chunks and uploads each with a chunk index. If the connection drops, the client resumes from the last successful chunk rather than starting over. The upload service writes chunks to a temporary S3 bucket and reassembles them. Step 2 — Validation: once the upload is complete, we validate the file — check the format is supported (MP4, MOV, etc.), run antivirus/malware scan, check against content policies (file size limits, duration limits). Step 3 — Enqueue for transcoding: we write a message to a transcoding job queue (SQS or Kafka) with the S3 path of the raw video. Step 4 — Notify the user that the video is processing. The video is not yet publicly viewable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["upload_pipeline", "chunked_upload", "resumable_upload", "validation", "async_processing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Tell me about the transcoding process — how does adaptive bitrate encoding work?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "adaptive_bitrate" }
+    },
+    {
+      "role": "candidate",
+      "content": "Transcoding converts the raw upload into multiple renditions at different quality levels — this is the encoding ladder. A typical encoding ladder:\n\n- 240p at 400 Kbps (mobile on slow networks)\n- 360p at 800 Kbps\n- 480p at 1.5 Mbps\n- 720p at 3 Mbps\n- 1080p at 6 Mbps\n- 4K at 15 Mbps (if source quality supports it)\n\nEach rendition is also segmented into small chunks, typically 2-6 seconds each. These segments are stored individually in object storage. A manifest file (HLS .m3u8 or DASH .mpd) lists all available renditions and their segment URLs. The video player downloads the manifest first, then adaptively selects which rendition to stream based on the client's current bandwidth. If bandwidth drops mid-stream, the player switches to a lower rendition for the next segment — this is why segmenting is important. Transcoding at our scale (500 hours/min) requires a massive compute fleet. I'd use a pool of GPU-accelerated transcoding workers (NVENC on NVIDIA GPUs) that pull jobs from the queue. Each hour of video takes roughly 15-30 minutes to transcode across all renditions, so we need a pool sized to handle the sustained upload rate.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["adaptive_bitrate", "encoding_ladder", "hls", "dash", "segmentation", "gpu_transcoding"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good detail on the encoding ladder. How does the CDN layer work for video delivery?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "cdn_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "The CDN is critical for video at this scale — we can't serve 10 Tbps from origin servers. The architecture: transcoded video segments are stored in S3 as the origin. A CDN like CloudFront, Akamai, or our own edge network caches segments at edge locations close to users. When a user requests a segment, the CDN edge serves it from cache if available (cache hit), or fetches from origin, caches it, and serves it (cache miss). For popular videos, the cache hit rate should be very high — maybe 95%+. This is where the 80/20 rule applies heavily: a small fraction of videos generate most views. For long-tail content (rarely watched videos), cache hit rates are low. We can use tiered caching — a regional mid-tier cache between the edge and origin. This prevents the origin from being hammered by cache misses from hundreds of edge nodes simultaneously. DNS-based routing sends users to the nearest CDN edge based on their geographic location.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cdn_delivery", "edge_caching", "tiered_caching", "cache_hit_ratio", "dns_routing"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you optimize CDN costs? Bandwidth is the biggest cost for video platforms.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cost_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several strategies. First, content-aware encoding: instead of a fixed encoding ladder, use per-title encoding. Analyze each video's complexity — a static lecture video can achieve the same quality at a much lower bitrate than an action movie. This alone can reduce bandwidth by 20-30%. Second, only transcode renditions that will actually be watched. If analytics show that 4K views are only 2% of total, we could transcode 4K lazily — only when a 4K view is actually requested — rather than for every upload. Third, aggressive cache warming for viral content. When a video's view count is growing exponentially, proactively push its segments to more CDN edges before users request them. Fourth, use cheaper storage tiers for old content — move segments of videos with no views in 90 days to S3 Infrequent Access or Glacier, and transcode them on-demand if requested.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cost_optimization", "per_title_encoding", "lazy_transcoding", "cache_warming", "storage_tiering"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good cost optimizations. Let's talk about the metadata and search layer. How do users find videos?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "metadata_search" }
+    },
+    {
+      "role": "candidate",
+      "content": "Video metadata — title, description, tags, uploader, view count, likes — is stored in a relational database (PostgreSQL). For search, we index this metadata in Elasticsearch. The search pipeline: user enters a query, we tokenize and run it against Elasticsearch with relevance scoring based on text match, view count, recency, and user personalization signals. For auto-complete, we use a prefix-based suggestion index. Beyond text search, we'd also generate metadata from the video content itself: automatic captions using speech-to-text (which become searchable text), thumbnail generation at key frames, and content classification for recommendations. The video catalog at this scale is massive — potentially billions of videos. Elasticsearch scales horizontally with sharding. We'd partition the index by category or recency (recent videos in hot shards, old videos in warm shards) to optimize search performance.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["metadata_search", "elasticsearch", "auto_captioning", "content_classification"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about live streaming? You mentioned it's secondary, but how would you add it to this architecture?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "live_streaming" }
+    },
+    {
+      "role": "candidate",
+      "content": "Live streaming is fundamentally different from VOD. The streamer sends a continuous video feed to our ingest servers using RTMP or SRT protocol. The ingest server receives the stream and transcodes it in real-time into adaptive bitrate segments — same encoding ladder concept but done on-the-fly with very low latency. Segments are typically shorter, 1-2 seconds, to reduce end-to-end latency. The segments are immediately pushed to the CDN rather than pulled. Viewers get the manifest and play segments as they become available. The challenge is latency — for live, you want glass-to-glass latency under 10 seconds. The transcoding introduces latency, segmenting introduces latency, CDN propagation adds latency. To reduce it further, we could use CMAF with chunked transfer encoding, which allows streaming partial segments before they're complete. Honestly, I'm less deep on the live streaming side. My experience is primarily with VOD pipelines. I know the broad architecture but would need to research the specifics of things like DVR functionality during live streams and synchronizing chat with video.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["live_streaming", "rtmp", "real_time_transcoding", "latency_optimization"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair enough — good to be honest about depth boundaries. How do you handle video processing failures? What if transcoding crashes halfway through?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "The transcoding pipeline needs to be idempotent and resumable. Each transcoding job has a state: QUEUED, IN_PROGRESS, COMPLETED, FAILED. If a worker crashes, the job's visibility timeout expires in the queue (SQS-style) and another worker picks it up. Since the input is in S3 and the output is written to a separate S3 path, restarting from scratch is safe — just overwrites the partial output. For efficiency, we could checkpoint progress: split transcoding into per-rendition sub-tasks. If the 720p rendition completes but the 1080p rendition fails, we only retry 1080p. The video's status stays as PROCESSING until all renditions complete. After 3 retries, we mark the job as FAILED and alert the user with an option to re-upload. We also need to handle poison pills — videos that consistently crash the transcoder (corrupt files, unusual codecs). These should be routed to a dead letter queue for investigation rather than blocking the pipeline.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["failure_handling", "idempotency", "checkpointing", "dead_letter_queue", "poison_pill"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running out of time. Anything you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few additions: content moderation pipeline — scan uploaded videos for copyright infringement (Content ID-like fingerprinting) and policy violations before making them public. A recommendation engine that uses viewing history, collaborative filtering, and content embeddings to suggest videos. DRM for premium content — encrypt video segments with Widevine or FairPlay so only authorized clients can decrypt and play. And monitoring: track upload success rate, transcoding queue depth and latency, CDN cache hit rates, video start time and rebuffering ratio (the key quality-of-experience metrics).",
+      "annotation": { "quality": "good", "concepts_mentioned": ["content_moderation", "recommendation", "drm", "monitoring", "quality_of_experience"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. Strong on upload and transcoding pipelines, good CDN discussion, and honest about live streaming gaps. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 67,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 6,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent capacity estimation with thorough bandwidth and storage calculations",
+      "Strong understanding of adaptive bitrate encoding ladder and segmentation",
+      "Good cost optimization strategies including per-title encoding and lazy transcoding"
+    ],
+    "weaknesses": [
+      "Live streaming discussion was surface-level — acknowledged the gap honestly",
+      "API design was not discussed in detail — no endpoint specifications or client protocols",
+      "Database design was minimal — video metadata schema could have been more detailed"
+    ]
+  }
+}

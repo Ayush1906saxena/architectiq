@@ -1,0 +1,140 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "staff",
+    "candidate_profile": "data-loss-recovery",
+    "total_exchanges": 22,
+    "generation_id": "seed_377"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed key-value store. I want to focus on data recovery after a catastrophic failure. Give me the replication architecture first.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "replication_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd design a Dynamo-style key-value store with consistent hashing. Each key is replicated across N=3 nodes, chosen by walking clockwise on the hash ring from the key's position. Writes use W=2 quorum — write to at least 2 of 3 replicas before acknowledging. Reads use R=2. Each node stores data on local SSDs with a write-ahead log for durability. We have three data centers in different geographic regions, with at least one replica in each datacenter for geographic redundancy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing", "quorum", "replication_factor", "geographic_redundancy", "write_ahead_log"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now the scenario: a fire at Datacenter 2 destroys all hardware. For a given partition, Node B was in that datacenter. Nodes A (DC-1) and C (DC-3) survive. But Nodes A and C have slightly different data for some keys — hinted handoff writes from recent network issues haven't fully propagated. How do you recover to a consistent state?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "datacenter_loss" }
+    },
+    {
+      "role": "candidate",
+      "content": "First, let me understand the state. Node B is permanently gone — hardware destroyed, data unrecoverable. Nodes A and C are alive but have divergent data for some keys. The divergence comes from hinted handoff lag: during recent temporary partitions, some writes that were destined for one node were temporarily stored on another node as hints. Those hints may not have been fully delivered before the fire. So for some keys, A has the latest write but C has a stale version. For others, C is ahead of A. And for some keys, both might be stale because the latest write was on Node B which is now gone.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hinted_handoff", "divergent_data", "permanent_data_loss", "stale_versions"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly. Three categories of keys: A is newer, C is newer, and some data might only have existed on B. How do you first reconcile A and C?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "replica_reconciliation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Use the anti-entropy repair process with Merkle trees. Nodes A and C exchange Merkle tree hashes for the key range that Node B was responsible for. Where hashes differ, they drill down to identify specific divergent keys. For each divergent key, compare the vector clocks or timestamps on both versions. If A's version dominates C's (or vice versa), the dominating version wins and is written to the other node. If the versions are concurrent (neither dominates), we have a genuine conflict that needs resolution — either LWW by timestamp, or return both siblings to the application for merge. After this repair pass, A and C should have identical data for every key where at least one of them had the latest version.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["merkle_tree", "anti_entropy", "vector_clock", "conflict_resolution"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now the harder problem: keys where the latest version was ONLY on Node B. Those writes are gone. How do you detect and handle this?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "permanent_data_loss" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the painful part. If a write was acknowledged with W=2 and one of those two was Node B, and the other node already received a newer write that overwrote it, the Node B version might truly be lost. But let's think about when this can actually happen. If W=2 and the write went to B and one of A/C, then A or C should also have that version — unless it was later overwritten. For the case where a write went to B and was hinted-handoff on a temporary node that has since delivered the hint — the hint was delivered to A or C, so the data should be there. The truly lost data is: writes that were on B and had not yet been replicated or hinted anywhere else. With W=2, this should be very rare — it only happens if B received a write and the second write went to another node that crashed before propagating.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["quorum_analysis", "write_durability", "edge_case_analysis", "hinted_handoff_delivery"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You're right that W=2 makes total loss rare. But with sloppy quorum, a write might have gone to B and a temporary hinted handoff node that was ALSO in DC-2. Both destroyed in the fire.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "sloppy_quorum_risk" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's a critical design flaw — hinted handoff should never place hints on a node in the same datacenter as the failed node. The hint selection should be rack-aware and datacenter-aware. If Node B (DC-2) is unreachable, the hint should go to a node in DC-1 or DC-3, never DC-2. This is a configuration issue that many production systems get wrong. If this wasn't configured correctly and hints went to DC-2 nodes, then yes, those writes are permanently lost. The only recovery path is external: check if the data exists in upstream systems. For example, if the KV store holds user profiles that originated from a user service, we can rebuild from the user service's database. This is why a key-value store should never be the sole source of truth for critical data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rack_awareness", "hint_placement_policy", "external_recovery", "single_source_of_truth"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good insight on rack awareness. Now, you've reconciled A and C. You need to rebuild a third replica to replace B. How do you do this without impacting serving traffic?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "replica_rebuild" }
+    },
+    {
+      "role": "candidate",
+      "content": "Provision a new Node B' in a different datacenter — say DC-4, or if we only have three DCs, place it in DC-1 or DC-3 on a different rack. The rebuild process streams data from Node A to Node B' for the key ranges that B was responsible for. But we can't just dump all data at once — that would saturate the network and slow down Node A's ability to serve reads. Throttle the streaming: limit it to, say, 100 MB/sec, and schedule it during off-peak hours if possible. During the rebuild, we're operating with only 2 replicas for B's key ranges — reduced durability but still functional. Reads and writes continue with the remaining 2 nodes. Once B' is fully caught up, it joins the ring and starts serving traffic.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["replica_rebuild", "bandwidth_throttling", "reduced_durability_window", "ring_membership"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "During the rebuild, new writes are happening to A and C. B' is receiving a snapshot of A's data, but that snapshot is immediately stale. How do you handle this?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "rebuild_consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Use a two-phase approach. Phase 1 — bulk transfer: stream all existing data from A to B'. This might take hours for a large dataset. Meanwhile, new writes are going to A and C as normal. We also start a change log: every write to A or C for B's key ranges is recorded in a separate change log (or we capture it from the WAL). Phase 2 — catch-up: once the bulk transfer is complete, replay the change log to bring B' up to date. The change log is much smaller than the full dataset. If the change log replay takes 5 minutes, during those 5 minutes more writes accumulate. We keep replaying until the gap is small enough — say less than 1 second of lag. Then we do a brief pause, apply the final writes, and promote B' to active status. This is similar to how MySQL replication or PostgreSQL pg_basebackup works.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["bulk_transfer", "change_log", "catch_up_replay", "convergence", "two_phase_rebuild"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How long does the whole recovery take? And during that time, what are the risks?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "recovery_timeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "Depends on data size. If Node B held 2 TB of data and we stream at 100 MB/sec, the bulk transfer takes about 5.5 hours. The catch-up phase might take 15-30 minutes. So total recovery is roughly 6 hours. During this time: durability is reduced from 3 replicas to 2. If either A or C also fails, we lose quorum for some keys and they become unavailable (or we lose data if both remaining copies are lost). The risk scales with time: the longer the rebuild takes, the higher the probability of a second failure. For this reason, I'd prioritize the rebuild above almost everything else — increase the bandwidth limit during off-peak, use faster network paths, or even rebuild from multiple source nodes in parallel (different key ranges from A and C simultaneously) to cut the time in half.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["recovery_timeline", "durability_risk", "second_failure_probability", "parallel_rebuild"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the keys that were permanently lost — the ones only on B? How do you detect which keys are missing?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "missing_key_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is tricky because you can't check for the absence of something you don't know exists. A few approaches. First, compare key counts: if we know approximately how many keys each partition should have (from monitoring), and after reconciliation the count is lower than expected, some keys were lost. But this only gives us aggregate numbers, not specific keys. Second, if we log all write operations in a separate system (like a Kafka topic of all writes), we can replay that log and check if each key exists in the reconstructed partition. Keys that were written but don't exist were lost. Third, application-level detection: when a client requests a key that should exist (based on application logic) and gets a 'not found,' that's a signal. We can log these 'unexpected not found' events and investigate them. The Kafka-based approach is the most comprehensive but requires that we maintain a durable, independent write log.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["missing_key_detection", "write_log_replay", "key_count_monitoring", "application_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you design the system upfront to minimize data loss from a datacenter fire?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "loss_prevention" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several design decisions. First, enforce datacenter-aware replica placement: each of the 3 replicas must be in a different datacenter. No two replicas for the same key share a datacenter. This ensures a single DC loss removes at most 1 of 3 replicas. Second, strict quorum with datacenter-aware writes: W=2 with at least one write confirmed in a different DC than the primary. This guarantees every acknowledged write exists in at least two datacenters. Third, disable sloppy quorum or ensure hinted handoff nodes are always in different DCs. Fourth, maintain continuous backups to object storage (like S3) in a separate region. Even if all three DCs are hit, we have an offsite backup. The backup might be a few hours stale, but it's a last-resort recovery path. Fifth, set replication factor to 5 instead of 3 for critical data — more replicas across more DCs means a single DC loss has less impact.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["datacenter_aware_placement", "cross_dc_quorum", "offsite_backup", "higher_replication_factor", "sloppy_quorum_policy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. You demonstrated deep understanding of distributed system recovery mechanics and the nuances of quorum-based replication under failure. The two-phase rebuild approach and the missing key detection strategies were particularly strong. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 77,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 9,
+      "caching_strategy": 6,
+      "scalability": 8,
+      "failure_handling": 10,
+      "communication": 9
+    },
+    "strengths": [
+      "Excellent analysis of quorum behavior under datacenter loss scenarios",
+      "Strong two-phase rebuild approach with change log catch-up",
+      "Thorough treatment of missing key detection strategies"
+    ],
+    "weaknesses": [
+      "Didn't discuss cost implications of N=5 replication or offsite backups",
+      "Client-side retry behavior during the reduced-durability window was not addressed",
+      "Recovery automation and runbook design were not discussed — manual vs automated failover"
+    ]
+  }
+}

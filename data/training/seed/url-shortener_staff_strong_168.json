@@ -1,0 +1,189 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_168"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service at global scale. Think bit.ly operating across multiple continents. What clarifying questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question scope. A few things I want to nail down: First, are we operating in multiple geographic regions with users distributed worldwide? Second, do we need active-active deployments where every region can handle both reads and writes independently, or can we funnel writes to a primary region? Third, do we support custom aliases, and if so, how do we handle collisions when two users in different regions try to claim the same alias simultaneously? Fourth, what's our availability target — five nines?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_region", "active_active", "custom_aliases", "conflict_resolution", "availability"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent questions. Yes, we need active-active across at least 5 regions — US-East, US-West, Europe, Asia-Pacific, South America. Custom aliases are required. Five nines availability. We get 500 million shortens per day globally, 100:1 read-to-write ratio. Let's focus heavily on the multi-datacenter architecture.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "multi_region" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me think through the numbers. 500M writes/day is roughly 5,800 writes/second globally, 580K reads/second. Spread across 5 regions, that's about 1,160 writes/second and 116K reads/second per region assuming uniform distribution — though in practice US and Europe will be heavier. Storage: at ~500 bytes per record, that's 250GB/day, roughly 450TB over 5 years. Each region needs its own data store capable of serving the full read load for its geography, plus the ability to accept writes locally for low latency.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation", "multi_region"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. Walk me through the high-level architecture for this multi-region setup.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "multi_region" }
+    },
+    {
+      "role": "candidate",
+      "content": "At the top layer, DNS-based routing via something like AWS Route 53 or Cloudflare directs users to the nearest regional cluster based on latency-based or geolocation routing policies. Each region has its own full stack: load balancers, application servers, a regional Redis cache cluster, and a regional database partition. For auto-generated short codes, each region gets a dedicated ID space — for example, region prefixes in the short code — so there are zero write conflicts for auto-generated URLs. The hard part is custom aliases, which I'll dig into. Cross-region replication happens asynchronously — each region publishes write events to a global replication bus, and other regions consume and apply them.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dns_routing", "active_active", "multi_region", "async_replication", "regional_partitioning"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned the hard part is custom aliases. Walk me through that conflict resolution problem in detail.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "conflict_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, this is the crux. With active-active, two users in different regions could claim the same custom alias 'my-cool-link' simultaneously. We have a few options. Option 1: Synchronous cross-region consensus — before accepting a custom alias, we check all regions. This kills latency and availability, so I'd reject it. Option 2: Optimistic local acceptance with async conflict resolution. Each region accepts the alias locally, replicates the write, and if a conflict is detected, we apply a resolution policy. Option 3: Route all custom alias writes to a single coordination service. I'd go with a hybrid of 2 and 3. For the common case, we use a lightweight global lock service — think a distributed lock with a TTL of a few hundred milliseconds. The region acquiring the alias grabs a lock on that alias key, writes it, and the lock releases on replication confirmation. If the lock service is unavailable, we fall back to optimistic local write with last-writer-wins conflict resolution, where the 'winner' is determined by a Lamport timestamp and region-priority tiebreaker.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["conflict_resolution", "distributed_locking", "last_writer_wins", "lamport_timestamps", "optimistic_concurrency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting hybrid approach. What happens to the 'losing' user in a last-writer-wins scenario? They thought they created their alias successfully.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "conflict_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's the ugly part of eventual consistency. Here's how I'd handle it. When the replication conflict is detected, the losing region's alias gets invalidated. We proactively notify the affected user — via email or in-app notification — that their custom alias conflicted and was reassigned to an auto-generated code. Their original long URL still works with the fallback code. To minimize this, I'd add a probabilistic check at write time: before accepting a custom alias, the app server queries a lightweight Bloom filter that's synchronized across regions every few seconds. If the Bloom filter says 'possibly taken,' we escalate to the global lock. If it says 'definitely not taken,' we proceed optimistically. This catches 99%+ of conflicts at near-zero latency cost. The false positive rate just means occasionally we go to the lock service unnecessarily.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["eventual_consistency", "bloom_filter", "conflict_notification", "user_experience"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "I like the Bloom filter optimization. Let's talk about the DNS layer in more detail. How does DNS-based routing work here, and what happens during a regional failover?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "dns_routing" }
+    },
+    {
+      "role": "candidate",
+      "content": "DNS routing uses latency-based records. Each region advertises its health to the DNS provider via health checks — typically HTTP health endpoints hitting each region's load balancer. Route 53, for example, returns the IP of the lowest-latency healthy region for a given client. For failover: if US-East goes down, its health checks fail, and Route 53 stops returning US-East IPs within the DNS TTL window. I'd set the DNS TTL to 60 seconds for the short URL domain — low enough for fast failover, high enough to not overwhelm DNS resolvers. But DNS TTL is advisory — many clients and resolvers cache longer. So we also need an anycast IP layer or a CDN like Cloudflare in front, which can fail over at the edge in seconds rather than waiting for DNS propagation. The CDN also handles the redirect for the most popular URLs directly from edge cache without hitting our application servers at all.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dns_routing", "health_checks", "dns_ttl", "failover", "anycast", "cdn_redirect"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "When a region fails over and traffic shifts, the receiving region suddenly gets double the load. How do you handle that?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "capacity_planning" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is why each region must be provisioned with headroom — I'd target each region to run at no more than 60% capacity during normal operations, so it can absorb a neighboring region's traffic during failover. Additionally, we need auto-scaling with pre-warmed instances. Cold auto-scaling takes minutes; pre-warmed pools of instances that are already booted and have the application loaded can be activated in seconds. For the cache layer, the receiving region won't have cache entries for the failed region's hot URLs. We need to handle the cold cache problem: I'd implement a tiered caching approach — a local in-process LRU cache on each app server catches the hottest URLs, and even if the Redis cluster gets hammered, the local cache absorbs the most extreme hotspots. We can also pre-replicate cache entries for the top 1% of URLs across all regions as a warm standby cache.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_planning", "auto_scaling", "pre_warming", "cold_cache", "tiered_caching", "failover"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the replication bus you mentioned. How does cross-region data sync actually work?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "async_replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use Kafka as the cross-region replication bus, specifically with MirrorMaker 2 or a custom replication topology. Each region has its own Kafka cluster. When a URL is created in region A, it's written to the local Kafka topic 'url-events'. A cross-region replicator consumes from region A's topic and produces to region B, C, D, E's topics. Consumers in each region read from their local topic and apply the writes to their local database. The key design decisions: first, I'd use a hub-and-spoke topology rather than full mesh — designate two hub regions for replication routing to reduce the number of cross-region connections from O(n^2) to O(n). Second, each event carries a vector clock with region timestamps, so consumers can detect and resolve conflicts. Third, I'd implement idempotent consumers using the event's unique ID, so duplicate delivery from Kafka doesn't cause issues. Replication lag target is under 2 seconds for 99th percentile.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka", "cross_region_replication", "hub_and_spoke", "vector_clocks", "idempotent_consumers", "replication_lag"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens during the replication lag window? A user creates a URL in US-East and immediately shares it with a friend in Europe.",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "eventual_consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Classic read-after-write consistency problem across regions. A few mitigations. First, when we return the short URL to the creator, we include the region hint in a cookie or as a query parameter in the short URL itself — something subtle like short.ly/abc123 where the server can detect the origin region. If Europe gets a request for a URL it doesn't have yet, it can do a synchronous cross-region read to the origin region as a fallback before returning a 404. Second, we can leverage the CDN: when the URL is created in US-East, we proactively push the mapping to all CDN edge nodes. Since CDN propagation is often faster than database replication, the friend in Europe might get a CDN hit before the database even replicates. Third, for the worst case, we return a 'temporarily unavailable, try again in a moment' page rather than a hard 404 — a URL that was just created should never 404.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_after_write_consistency", "cross_region_read", "cdn_push", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great handling of that edge case. Let's switch gears — how do you handle the ID generation for auto-generated URLs in a multi-region context?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "id_generation" }
+    },
+    {
+      "role": "candidate",
+      "content": "For auto-generated URLs in multi-region, I'd embed the region identifier into the short code to completely eliminate cross-region coordination for ID generation. Specifically, I'd use a modified Snowflake-like scheme: the first 1-2 characters of the short code encode the region (using a mapping like a=US-East, b=US-West, etc.), and the remaining characters come from a per-region monotonic counter encoded in base62. Each region independently generates its own IDs with no coordination. This means short codes are globally unique by construction. The region prefix also helps with routing — if we ever need to look up the origin of a URL, the prefix tells us immediately. For the counter within each region, I'd use the range-allocation approach: each app server pre-allocates a batch of 100K IDs from a regional counter service, generates locally, and refills when the batch is exhausted.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["snowflake_id", "regional_partitioning", "base62_encoding", "range_allocation", "coordination_free"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now, at 5 regions with 450TB total over 5 years, how do you think about the database layer? Sharding strategy across and within regions?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two levels of sharding. First, geographic partitioning: each region owns its writes and has a full replica of all data for reads. Within each region, I'd hash-shard on the short code across 128 shards initially, using consistent hashing with virtual nodes for rebalancing. Each shard is about 700GB over 5 years, which is comfortable for PostgreSQL or even DynamoDB. I'd actually lean toward DynamoDB here because it handles the operational burden of sharding, replication, and failover — at this scale, managing 128 Postgres shards per region (640 total) is a significant operational cost. DynamoDB Global Tables also give us the cross-region replication out of the box, which simplifies the replication bus. The trade-off is cost and vendor lock-in, but for a URL shortener's simple access pattern — point lookups and inserts — DynamoDB is a natural fit. I'd use the short code as the partition key directly.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_strategy", "consistent_hashing", "dynamodb", "global_tables", "operational_cost"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "If you use DynamoDB Global Tables, how does that change your conflict resolution story for custom aliases?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "conflict_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "Significantly, actually. DynamoDB Global Tables uses last-writer-wins with a server-side timestamp for conflict resolution — there's no built-in support for custom merge logic. This means my earlier Bloom filter + global lock approach becomes even more important as the primary defense, rather than relying on the database for conflict detection. Alternatively, I could move custom alias reservation to a separate strongly-consistent store — a single DynamoDB table in one region with conditional writes (PutItem with attribute_not_exists). Custom alias creation takes a cross-region latency hit (200-300ms to the coordination region), but this only affects writes, which are 100x less frequent than reads. Auto-generated URLs still go through the fast regional path with zero coordination. This is a pragmatic split: strong consistency where correctness matters (custom aliases), eventual consistency where performance matters (everything else).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["last_writer_wins", "conditional_writes", "strong_consistency", "eventual_consistency", "pragmatic_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about monitoring this multi-region system. What are your key operational metrics?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd instrument several layers. At the DNS/routing layer: per-region traffic distribution, DNS resolution latency, and failover event frequency. At the application layer: redirect latency p50/p95/p99 per region, cache hit rates per region, and error rates. At the replication layer — this is critical — cross-region replication lag per region pair, conflict rate for custom aliases, and replication throughput. At the data layer: per-shard size, DynamoDB consumed capacity units vs provisioned, and hot partition detection. I'd set up cross-region consistency checks as a background job: periodically sample URLs from one region and verify they exist in all other regions, measuring the staleness. Alerts would fire on: replication lag exceeding 5 seconds, cache hit rate dropping below 90%, any region's error rate exceeding 0.1%, or cross-region consistency check failures exceeding 0.01% of samples.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "observability", "replication_lag_monitoring", "consistency_checks", "alerting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "One last scenario: we need to do a database migration — say moving from one sharding scheme to another — without downtime across all 5 regions. How?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "zero_downtime_migration" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a dual-write migration pattern, done region by region. Phase 1: Deploy the new shard topology alongside the old one. Start double-writing all new URLs to both old and new shards. Reads still go to old shards. Phase 2: Backfill — run a background migration job that copies existing data from old shards to new shards, tracking progress with a cursor. This can take days; that's fine. Phase 3: Once backfill is complete and verified, switch reads to the new shards. The double-write ensures no data was missed during backfill. Phase 4: Stop writes to old shards, decommission them. We roll this out one region at a time — start with the smallest region (South America), validate for a week, then proceed to larger regions. Each phase has automated rollback: if error rates spike, we revert the routing change. The whole migration might take a month across all regions, but zero downtime.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dual_write", "zero_downtime_migration", "rolling_deployment", "backfill", "automated_rollback"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're at time. Anything you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things I'd add for production hardening: abuse prevention — rate limiting per IP and per account, plus a URL safety scanner that checks destination URLs against malware and phishing databases before accepting them. Cost optimization — tiered storage where URLs older than 1 year with zero clicks get moved to cheaper cold storage and are lazily loaded back on access. And chaos engineering — regularly test regional failovers in production by synthetically draining traffic from one region and verifying the others absorb it gracefully.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "abuse_prevention", "tiered_storage", "chaos_engineering"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Outstanding interview. Your multi-region design was thorough with practical trade-offs throughout. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 82,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 9,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional multi-region architecture with practical conflict resolution via Bloom filter + global lock hybrid",
+      "Strong understanding of DNS-based routing and failover mechanics including CDN push for read-after-write",
+      "Pragmatic consistency model splitting custom aliases (strong) from auto-generated URLs (eventual)"
+    ],
+    "weaknesses": [
+      "API design was not deeply explored — focused more on infrastructure than interface contracts",
+      "Could have discussed rate limiting and abuse prevention earlier rather than as an afterthought"
+    ]
+  }
+}

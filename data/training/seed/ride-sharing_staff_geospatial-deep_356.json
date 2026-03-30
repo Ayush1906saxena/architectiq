@@ -1,0 +1,159 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "staff",
+    "candidate_profile": "geospatial-deep",
+    "total_exchanges": 20,
+    "generation_id": "seed_356"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing platform like Uber or Lyft. I'd like you to go deep on the geospatial aspects — how you index, query, and match based on location. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Key questions: What geographic coverage — single city, nationwide, or global? How many active drivers at any given time? What's the acceptable latency for finding nearby drivers? How often do drivers report their location? And how precisely do we need to match — should we find the nearest driver, or the best driver considering ETA and road network?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geographic_scope", "driver_scale", "query_latency", "location_frequency", "matching_precision"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Global service covering 500 cities. 5 million active drivers at peak. Find nearby drivers within 500ms. Drivers report location every 4 seconds. We want the best match considering ETA, not just raw distance. Focus on the geospatial indexing.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "geospatial_indexing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with geohash-based indexing, which is the most common approach. A geohash encodes latitude and longitude into a string by recursively subdividing the earth into a grid. Each character adds precision. The precision levels are crucial for our system: geohash length 4 = cell size ~39km x 20km (too coarse — covers entire metro areas), length 5 = ~5km x 5km (neighborhood level — good for initial search radius), length 6 = ~1.2km x 610m (a few city blocks — good for dense urban areas), length 7 = ~152m x 152m (a street block), length 8 = ~38m x 19m (very precise — individual building level). For ride matching, I'd use geohash precision 6 as the primary index level. This means each cell is roughly 1.2km x 610m. In a dense city, a cell might contain 50-200 drivers. In a suburban area, we might need to expand to neighboring cells.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geohash", "precision_levels", "cell_size", "spatial_indexing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the edge case where a rider is near the boundary of a geohash cell?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "boundary_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "The boundary problem is the biggest limitation of geohashes. A driver 50 meters away could be in an adjacent cell and missed entirely. The solution: always query the 8 neighboring cells in addition to the rider's cell — 9 cells total. Computing neighbors is efficient: for a geohash like 'dp3wq4', the 8 neighbors can be computed by incrementing/decrementing the latitude and longitude components of the hash. This is O(1). With precision 6, searching 9 cells covers approximately 3.6km x 1.8km — a 6.5 km2 area. At 5M drivers across 500 cities, average density is 10K drivers per city, distributed across roughly 2,000 cells per city (assuming 100 km2 metro area / 0.05 km2 per cell). So each cell has ~5 drivers on average. Searching 9 cells returns ~45 driver candidates. In dense cities like Manhattan, a cell might have 100+ drivers, giving us 900+ candidates — we'd need to efficiently filter those.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["neighbor_cells", "boundary_problem", "spatial_coverage", "density_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about S2 cells? How do they compare to geohashes?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "s2_geometry" }
+    },
+    {
+      "role": "candidate",
+      "content": "S2 geometry (developed by Google, used in Google Maps and Uber's H3 predecessor) projects the earth onto a cube, then uses a Hilbert curve to map 2D cells to 1D indices. Key advantages over geohash: (1) Uniform cell size: geohash cells are rectangular and distort near poles — a precision-6 geohash at the equator is 1.2km x 610m but much narrower at high latitudes. S2 cells at the same level are nearly equal area everywhere. (2) Better locality: the Hilbert curve preserves spatial locality better than geohash's Z-order curve. Adjacent cells on the earth tend to have adjacent S2 cell IDs, which means range queries on the cell ID index hit fewer disk pages. (3) Hierarchical covering: S2 can compute a minimal set of cells at varying levels to cover an arbitrary region (like a 3km circle). It might use one large cell for the center and smaller cells for the edges, minimizing the number of cells while tightly covering the area. Geohash always uses uniform-sized cells. For Uber's use case, they actually developed H3 — a hexagonal hierarchical grid. Hexagons have the property that all neighbors are equidistant (unlike squares which have corner neighbors at sqrt(2) distance). I'd use H3 for this system.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["s2_geometry", "hilbert_curve", "uniform_cells", "hierarchical_covering", "h3_hexagons", "equidistant_neighbors"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good comparison. What about R-trees? When would you use those instead?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "r_tree" }
+    },
+    {
+      "role": "candidate",
+      "content": "R-trees are balanced tree structures where each node represents a minimum bounding rectangle (MBR). They excel at range queries and nearest-neighbor queries. For a 'find all drivers within 3km' query, an R-tree traverses from root, pruning subtrees whose MBRs don't intersect the search circle. Typical query time: O(log n * sqrt(n)) in the worst case, but usually much better. R-tree advantages: native support for arbitrary geometric queries (circles, polygons, not just grid cells). No boundary problem. Excellent for nearest-neighbor queries using distance-ordered traversal. R-tree disadvantages for our case: they're designed for disk-based spatial databases (PostgreSQL's PostGIS uses R-trees). For our system, where driver locations change every 4 seconds, updating an R-tree is expensive — O(log n) per update with potential node splits. With 5M drivers updating every 4 seconds, that's 1.25M updates/sec. An R-tree in PostgreSQL can't handle this. In contrast, geohash/H3 indexing in Redis is just a hash map update — O(1) per update. I'd use R-tree for static data (pickup points, geo-fenced areas, surge pricing zones) and geohash/H3 for real-time driver locations.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["r_tree", "bounding_rectangle", "update_cost", "static_vs_dynamic", "mixed_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you store and update 5 million driver locations in real-time?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "real_time_location_store" }
+    },
+    {
+      "role": "candidate",
+      "content": "The primary store is Redis with geospatial commands. Redis has built-in geospatial support using sorted sets with geohash-encoded scores. Operations: GEOADD drivers:{city} longitude latitude driver_id — O(log n) per update. GEORADIUS drivers:{city} longitude latitude 3 km COUNT 50 ASC — returns up to 50 drivers within 3km, sorted by distance. At 1.25M location updates per second globally, we shard by city. Top 20 cities might have 100K+ drivers each. A single Redis instance handles ~100K GEOADD/sec. So for each large city, we need 2-3 Redis shards. Total across 500 cities: maybe 200 Redis instances. Memory: each driver entry is ~100 bytes in the sorted set. 5M * 100 = 500 MB. Trivially fits in memory. When a driver's location changes, we do: (1) GEOADD to update position. (2) SET driver:{id}:meta to update metadata (heading, speed, ride status). (3) Publish to a Kafka topic for trip tracking and analytics. The 4-second update interval means each driver's location is at most 4 seconds stale. At city speeds (30 mph = 13 m/s), that's ~52 meters of staleness — acceptable for initial matching, refined by ETA computation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_geospatial", "georadius", "sharding_by_city", "location_staleness", "update_throughput"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The GEORADIUS gives you drivers by straight-line distance. But ETA depends on roads. How do you bridge that gap?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "eta_computation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Exactly — straight-line distance is just a cheap filter to get candidates. The actual matching uses ETA. The pipeline: Step 1: GEORADIUS returns, say, 50 drivers within 3km by straight-line distance. Step 2: For each candidate driver, compute road-network ETA from driver's current location to rider's pickup point. Full routing (Dijkstra/A* on the road graph) for 50 drivers would be too slow. Instead, I'd precompute a distance table. Divide the city into H3 cells at resolution 9 (~175m hexagons). Precompute the driving time between every pair of adjacent cells, factoring in road network and average traffic speeds. Store as a sparse matrix. For ETA from cell A to cell B: look up the precomputed shortest path (using Contraction Hierarchies — a technique that preprocesses the graph to answer point-to-point queries in microseconds). Step 3: These precomputed ETAs are updated periodically (every 5 minutes) with live traffic data from driver GPS traces. Rush hour ETAs can be 3-5x longer than the same distance at midnight. The ETA computation for 50 candidates using precomputed tables takes ~2ms total.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["eta_computation", "road_network", "contraction_hierarchies", "precomputed_distances", "live_traffic"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle areas with very few drivers? The 3km radius might have zero results.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "sparse_areas" }
+    },
+    {
+      "role": "candidate",
+      "content": "Progressive radius expansion. Start with a small radius and expand if insufficient candidates: first try 1km, then 3km, then 5km, then 10km. If all return fewer than 3 candidates, the rider gets a 'no drivers available' message with an estimated wait time. But expanding blindly is wasteful. Instead, I maintain a real-time density index per city: for each H3 resolution-5 cell (~250km2), track the count of available drivers. When a ride request comes in, check the density in the local area first. If density < 2 drivers per km2, skip the small radius and start at 5km. This avoids wasting 3 GEORADIUS calls that return empty. For truly sparse areas (rural, suburbs), I'd also implement scheduled rides: the rider requests a pickup 30 minutes from now, and we broadcast to drivers in a wider radius (20km+), who can navigate toward the pickup point. Additionally, in sparse areas, we consider drivers who are currently completing a ride near their dropoff point — if a driver will drop off a passenger 2km from the new rider in 5 minutes, that's a good match. This is 'chained dispatch' and increases effective supply by 15-20%.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["progressive_radius", "density_index", "scheduled_rides", "chained_dispatch", "supply_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting. How do you handle surge pricing with geospatial data?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing is fundamentally a geospatial supply-demand problem. I'd divide each city into surge zones using H3 resolution 7 cells (~5km2 hexagons). For each zone, every 2 minutes, compute: demand = ride requests in this zone in the last 5 minutes, supply = available drivers in this zone right now. Surge multiplier = f(demand/supply). The function is a piecewise curve: demand/supply < 1.5 → no surge (1.0x). 1.5-2.0 → 1.2-1.5x. 2.0-3.0 → 1.5-2.0x. Above 3.0 → 2.0-3.0x (capped). The spatial challenge: surge zones need smooth boundaries. If zone A has 2.5x surge and adjacent zone B has 1.0x, riders at the boundary will walk 100 meters into zone B. I'd apply spatial smoothing: each zone's surge is averaged with its 6 neighbors (H3 hexagons have exactly 6 neighbors) weighted by distance. This creates gradual surge gradients rather than sharp boundaries. The surge map is pushed to all clients every 30 seconds and displayed as a heatmap overlay.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_pricing", "supply_demand", "spatial_smoothing", "zone_boundaries", "heatmap"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about geofencing? How do you handle restricted areas like airports or event venues?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "geofencing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Geofences are polygonal regions with special rules. Airports have designated pickup zones, events have temporary pickup/dropoff restrictions, some areas ban ride-sharing entirely. Storage: each geofence is a polygon defined by a list of (lat, lng) vertices plus metadata (zone_type, restrictions, active_hours). I'd store these in PostgreSQL with PostGIS — the R-tree index handles polygon queries well since geofences are static. Point-in-polygon check: when a ride request comes in, query SELECT * FROM geofences WHERE ST_Contains(polygon, ST_MakePoint(lng, lat)). PostGIS uses the R-tree to quickly find candidate polygons, then does exact point-in-polygon (ray casting algorithm). Latency: ~1ms for a PostGIS query. To avoid database calls on every request, I'd cache the geofences in memory. Since there are maybe 10K geofences globally, total memory is a few MB. The in-memory check uses a pre-built spatial index (R-tree in memory). When a rider is inside a geofence, we modify the matching behavior: use the designated pickup point, show special instructions, or adjust pricing.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geofencing", "postgis", "point_in_polygon", "r_tree", "in_memory_cache", "spatial_query"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How do you handle the accuracy of GPS data from phones?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "gps_accuracy" }
+    },
+    {
+      "role": "candidate",
+      "content": "GPS accuracy is a real problem — phone GPS in urban canyons (tall buildings) can be off by 50-100 meters. Multipath reflection causes the signal to bounce off buildings, giving wildly wrong positions. My approach: (1) Kalman filter on the driver's location stream. It fuses GPS readings with accelerometer and gyroscope data (dead reckoning). If GPS says the driver teleported 200m in 4 seconds (impossible in a car), the Kalman filter dampens this to a more likely position. (2) Map matching: snap the driver's position to the nearest road segment. A driver reporting a position 30m from a road is almost certainly on that road, not in a building. Map matching uses the Hidden Markov Model approach — the true position is a hidden state, GPS readings are noisy observations, and road network topology constrains transitions. (3) Outlier rejection: if a GPS reading implies speed > 200 km/h or acceleration > 10 m/s2, discard it. (4) For the rider's pickup point, we snap to the nearest street address and show it in the app — 'Is this your pickup location?' — so the rider can correct it before confirming.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gps_accuracy", "kalman_filter", "map_matching", "hmm", "outlier_rejection", "urban_canyon"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent geospatial depth. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Two additions. First, for global deployment, I'd partition the geospatial system by region — each region (North America, Europe, Asia-Pacific) has its own set of Redis instances, ETA services, and surge compute. Ride matching never crosses regions, so there's no need for cross-region coordination. This keeps latency local. Second, I'd build a trip replay and analytics system: store every driver location update in a time-series database (InfluxDB or TimescaleDB), partitioned by city and time. This enables: route optimization (analyze actual routes vs optimal routes), hotspot prediction (ML model predicts demand surges from historical patterns), and fraud detection (a driver claiming a 20km trip that geographically was only 3km).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["regional_partitioning", "trip_analytics", "time_series_storage", "hotspot_prediction", "fraud_detection"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great interview. Your geospatial knowledge was exceptionally deep. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 79,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 8,
+      "api_design": 5,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 6,
+      "communication": 10
+    },
+    "strengths": [
+      "Exceptionally deep geospatial knowledge — compared geohash, S2, H3, and R-tree with precise cell size math",
+      "Strong practical handling of GPS noise with Kalman filter and map matching using HMM",
+      "Creative solutions for sparse areas including chained dispatch and progressive radius expansion"
+    ],
+    "weaknesses": [
+      "API design was not discussed — no endpoints for ride requests or driver operations",
+      "Failure handling was limited — no discussion of what happens when Redis geospatial data is lost"
+    ]
+  }
+}

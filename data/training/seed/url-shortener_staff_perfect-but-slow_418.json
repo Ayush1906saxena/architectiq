@@ -1,0 +1,173 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "staff",
+    "candidate_profile": "perfect-but-slow",
+    "total_exchanges": 25,
+    "generation_id": "seed_418"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service like bit.ly. We have 45 minutes. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great, let me be thorough here. First question: what's the expected scale in terms of URL creations per day? Second: what's the expected read-to-write ratio? Third: do we need custom aliases or only auto-generated codes? Fourth: what's the maximum acceptable latency for a redirect? Fifth: do we need URL expiration? Sixth: do we need analytics? Seventh: is there a geographic distribution requirement? Eighth: what about authentication — do users need accounts to create URLs? Ninth: rate limiting requirements?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "read_write_ratio", "custom_aliases", "latency", "url_expiration", "analytics", "geographic_distribution", "authentication", "rate_limiting"], "depth": "deep", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid questions. 100M URLs per day, 100:1 read-to-write, both custom and auto-generated, sub-100ms redirects, yes to expiration with 5-year default, basic analytics (click count), global service, both anonymous and authenticated users, and yes to rate limiting. Let's move forward.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Perfect. Let me do a very detailed capacity estimation. 100M URLs per day. Writes: 100M / 86400 = 1,157 writes per second. Let me be more precise — 100,000,000 / 86,400 = 1,157.4, so let's round to 1,160 WPS. Peak would be maybe 3x average, so 3,480 WPS. Reads: 1,160 * 100 = 116,000 RPS average, 348,000 RPS at peak. Now storage: each URL record — let me enumerate every field. short_code VARCHAR(10) = 10 bytes, long_url VARCHAR(2048) = let's assume average 200 bytes, user_id BIGINT = 8 bytes, created_at TIMESTAMP = 8 bytes, expires_at TIMESTAMP = 8 bytes, click_count BIGINT = 8 bytes, is_custom BOOLEAN = 1 byte. Total per row: roughly 243 bytes. Plus index overhead, let's say 500 bytes per row total.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_per_record", "peak_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. Let's keep moving — we have a lot to cover.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me finish the storage calculation. 500 bytes per row, 100M rows per day, that's 50 GB per day. Per year: 50 * 365 = 18.25 TB. Over 5 years (our default TTL): 91.25 TB. Now for bandwidth: reads at 500 bytes per response, 116,000 RPS = 58 MB/s outbound average, 174 MB/s at peak. Writes: 500 bytes per request, 1,160 WPS = 580 KB/s. Write bandwidth is negligible. Now for cache sizing: using the 80/20 rule, 20% of daily URLs account for 80% of reads. 20% of 100M = 20M URLs. At 500 bytes each: 10 GB. That's easily cacheable in Redis.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["storage_estimation", "bandwidth_estimation", "cache_sizing", "pareto_principle"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent numbers. We're 8 minutes in and still on estimation though. Can you move to the high-level design?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Of course. Let me draw the complete picture. Starting from the client: the user's browser or app sends requests to a CDN layer — CloudFront or Akamai — which handles the most popular redirects at the edge. Requests that miss the CDN hit a global load balancer (AWS ALB or a DNS-based global load balancer for multi-region). Behind the load balancer, we have a fleet of stateless application servers running the URL Shortening Service. These servers talk to: 1) Redis cluster for caching URL mappings, 2) Primary database (PostgreSQL) for persistent storage, 3) A Kafka cluster for async analytics event processing. The analytics events flow from Kafka to a consumer that writes to ClickHouse for analytics queries. There's also a Configuration Service for feature flags and rate limit configs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn", "global_load_balancer", "redis_caching", "postgresql", "kafka", "clickhouse", "feature_flags"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good architecture. Walk me through the URL creation flow.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "creation_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "URL creation flow in detail. Step 1: Client sends POST /api/v1/urls with body: {long_url, custom_alias (optional), expires_in (optional), api_key}. Step 2: API gateway validates the request — checks the API key, applies rate limiting (using a sliding window counter in Redis, limit of 100 URLs per minute per API key for free tier). Step 3: If custom alias is provided, check if it's available (query Redis cache first, then DB). If taken, return 409 Conflict. Step 4: For auto-generated codes, we need a unique short code. I'll use a range-based ID generator. A Zookeeper ensemble manages ID ranges — each app server requests a range of 10,000 IDs. The server generates IDs locally from its range, converts to base62 to get a 7-character code.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "rate_limiting", "custom_alias_collision", "range_based_id", "base62_encoding", "zookeeper"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Continue with the creation flow.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "creation_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step 5: Validate the long URL — check it's a valid URL format, not on our blocklist (spam/malware URLs). We could call Google Safe Browsing API asynchronously for malware checks. Step 6: Write the URL mapping to PostgreSQL — INSERT INTO urls (short_code, long_url, user_id, created_at, expires_at) with a unique constraint on short_code. Step 7: Write-through to Redis cache — set key 'url:{short_code}' = long_url with TTL matching the URL expiration. Step 8: Return the response: {short_url: 'https://short.ly/abc1234', created_at, expires_at}. The whole flow should complete in under 100ms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["url_validation", "malware_detection", "write_through_cache", "database_insert", "unique_constraint"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thorough. Now the redirect flow.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "redirect_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "Redirect flow: Step 1: GET /abc1234 hits the CDN. If the CDN has it cached (we cache popular redirects with a short TTL, say 5 minutes), it returns a 302 redirect directly — no hit to our servers. Step 2: On CDN miss, the request hits our load balancer and reaches an app server. Step 3: The app server checks Redis for 'url:{abc1234}'. On cache hit (expected 95%+ of the time), we have the long URL. Step 4: On cache miss, query PostgreSQL using the B-tree index on short_code. Populate Redis on read. Step 5: Check if the URL has expired — compare expires_at with current time. If expired, return 410 Gone. Step 6: Return HTTP 302 redirect to the long URL. I'd use 302 over 301 because we need analytics on every click — 301 would be cached by the browser and we'd lose visibility.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_caching", "redis_lookup", "database_fallback", "expiration_check", "302_vs_301", "cache_hit_rate"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're at 20 minutes. Let's talk about the database design and scaling.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "PostgreSQL is our primary store. Table schema: CREATE TABLE urls (id BIGSERIAL PRIMARY KEY, short_code VARCHAR(10) UNIQUE NOT NULL, long_url TEXT NOT NULL, user_id BIGINT REFERENCES users(id), created_at TIMESTAMPTZ DEFAULT NOW(), expires_at TIMESTAMPTZ, is_custom BOOLEAN DEFAULT FALSE). Indexes: B-tree on short_code (unique) for redirect lookups, B-tree on user_id for 'my URLs' queries, partial index on expires_at WHERE expires_at IS NOT NULL for the expiration cleanup job. For scaling: at 91 TB over 5 years, we need to shard. I'd partition by short_code hash — consistent hashing across 32 database shards initially, doubling as needed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_schema", "indexing_strategy", "partial_index", "sharding_strategy", "consistent_hashing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What about read replicas?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "read_replicas" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each shard has a primary plus 2 async read replicas. The redirect read path (which is 99% of traffic) can hit any replica. The slight replication lag (typically <100ms) is acceptable because URL mappings are immutable after creation — once written, the long_url never changes. Write path always goes to the primary. For cache misses that hit the DB, we'd route to the nearest replica. The replicas also serve as failover — if the primary fails, we promote a replica. We could use Patroni for automatic failover with PostgreSQL.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_replicas", "async_replication", "immutable_data", "automatic_failover", "patroni"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're at 30 minutes now. We still need to cover failure scenarios, analytics pipeline, and multi-region. Let's try to move faster.",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, let me cover failure scenarios comprehensively. Redis failure: if the cache goes down, all reads hit the database. With read replicas, we can survive temporarily. Mitigation: Redis Cluster with 3+ nodes, each partition replicated. Also a local in-process cache (Caffeine/Guava) as L1 cache before Redis — holds the top 10,000 hottest URLs per app server in 5 MB of heap. Database failure: promote replica with Patroni, typically <30 seconds. During failover, reads served by other replicas, writes queue in the app layer and retry. Zookeeper failure: app servers still have their current ID range and can generate codes. They just can't get new ranges until ZK recovers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_cluster", "l1_cache", "database_failover", "zookeeper_failure", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Analytics pipeline — quickly.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "analytics_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "On each redirect, fire-and-forget an event to Kafka: {short_code, timestamp, user_agent, ip, referer}. Kafka topic partitioned by short_code for ordering. Consumer group reads events, aggregates click counts per short_code per hour, and writes to ClickHouse. ClickHouse is column-oriented, great for analytics queries like 'total clicks in last 7 days for URL X' or 'clicks per country.' We batch writes to ClickHouse every 5 seconds for efficiency. Separately, a simple click_count increment can go to Redis (INCR) for real-time display, reconciled with ClickHouse periodically.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka_events", "clickhouse", "batch_aggregation", "redis_counter", "event_partitioning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Multi-region — we're at 38 minutes.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "multi_region" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multi-region: deploy the full stack in 3 regions — US-East, EU-West, AP-Southeast. Use GeoDNS to route users to the nearest region. Each region has its own Redis cluster, app servers, and database shards. For the database, cross-region replication is tricky. Since URL mappings are immutable, we can use async replication with conflict-free writes — each region generates IDs from non-overlapping ranges (US gets odd IDs, EU gets IDs mod 3 = 1, etc.). Reads are local to the region. On a cache miss for a URL created in another region, the local DB replica will have it via async replication (lag of 1-2 seconds is acceptable).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_region", "geodns", "cross_region_replication", "non_overlapping_id_ranges", "region_local_reads"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're at 42 minutes. I had questions about URL expiration cleanup, security (SQL injection, open redirect vulnerabilities), monitoring strategy, and the base62 encoding security concern (enumerable URLs). We won't have time to cover them.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I know, I went too deep on several areas. Quickly: URL expiration — a cron job scans for expired URLs using the partial index, deletes in batches. Security — validate the long URL against an allowlist of schemes (http/https only), parameterize all SQL queries. For enumerable URLs, apply a Feistel cipher to the ID before base62. Monitoring: dashboard on redirect P99 latency, cache hit rate, Kafka consumer lag, and error rates. I wish I'd budgeted time better — I could have covered all of this if I'd been less detailed in the estimation and creation flow.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["url_cleanup", "security", "feistel_cipher", "monitoring", "self_reflection"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly. This was one of the best URL shortener designs I've heard in terms of depth and correctness. Every single thing you said was accurate and well-reasoned. But in a 45-minute interview, you need to cover the full breadth of the problem. You left 4-5 important topics unaddressed because you spent 8 minutes on capacity estimation and 12 minutes on the creation flow alone. This would be an 80 if you'd finished. As it stands, I can't give full marks for an incomplete design, no matter how perfect the covered parts are.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 62,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 10,
+      "api_design": 9,
+      "database_design": 9,
+      "caching_strategy": 8,
+      "scalability": 7,
+      "failure_handling": 6,
+      "communication": 4
+    },
+    "strengths": [
+      "Exceptionally thorough capacity estimation with precise math",
+      "Perfect database design — schema, indexes, sharding, and replication",
+      "Excellent write-through caching with multi-level cache (CDN, Redis, L1)",
+      "Every technical detail was accurate and well-justified"
+    ],
+    "weaknesses": [
+      "Critical time management failure — ran over in a 45-minute interview",
+      "Spent 8 minutes on estimation alone (should be 3-4 minutes max)",
+      "Left security, monitoring, URL cleanup, and base62 security concerns unaddressed",
+      "Unable to self-regulate depth vs. breadth — went too deep on every topic",
+      "Would score 80+ if the same content was delivered in 40 minutes with 5 minutes to spare"
+    ]
+  }
+}

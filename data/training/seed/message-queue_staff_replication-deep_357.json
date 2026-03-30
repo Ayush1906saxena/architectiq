@@ -1,0 +1,159 @@
+{
+  "metadata": {
+    "problem_id": "message-queue",
+    "level": "staff",
+    "candidate_profile": "replication-deep",
+    "total_exchanges": 22,
+    "generation_id": "seed_357"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed message queue — something like Kafka. I'd like you to go deep on the replication protocol and data durability guarantees. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several questions. What throughput do we need — messages per second and message size? What durability guarantee — can we lose any acknowledged messages? What latency is acceptable for a produce request? Do we need exactly-once semantics or is at-least-once sufficient? And what's our replication factor — how many copies of each message?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["throughput", "durability", "latency", "delivery_semantics", "replication_factor"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10 million messages per second, average 1KB per message. Zero acknowledged message loss. Produce latency under 10ms at P99. Support exactly-once semantics. Replication factor of 3. Focus on the replication protocol.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "replication_protocol" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me design the replication protocol from the ground up. The fundamental unit is a partition — a topic is divided into partitions, each being an ordered, append-only log. Each partition has one leader and two followers (replication factor 3). The leader handles all reads and writes for that partition. Let me walk through the write path step by step.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["partition", "leader_follower", "append_only_log", "replication_factor"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk through the write path in detail.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "write_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step 1: Producer sends a ProduceRequest to the partition leader. The request contains: {topic, partition, messages[], acks_config}. The acks_config is crucial: acks=0 (fire and forget), acks=1 (leader only), acks=all (all in-sync replicas). For our zero-loss requirement, we use acks=all. Step 2: Leader receives the batch and appends it to its local log. The log is a series of segment files on disk. Each message gets an offset — a monotonically increasing 64-bit integer. The leader appends to the active segment file (sequential write — very fast). It also updates the in-memory index (offset → file position). Step 3: Leader sends the batch to both followers. It doesn't wait for its own fsync yet — it sends to followers in parallel with its own disk write. Each follower receives the batch via a FetchRequest (followers continuously pull from the leader, but the leader can also push — I'll use the pull model like Kafka). Step 4: Each follower appends the batch to its own local log and sends an acknowledgment back to the leader.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["produce_request", "acks_config", "segment_file", "offset", "parallel_replication", "pull_model"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Continue. What happens after the followers acknowledge?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "commit_protocol" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step 5: Leader waits for acknowledgments from all in-sync replicas (ISR). The ISR is the set of replicas that are caught up with the leader within a configurable lag threshold (e.g., replica.lag.time.max = 10 seconds). With RF=3 and all 3 replicas in the ISR, the leader waits for both followers to ACK. Step 6: Once all ISR replicas have acknowledged, the leader advances the High Watermark (HW). The HW is the offset of the last message that has been replicated to all ISR replicas. Before this step, HW might be at offset 999. After committing this batch of 100 messages, HW moves to 1099. Step 7: Leader responds to the producer with success, including the offset range [1000, 1099]. Step 8: Consumer visibility. Consumers can only read up to the High Watermark. Messages between HW and the leader's latest offset (called the Log End Offset, or LEO) are invisible to consumers. This ensures consumers never see uncommitted data that might be lost if the leader fails.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["isr", "high_watermark", "log_end_offset", "consumer_visibility", "commit_semantics"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if a follower falls behind? Walk me through ISR management.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "isr_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "A follower falls behind when it can't keep up with the leader's write rate — due to slow disk, network issues, or GC pauses. The leader tracks each follower's LEO (the offset they've replicated up to). If a follower's LEO lags the leader's LEO by more than replica.lag.time.max (10 seconds), the leader removes it from the ISR. Example: leader LEO = 5000, follower LEO = 3000, messages are arriving at 1000/sec. The follower is 2 seconds behind — still in ISR. If it falls to 4000 behind (4 seconds of processing stall), still OK. But if it's been lagging for more than 10 seconds continuously without catching up, it's removed. When a follower is removed from ISR, acks=all only waits for the remaining ISR replicas. If ISR shrinks to just the leader (both followers removed), we have a critical decision: do we allow writes with only the leader? The config min.insync.replicas controls this. I'd set min.insync.replicas = 2: the leader plus at least one follower must be in ISR for writes to succeed. If ISR < 2, the leader rejects ProduceRequests with NotEnoughReplicasException. The producer retries or fails — but we never acknowledge a message that exists on only one node.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["isr_management", "replica_lag", "min_insync_replicas", "write_availability", "durability_guarantee"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now the leader crashes. Walk me through leader election and data recovery.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "leader_election" }
+    },
+    {
+      "role": "candidate",
+      "content": "When the leader crashes, the controller (a separate coordination service — like ZooKeeper or a Raft-based metadata store) detects the failure via missed heartbeats (timeout: 6 seconds). The controller then selects a new leader from the ISR. Critical rule: only ISR members are eligible for leadership. If the ISR before the crash was {leader, follower_1}, then follower_1 becomes the new leader. Step 1: Controller notifies follower_1 that it's the new leader. Step 2: Follower_1 truncates its log to its own High Watermark. Why? Messages between follower_1's HW and its LEO might not have been committed (the old leader might not have advanced HW before crashing). These uncommitted messages are discarded. Step 3: Follower_1 starts accepting produce requests. Its current HW becomes the new starting point. Step 4: The remaining follower (follower_2) and eventually the recovered old leader start fetching from the new leader. They also truncate their logs to the new leader's HW to ensure consistency. Data loss analysis: if acks=all and min.insync.replicas=2, every acknowledged message exists on at least 2 nodes. If only the leader crashed, the surviving ISR member has all committed data. Zero data loss guaranteed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leader_election", "log_truncation", "controller", "data_loss_analysis", "hw_truncation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the edge case where all replicas crash? Is data lost?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "total_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If all 3 replicas crash simultaneously (rare but possible — e.g., rack-level failure if all replicas are co-located), it depends on fsync behavior. Scenario A: if we fsync every batch before acknowledging (synchronous flush), then data is durable on disk. When nodes recover, they replay from disk and no data is lost. The cost: fsync adds 2-5ms to every produce request. Scenario B: if we rely on OS page cache and fsync periodically (like Kafka's default), some recent messages might be in memory but not on disk. In this case, the last few seconds of data could be lost when all nodes restart. For our zero-loss requirement, I'd use Scenario A with a twist: batch fsync. Instead of fsyncing per-message, buffer messages for up to 1ms, then fsync the batch. This amortizes the fsync cost. At 10M messages/sec across, say, 10K partitions, each partition gets 1K messages/sec. A 1ms batch means ~1 message per batch per partition — so fsync overhead is ~1ms per message. To prevent rack-level failures, we use rack-aware replica placement: the 3 replicas for each partition are placed on 3 different racks (or availability zones in the cloud). This ensures a single rack failure only affects one replica per partition.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fsync_strategy", "batch_fsync", "rack_awareness", "total_failure_recovery", "durability_tradeoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now tell me about exactly-once semantics. How does that work with replication?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "exactly_once" }
+    },
+    {
+      "role": "candidate",
+      "content": "Exactly-once has two parts: idempotent produces and transactional writes. For idempotent produces: the producer is assigned a ProducerID (PID) by the leader on first connect. Each message batch includes (PID, SequenceNumber). The leader maintains a map: PID → last_sequence_per_partition. If the producer retries a batch (e.g., due to network timeout), the leader sees the same (PID, SequenceNumber) and deduplicates — returns success without re-appending. Sequence numbers are monotonically increasing per partition per producer. If the leader receives sequence N+2 without N+1, it rejects with OutOfOrderSequenceException — this catches producer bugs. For transactional writes: a producer can atomically write to multiple partitions. It starts a transaction, sends batches to multiple partitions, then commits. The leader for each partition writes the batch but marks it as uncommitted. When the TransactionCoordinator receives the commit, it writes a COMMIT marker to each partition. Consumers with isolation.level=read_committed only see messages up to the last COMMIT marker. This ensures all-or-nothing semantics across partitions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotent_producer", "producer_id", "sequence_number", "deduplication", "transactional_writes", "read_committed"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the follower replication interact with exactly-once? Does the follower also deduplicate?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "exactly_once_replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good question. The followers don't need to deduplicate independently because they replicate the leader's log exactly. The leader handles deduplication — if a duplicate batch is rejected by the leader, it never enters the log, and followers never see it. However, the PID-to-sequence mapping must be replicated too. If the leader fails and a follower becomes the new leader, the new leader needs to know the last sequence number per PID to continue deduplicating. This mapping is stored as part of the log — the leader periodically writes a producer state snapshot to the log. On leader failover, the new leader reads the latest snapshot and replays subsequent log entries to reconstruct the PID map. The subtlety: after failover, the producer might resend a batch that the old leader committed but the new leader already has in its log (from replication). The new leader checks: does this (PID, sequence) already exist in my log? If yes, it's a duplicate — return success. This is why the truncation to HW during failover is so important — it ensures the new leader's log is a prefix of the old leader's committed log.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pid_replication", "state_snapshot", "failover_deduplication", "log_prefix_property"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about replication performance. How do you hit 10M messages/sec with synchronous replication?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "replication_performance" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 10M msg/sec * 1KB = 10 GB/sec of raw data throughput. With RF=3, total write throughput is 30 GB/sec across the cluster. Let me size the cluster. A single broker with a modern NVMe SSD does ~2 GB/sec sequential write. Each broker is a leader for some partitions and a follower for others. As a leader, it writes locally + sends to 2 followers. As a follower, it receives and writes. Effective write capacity per broker: ~600 MB/sec leader writes (accounting for network send). Total brokers: 10 GB/sec / 600 MB/sec = ~17 brokers for write throughput. But we also need to account for follower writes: each follower receives and writes the same data. Network: each leader sends 2 copies of each message (to 2 followers). Per-broker outbound: ~1.2 GB/sec. That requires 10 Gbps NICs (1.25 GB/sec capacity). I'd use 25 Gbps NICs for headroom. For latency: the replication round trip (leader sends to follower, follower writes, follower ACKs) adds ~2-3ms to the produce latency. With local write (~1ms) and fsync (~1ms), total produce latency is ~5ms at P50, ~10ms at P99. Meets our requirement.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["throughput_sizing", "broker_capacity", "network_bandwidth", "nvme_throughput", "latency_breakdown"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle a slow follower that's dragging down produce latency for acks=all?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "slow_follower" }
+    },
+    {
+      "role": "candidate",
+      "content": "A single slow follower in the ISR blocks all acks=all produce requests for that partition. This is the tail latency problem of synchronous replication. Mitigations: (1) Aggressive ISR eviction: set replica.lag.time.max to a low value like 5 seconds. If a follower can't keep up for 5 seconds, remove it from ISR. Produces then only wait for the faster follower. (2) Pipelining: the leader doesn't wait for one batch to be ACKed before sending the next. It sends batches continuously and processes ACKs asynchronously. This means the follower can batch its writes and fsyncs, improving throughput. (3) Follower health monitoring: track each follower's replication lag in milliseconds. If follower P99 replication latency exceeds 5ms, alert the operator. Common causes: disk degradation (SMART metrics), network congestion (packet retransmits), or JVM GC pauses (switch to ZGC or Shenandoah for sub-1ms GC pauses). (4) If min.insync.replicas=2, a single slow follower getting removed from ISR doesn't block writes — we still have 2 ISR members. We only have a problem if both followers are slow.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tail_latency", "isr_eviction", "pipelining", "health_monitoring", "gc_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent replication depth. Anything to wrap up?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three additions. First, for cross-datacenter replication, I'd use asynchronous replication between datacenters (synchronous would add 50-100ms of RTT latency per produce). A separate replicator service mirrors committed data from the primary DC to the secondary. RPO (Recovery Point Objective) = a few seconds of async lag. Second, I'd implement follower reads for latency-insensitive consumers — they read from a nearby follower instead of the leader, reducing leader network load. The consumer sees a consistent snapshot at the follower's HW. Third, for observability: the most important replication metric is under-replicated partitions — partitions where ISR size < RF. This should be zero in steady state. If it's non-zero, it means replicas are falling behind or nodes are down. I'd alert on this metric with a 1-minute threshold.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cross_dc_replication", "async_replication", "rpo", "follower_reads", "under_replicated_partitions"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Outstanding replication design. You clearly understand the deep mechanics. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 81,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 5,
+      "scalability": 9,
+      "failure_handling": 10,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional replication protocol design — explained every step from produce to commit with High Watermark semantics",
+      "Deep understanding of exactly-once semantics including PID state replication during failover",
+      "Thorough failure analysis covering leader crash, ISR management, and total failure scenarios"
+    ],
+    "weaknesses": [
+      "Consumer-side design was minimal — no discussion of consumer groups, offset management, or rebalancing",
+      "Caching strategy was not discussed — page cache behavior and its interaction with replication"
+    ]
+  }
+}

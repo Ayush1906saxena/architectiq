@@ -1,0 +1,151 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "staff",
+    "candidate_profile": "drives-conversation",
+    "total_exchanges": 20,
+    "generation_id": "seed_059"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design the Twitter home timeline — the feed showing tweets from people you follow. Go ahead.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great problem. Let me structure this upfront so we use our time efficiently. I'll spend 5 minutes on requirements and estimation, 5 minutes on high-level architecture, and then I want to deep-dive on the fan-out strategy since that's the core technical challenge of this system. I'll weave in failure handling and scaling concerns as we go rather than treating them separately. Sound good?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Love the structure. Go for it.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Requirements: 500 million total users, 200 million DAU. Average user follows 300 accounts. Feed is chronological with future support for ranking. I'll assume 400 million tweets per day based on public data. Read-heavy: 200M users checking feeds ~10 times daily = 2 billion feed reads per day, 23K reads per second. Writes: 400M tweets / 86400 = ~4,600 tweets per second. Average tweet is ~1KB with metadata. Storage: 400M * 1KB = 400GB per day of tweet data. Feed reads are the bottleneck, not writes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid estimation. Continue with the architecture.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "High-level architecture. Three main services: Tweet Service handles tweet creation and storage. Fan-out Service handles timeline materialization. Timeline Service serves read requests. Supporting infrastructure: Redis cluster for pre-computed timelines, Cassandra or similar for tweet storage, a social graph service that manages follow relationships, and Kafka for async communication between services. Now — the core challenge. When User A tweets, how do 300 followers see it in their feed? This is where I want to go deep.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "redis_caching", "kafka", "database_choice"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Go ahead with the fan-out deep dive.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "There are three strategies. Strategy 1 — fan-out on write: when a tweet is posted, immediately push it into every follower's pre-computed timeline in Redis. The read path is trivial — just ZRANGE on the user's timeline sorted set. Strategy 2 — fan-out on read: store tweets per-author, and at read time, fetch the latest tweets from everyone the reader follows and merge. Write path is trivial but reads are expensive. Strategy 3 — hybrid, which is what Twitter actually does. Let me quantify why the hybrid is necessary. Fan-out on write at 4,600 tweets/sec with average 300 followers = 1.38 million Redis writes per second just for fan-out. That's a lot but manageable with a Redis cluster. The problem: Lady Gaga has 80 million followers. One tweet triggers 80 million writes. At 100K writes per second to Redis, that takes 13 minutes. By then she might have tweeted again.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "redis_caching", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "So how does the hybrid work in practice?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "We define a follower threshold — let's say 50,000. Below that: fan-out on write. The tweet is pushed to all followers' timelines via Kafka consumers that batch the Redis writes. Above that: the user is a 'celebrity' and we skip fan-out. At read time, the Timeline Service does two things in parallel: fetch the pre-computed timeline from Redis (covers normal accounts), and fetch latest tweets from celebrity accounts the user follows. Merge by timestamp. The key optimization: we maintain a per-user 'celebrity follows' list so we know exactly which celebrity timelines to fetch. If a user follows 10 celebrities, that's 10 ZRANGE calls to their tweet caches — about 2ms with pipelining. Total read latency: max(Redis timeline fetch, celebrity tweet fetch) + merge = ~10-15ms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "hybrid_approach", "redis_caching", "kafka"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the memory requirements for all those timelines in Redis?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "redis_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each user's timeline stores the last 800 tweet IDs. A Redis sorted set entry is about 16 bytes — 8 bytes for the member (tweet ID) and 8 bytes for the score (timestamp). So 800 * 16 = 12.8KB per user. For 200 million active users: 2.56TB. We only maintain timelines for active users — if someone hasn't logged in for 30 days, evict their timeline and rebuild on demand. With a Redis cluster of 32 nodes at 128GB each, we have 4TB capacity — enough with room for overhead and replication. I'd also set a max timeline size and use ZREMRANGEBYRANK to trim old entries.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "capacity_estimation", "cache_eviction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle a Redis node failure?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each Redis node has a replica with automatic failover via Redis Sentinel or Cluster's built-in failover. Failover takes 5-10 seconds. During that window, affected users' feed reads fall back to fan-out on read — query the social graph for their follows, fetch recent tweets from each followed account, merge and return. It's slower — maybe 200-500ms instead of 15ms — but functional. After failover completes, the new primary serves the replicated data. For users whose timelines were on a node that lost data (if replication was behind), we trigger an async rebuild. The key design principle: the pre-computed timeline is a cache, not the source of truth. We can always reconstruct it from the tweet store and the social graph.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_failure", "single_point_of_failure", "fan_out"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about tweet deletion? How does that propagate?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Deletion follows the reverse of the write path. For normal accounts: publish a delete event to Kafka. The same fan-out consumers that pushed the tweet now issue ZREM on each follower's timeline. It's the same scale problem — same number of Redis operations. For celebrities: easier — we just delete the tweet from their personal tweet cache, and it naturally disappears from feeds on the next read. There's a consistency window where a deleted tweet might still appear in someone's feed if they loaded it before the delete propagated. That's acceptable — Twitter shows 'This tweet has been deleted' if you try to interact with it. I'd also soft-delete in the database rather than hard-delete, keeping the record for compliance and audit purposes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "eventual_consistency", "compliance"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you add feed ranking in the future?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "feed_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "The merge step is the natural injection point. Currently we merge by timestamp. With ranking, we'd replace that with a scoring function. The architecture I'd propose: the Timeline Service fetches candidate tweets (pre-computed + celebrity tweets, maybe 500-1000 candidates), then passes them to a Ranking Service. The Ranking Service scores each candidate using features like: engagement velocity (likes, retweets in first 30 minutes — precomputed and cached), author affinity (how often this user engages with this author — stored in a feature store), content type affinity, recency decay. A lightweight model like a two-tower architecture or gradient-boosted tree scores 1000 candidates in 20ms. The ranked results replace the timestamp-ordered results. Total latency budget: 15ms fetch + 20ms ranking + 5ms overhead = 40ms. Still fast.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_ranking", "ml_ranking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle new user onboarding — they follow 50 accounts and need a timeline immediately?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Cold-start timeline. We can't wait for the fan-out to fill their timeline — that could take minutes. Instead, we use the fan-out-on-read path for new users. Fetch the latest 20 tweets from each of the 50 accounts they just followed — that's 1000 tweets — merge by timestamp, take the top 200, cache the result in Redis. Going forward, the fan-out path keeps their timeline updated normally. We can also pre-populate with trending or popular tweets while their personalized timeline builds up — it's a better experience than showing an empty feed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "cold_start"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Anything else before we wrap up?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three things. First, push notifications — when a tweet gets high early engagement, notify followers who haven't opened the app. This is a separate notification service triggered by engagement thresholds. Second, the social graph service needs to be highly available since both the fan-out and the fallback read paths depend on it — I'd use a replicated in-memory graph store. Third, monitoring: the critical metric is fan-out lag — the time between a tweet being posted and it appearing in all followers' timelines. If lag grows, we need more fan-out consumer capacity. I'd alert at 30 seconds and page at 2 minutes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "push_notifications", "single_point_of_failure"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Outstanding interview. You took complete ownership of the conversation structure, drove it effectively, and went deep on the most important aspects. I barely needed to redirect. That's exactly the kind of autonomy we expect at the staff level. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 85,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 9,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 10
+    },
+    "strengths": [
+      "Exceptional communication — structured the interview upfront and executed the plan precisely",
+      "Deep fan-out analysis with quantified trade-offs for all three strategies",
+      "Strong Redis memory estimation with practical eviction and sizing strategy",
+      "Proactively addressed cold-start, deletion propagation, and ranking evolution without prompting"
+    ],
+    "weaknesses": [
+      "API design was mentioned briefly but not detailed — no discussion of pagination, cursors, or real-time updates",
+      "Didn't discuss geographic distribution or multi-region deployment",
+      "Tweet storage database choice (Cassandra) was mentioned but not justified in depth"
+    ]
+  }
+}

@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "staff",
+    "candidate_profile": "google-style",
+    "total_exchanges": 22,
+    "generation_id": "seed_316"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a web search engine. I want to focus on the index and query processing. Here's a concrete query: 'restaurants near me open now.' That's a keyword query, a geo query, and a time filter combined. How does your index handle that?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "multi_signal_query" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question. That query has three distinct signals that need to merge: textual relevance ('restaurants'), spatial proximity ('near me'), and temporal filtering ('open now'). Before I design the index, let me clarify: what's the corpus size? Are we indexing the entire web or a specific domain like local businesses? And what's the latency target for search results?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["multi_signal_query", "corpus_size", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Full web search: 100 billion documents in the index. 100,000 queries per second. Results must return within 500ms at p99. The query I mentioned is representative of the hard cases. Walk me through how you'd build the index structure.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "index_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 100 billion documents, the index is massive. Let me size it: if the average document has 1,000 unique terms and each posting (doc_id + position + metadata) is 20 bytes, the raw inverted index is 100B * 1000 * 20 = 2 PB. With compression (varint encoding, delta encoding, block compression), we can get maybe 4-5x compression, so about 400-500 TB. This won't fit on one machine, so we need to shard. I'd use document-based sharding: the corpus is split into N shards, each containing a subset of documents with their complete inverted index. For 100 billion docs with 500 TB of index, using 5 TB per shard gives us about 100 shards. Each shard holds 1 billion documents.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["inverted_index", "capacity_estimation", "index_compression", "document_sharding"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now, how do you handle the 'near me' part? Your inverted index handles text. How do you add spatial search?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "spatial_index" }
+    },
+    {
+      "role": "candidate",
+      "content": "For spatial search, I'd maintain a parallel spatial index alongside the inverted index. The approach depends on the document type. For local business entities, we have structured location data — lat/lng. I'd index these using a geohash-based approach: each document's location is encoded as a geohash at multiple precision levels (from 4-character to 7-character), and these geohashes are added to the inverted index as regular terms. So a restaurant at geohash 'dpz83' is indexed under terms 'geo:dpz8', 'geo:dpz83', etc. When the user queries 'near me,' we compute their geohash and construct a query for the relevant geohash prefixes plus neighboring cells. This converts the spatial query into a regular inverted index lookup — elegant because we reuse the same query execution engine. For web pages without explicit coordinates, we extract location entities via NLP and associate the document with those locations.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["spatial_index", "geohash_indexing", "unified_index", "nlp_extraction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "And 'open now'? That's a real-time filter that changes every minute. How do you handle time-dependent data in a static index?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "temporal_filter" }
+    },
+    {
+      "role": "candidate",
+      "content": "The inverted index is too expensive to update every minute. Instead, 'open now' is a post-retrieval filter, not an index-time filter. The approach: we store business hours as structured data in the document's forward index (the per-document metadata store). During query processing, after the inverted index returns candidate restaurants matching the text and geo queries, we apply a runtime filter: for each candidate, check if current_time falls within the business's operating hours, adjusted for the user's timezone. This is a fast per-document check — O(1) per document against the forward index. The trade-off: we might retrieve 10,000 candidates from the inverted index and filter down to 500 that are open. That's some wasted work, but it's much cheaper than maintaining a time-varying index. For highly dynamic signals (open/closed, current wait time, menu availability), we maintain a real-time attribute store that's updated by the business or by crawling, and queried at serving time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["temporal_filter", "forward_index", "post_retrieval_filter", "real_time_attributes"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the full query execution path for 'restaurants near me open now' — from the user pressing enter to seeing results.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "query_execution" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step 1 — Query parsing: break the query into components. NLP identifies 'restaurants' as a category intent, 'near me' as a spatial signal (resolve to user's lat/lng from IP geolocation or GPS), and 'open now' as a temporal filter. Step 2 — Query rewriting: expand 'restaurants' to include synonyms (dining, eateries, food). Compute the user's geohash and generate geohash prefix terms for the spatial filter. Step 3 — Index lookup: construct an AND query: ('restaurant' OR 'dining' OR ...) AND ('geo:dpz8*' neighborhood terms). Scatter this query to all 100 index shards in parallel. Each shard retrieves matching doc IDs from its inverted index and computes a preliminary relevance score (BM25 + spatial proximity score). Each shard returns its top 100 candidates. Step 4 — Merge: the query coordinator merges results from all shards, taking the global top 1,000 candidates. Step 5 — Re-ranking: apply a heavy ML ranking model to the top 1,000 candidates using features from the forward index (rating, reviews, price range, business hours). Apply the 'open now' filter here. Step 6 — Return top 10 results to the user with snippets.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["query_execution", "query_parsing", "scatter_gather", "ranking_pipeline", "bm25"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "100 shards queried in parallel, each returning 100 candidates. That's 10,000 documents flowing to the coordinator. What's the latency breakdown?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "latency_analysis" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me break down the latency budget of 500ms. Query parsing and rewriting: 5-10ms. Scatter to 100 shards: network round-trip within a datacenter is about 1ms. Each shard's index lookup: reading posting lists for 3-5 terms and intersecting them — 20-50ms depending on posting list lengths. The shard scoring (BM25) runs during the intersection. Total per-shard time: 30-60ms. Since all shards run in parallel, the wall clock time is the slowest shard, not the sum. P99 of the slowest out of 100 shards is the critical path — with individual shard p99 at 60ms, the tail of the maximum of 100 is about 80-100ms (assuming independent latencies). Merge of 10,000 results: 1-2ms (just a k-way merge). ML re-ranking of 1,000 candidates: 50-100ms on GPU, or 200ms on CPU. Post-filtering for open now: 1ms. Total: about 300-400ms. We have headroom for our 500ms budget.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["latency_analysis", "tail_latency", "scatter_gather_latency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned the p99 of the slowest shard. How do you handle stragglers — one slow shard that delays the entire response?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "straggler_mitigation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Straggler mitigation is critical for scatter-gather at scale. Techniques: First, hedged requests. After 50ms (the expected p90), if a shard hasn't responded, send a duplicate request to a replica of that shard. Take whichever response arrives first. This costs a small amount of extra load but dramatically reduces tail latency. Second, partial results. Set a deadline of 150ms for all shard responses. If 95 out of 100 shards respond by the deadline, proceed with what we have. The missing 5 shards are only 5% of the corpus — the top results are overwhelmingly likely to be in the 95 responding shards. Third, shard replication. Each shard has 2-3 replicas. The coordinator routes to the least-loaded replica using power-of-two-choices: pick 2 random replicas and send to the one with lower queue depth. This naturally avoids overloaded instances. Fourth, isolate bad shards: if a shard consistently responds slowly, route its traffic to replicas and alert for investigation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["straggler_mitigation", "hedged_requests", "partial_results", "power_of_two_choices", "shard_replication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you keep the index fresh? New web pages appear, existing ones change. How do you update a 100-billion-document index?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "index_freshness" }
+    },
+    {
+      "role": "candidate",
+      "content": "Index updates happen in two tiers. Tier 1 — real-time: a supplementary index handles the last few hours of crawled content. New or updated documents are added to a small in-memory index that's rebuilt every few minutes. This index is queried alongside the main index. It's small (maybe 1 million documents) so queries are fast. Every few hours, the supplementary index is merged into the main index. Tier 2 — batch rebuild: the full index is rebuilt weekly from the entire crawled corpus. This handles structural changes like updated tokenization or new ranking features that require re-indexing all documents. The rebuild runs on a MapReduce/Spark pipeline: map phase extracts terms and positions from each document, reduce phase builds the inverted index per shard. The new index is built on separate machines and swapped in atomically via a blue-green deployment. During the swap, the old index serves reads until the new index is warmed and validated.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["index_freshness", "supplementary_index", "batch_rebuild", "blue_green_deployment"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the ranking model work? What features are most important for a query like 'restaurants near me open now'?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "ranking_model" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ranking model is a learning-to-rank system. For this local intent query, the most important features are: Relevance features: BM25 score for 'restaurant' in title and body, entity match score (does the document represent a restaurant entity in our knowledge graph), category match confidence. Spatial features: haversine distance from user to restaurant, distance rank within the result set. Quality features: average star rating, number of reviews, price range match to user's historical preferences, click-through rate for this business in past similar queries. Freshness features: last review date, last verified business hours update. The model itself is a gradient-boosted tree (LambdaMART) trained on click logs — positive labels are clicks that led to conversions (directions, phone calls, website visits), not just clicks. We use NDCG as the optimization metric. The model is retrained weekly on the last 30 days of interaction data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ranking_model", "learning_to_rank", "feature_engineering", "lambdamart", "ndcg"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "One shard's disk fails during serving. How does the system continue functioning?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "shard_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each shard has 2-3 replicas on different machines and racks. If one replica's disk fails, the coordinator simply routes queries for that shard to the surviving replicas. There's no data loss — the index is read-only after building. The coordinator discovers the failure via health checks or by receiving an error response, then updates its routing table to exclude the failed replica. The capacity of the surviving replicas must absorb the additional load — this is why we run at 50% utilization normally. The failed machine is replaced by provisioning a new instance and copying the shard data from a surviving replica. Since the index is immutable, the copy is straightforward — just rsync the SSTable files. The new replica warms its page cache by running a few queries before being added to the serving rotation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["shard_failure", "replica_routing", "capacity_headroom", "shard_recovery"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Final question: how do you handle query understanding for ambiguous queries? 'Apple' could mean the company or the fruit.",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "query_understanding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Ambiguous queries require intent classification. We use a multi-class classifier trained on historical search logs to predict the most likely intent. For 'apple,' the model considers: the user's recent search history (tech-related searches suggest the company), the user's location (near Cupertino?), and global popularity (Apple Inc. is searched 100x more than the fruit). We handle ambiguity by diversifying results: show the dominant intent first (Apple Inc.) but include a few results from the secondary intent (apple fruit, recipes). We also show 'did you mean' clarifications. For 'restaurants near me open now,' ambiguity is lower, but we still handle edge cases: 'near me' could mean near my current location or near my home — we default to current GPS location but offer 'near your saved places' as an option.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["query_understanding", "intent_classification", "result_diversification"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent depth on the index architecture and query processing. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 77,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 9,
+      "api_design": 5,
+      "database_design": 9,
+      "caching_strategy": 6,
+      "scalability": 9,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional index architecture knowledge — inverted index sizing, compression, and sharding strategy",
+      "Outstanding query execution pipeline with detailed latency breakdown",
+      "Strong straggler mitigation with hedged requests and partial results"
+    ],
+    "weaknesses": [
+      "API design was not discussed — no search API contract",
+      "Caching (query result caching, autocomplete caching) was not mentioned",
+      "Crawler architecture was completely absent — only the index and serving were discussed"
+    ]
+  }
+}

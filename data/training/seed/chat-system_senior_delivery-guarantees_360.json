@@ -1,0 +1,149 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "senior",
+    "candidate_profile": "delivery-guarantees",
+    "total_exchanges": 20,
+    "generation_id": "seed_360"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a chat system like WhatsApp. I'd like you to focus on message delivery guarantees — how you ensure every message is delivered exactly once and in order. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Important questions. Is this 1:1 chat only or groups too? What's our scale — concurrent users and messages per second? Do we need to support offline users (deliver when they come back online)? What's the acceptable delivery latency? And do we need delivery receipts (sent, delivered, read)?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chat_types", "concurrent_users", "offline_delivery", "delivery_latency", "delivery_receipts"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Both 1:1 and groups (up to 256 members). 100 million concurrent users. 500K messages per second. Yes, offline delivery is essential. Delivery within 500ms when both users are online. Delivery receipts: sent, delivered, read. Focus on the exactly-once delivery mechanism.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "delivery_guarantees" }
+    },
+    {
+      "role": "candidate",
+      "content": "True exactly-once delivery in a distributed system is extremely hard. What we actually implement is 'effectively exactly-once' — at-least-once delivery with client-side deduplication. Let me design this step by step, starting with the send path. Step 1: Client generates a message. The client assigns a client_message_id — a UUID generated locally. This is the idempotency key. The client also assigns a local_sequence_number per conversation — a monotonically increasing integer that the client tracks. The message is immediately shown in the sender's UI (optimistic rendering) with a 'sending' indicator.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["exactly_once", "at_least_once", "deduplication", "client_message_id", "optimistic_rendering"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Continue with the server-side processing.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "server_processing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step 2: Client sends the message to the server over WebSocket. Payload: {client_message_id: UUID, conversation_id, sender_id, content, local_sequence}. Step 3: Server receives and deduplicates. The server checks: does a message with this client_message_id already exist in the message store? It does a lookup: SELECT server_message_id FROM messages WHERE client_message_id = ?. If found, it's a duplicate — the server returns the existing server_message_id as an ACK without re-processing. If not found: Step 4: Server assigns canonical identifiers. server_message_id (Snowflake ID — embeds timestamp for ordering) and server_sequence (per-conversation monotonically increasing, obtained via INCR conversation_seq:{conversation_id} in Redis). Step 5: Server persists the message. INSERT INTO messages (server_message_id, client_message_id, conversation_id, sender_id, content, server_sequence, created_at). The UNIQUE constraint on client_message_id provides a database-level dedup safety net if the application-level check has a race condition.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["deduplication", "server_message_id", "server_sequence", "unique_constraint", "race_condition_safety"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now how does the message get to the recipient?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step 6: Server sends ACK to sender. The ACK contains: {client_message_id, server_message_id, server_sequence, server_timestamp}. The sender updates the message in its local DB: replace the 'sending' indicator with a single checkmark (sent). This ACK is critical — if the sender doesn't receive the ACK within 5 seconds, it retries the send. The server deduplicates the retry using client_message_id. Step 7: Server looks up recipient's connection. The session service (Redis hash: user_id → {connection_server_id, session_id}[]) tells us which WebSocket server holds the recipient's connection. If the recipient has multiple devices, all are listed. Step 8: Server sends the message to the recipient's connection server(s) via internal RPC. Step 9: Connection server pushes the message down the WebSocket to the recipient. Step 10: Recipient's client receives the message. It checks: have I seen this server_message_id before? (Check local SQLite DB.) If yes, discard — it's a duplicate. If no, display the message and store it locally.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sender_ack", "retry_mechanism", "session_lookup", "multi_device", "recipient_dedup"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now the recipient needs to ACK. Walk me through that.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "recipient_ack" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step 11: Recipient sends a delivery ACK back to the server. Payload: {server_message_ids: [id1, id2, ...], ack_type: 'delivered'}. I batch ACKs — instead of ACKing each message individually, the client buffers ACKs for 200ms and sends them in a batch. This reduces message overhead by 5-10x in active conversations. Step 12: Server receives the delivery ACK. Updates the message status: UPDATE messages SET delivery_status = 'delivered', delivered_at = NOW() WHERE server_message_id IN (...). Step 13: Server forwards the delivery receipt to the sender. The sender's UI updates from single checkmark to double checkmark (delivered). Step 14: When the recipient actually views the message (the conversation is open on screen), the client sends a 'read' ACK: {server_message_ids: [...], ack_type: 'read'}. The sender sees blue double checkmarks. For groups: delivery and read receipts are tracked per member. The group message is considered 'delivered' when all members have ACKed. The sender can tap the message to see per-member delivery/read status.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["delivery_ack", "batch_ack", "delivery_status", "read_receipt", "group_receipts"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when the recipient is offline?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "offline_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "When the session service finds no active connection for the recipient: Step A: The message is stored in the persistent message store (already done in Step 5). Step B: The message is added to an offline queue: INSERT INTO offline_queue (user_id, server_message_id, conversation_id, server_sequence, created_at). This is a per-user queue sorted by server_sequence. Step C: A push notification is sent via APNs (iOS) or FCM (Android). The notification payload is minimal: {conversation_id, sender_name, preview: first 50 chars}. For end-to-end encrypted chats, the preview is 'New message' since the server can't read the content. Step D: When the recipient comes online (WebSocket CONNECT), they send their last_seen_sequence per conversation. The server queries: SELECT * FROM offline_queue WHERE user_id = ? AND server_sequence > ? ORDER BY server_sequence ASC LIMIT 500. Step E: Messages are delivered in order. The recipient processes them sequentially, deduplicating against local storage. Once delivered, entries are removed from the offline queue. If a user is offline for weeks, the offline queue might be large. I cap it at 10,000 messages. Beyond that, the client does a full conversation sync by paginating through the message history.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["offline_queue", "push_notification", "sequence_based_sync", "queue_capping", "full_sync"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you guarantee message ordering? What if messages arrive out of order due to network issues?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "message_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "The server_sequence per conversation is the source of truth for ordering. The client maintains expected_sequence per conversation. When a message arrives: if message.server_sequence == expected_sequence + 1: display it, increment expected_sequence. If message.server_sequence > expected_sequence + 1: there's a gap. The client holds this message in a buffer and requests the missing messages: it sends a SYNC request with {conversation_id, from_sequence: expected_sequence + 1, to_sequence: message.server_sequence - 1}. The server returns the missing messages from the message store. Once the gap is filled, all buffered messages are displayed in order. If message.server_sequence <= expected_sequence: it's a duplicate — discard. For the 500ms delivery target, gap detection adds latency. I'd set a gap timeout: if the missing messages don't arrive within 200ms, fetch them. Most of the time, messages arrive in order and this logic doesn't trigger. In my experience, out-of-order delivery happens in < 1% of messages and is usually caused by multiple sender connections or server failover.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sequence_ordering", "gap_detection", "sync_request", "buffer_and_reorder", "gap_timeout"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about multi-device scenarios? I send a message from my phone and want to see it on my laptop.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "multi_device_sync" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multi-device adds complexity. Each device has its own WebSocket connection. When user A sends a message from their phone, the server delivers it to: (1) the recipient's devices, AND (2) user A's other devices (laptop, tablet). This ensures all devices have the same conversation state. Each device maintains its own last_seen_sequence per conversation. On initial device setup, the new device does a full sync — fetching the last N messages from each conversation from the server. For message dedup across devices: the client_message_id is the key. If device 1 sends a message and device 2 receives the echo from the server, device 2 checks its local DB: is this client_message_id already there? If the user composed the message on device 1, device 2 won't have it locally, so it inserts it as a received message. But if device 1 and device 2 are somehow both trying to send the same message (unlikely with proper UUIDs), the server's client_message_id dedup catches it. For read receipts: when device 1 reads a message, a 'read' sync event is sent to all of user A's other devices, so they also mark the message as read.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_device_sync", "self_delivery", "device_setup_sync", "read_receipt_sync", "cross_device_dedup"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when the server crashes after persisting the message but before delivering it?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "crash_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "The message is safely in the message store (persistent), but the recipient never received it via WebSocket. Three recovery mechanisms: (1) Sender retry: the sender didn't receive an ACK for delivery (only for the persist ACK from step 6). The sender retries after 5 seconds. The server sees client_message_id exists, returns ACK, and re-attempts delivery to the recipient. (2) Recipient reconnect: when the recipient's WebSocket reconnects (which happens naturally after the server crash — connection drops, client reconnects to a different server), the CONNECT message includes last_seen_sequences per conversation. The new server fetches undelivered messages from the store and delivers them. (3) Periodic sync: the client runs a background sync every 30 seconds — it asks the server 'what's the latest server_sequence for each of my conversations?' If the local sequence is behind, it fetches the missing messages. This catches any delivery that was missed by mechanisms 1 and 2. The maximum delivery delay in a crash scenario: 30 seconds (one sync interval). For most crashes, mechanism 2 (reconnect) fires within 2-5 seconds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["crash_recovery", "sender_retry", "reconnect_sync", "periodic_sync", "delivery_delay_bound"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the thundering herd problem when a server crashes and all its clients reconnect simultaneously?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "thundering_herd" }
+    },
+    {
+      "role": "candidate",
+      "content": "If a connection server holding 500K WebSocket connections crashes, all 500K clients try to reconnect within seconds. Mitigations: (1) Exponential backoff with jitter on the client: initial retry after random(0, 1) seconds, then random(0, 2), random(0, 4), etc. This spreads reconnections over 10-15 seconds instead of all hitting at once. (2) Load balancer connection limiting: each remaining connection server has a max_connections limit. If it's near capacity, the LB returns 503 and the client retries with backoff. This prevents overloading surviving servers. (3) The offline queue handles messages during the reconnection window — no messages are lost. (4) For the sync queries that happen on reconnect, I'd rate-limit the database queries: at most 10K sync queries per second across the cluster. Beyond that, requests queue with a 2-second timeout. (5) Pre-scale: if we detect a server failure (health check fails), immediately spin up a replacement server. With containerized deployment, a new server can be ready in 30-60 seconds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["thundering_herd", "exponential_backoff", "jitter", "connection_limiting", "rate_limited_sync"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Anything to wrap up the delivery guarantees discussion?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three additions. First, monitoring delivery health: track end-to-end delivery latency (time from sender PUBLISH to recipient delivery ACK). Alert if P99 exceeds 2 seconds. Track delivery failure rate (messages that take more than 60 seconds to deliver). Track duplicate delivery rate (how often the client-side dedup fires) — this should be under 0.1%; higher indicates a server-side bug. Second, for compliance and debugging, I'd log the full message lifecycle: {sent, persisted, delivered_to_server, delivered_to_recipient, read} with timestamps, stored in a separate audit table with 90-day retention. Third, I want to highlight the ordering guarantee: we provide causal ordering within a conversation (messages from the same sender arrive in order), but not total ordering across conversations. Two messages to different conversations might arrive in different orders on different devices, and that's acceptable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["delivery_monitoring", "delivery_latency", "duplicate_rate", "audit_logging", "causal_ordering"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid delivery guarantee design. Very thorough step-by-step. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 73,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 5,
+      "api_design": 7,
+      "database_design": 6,
+      "caching_strategy": 5,
+      "scalability": 7,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Thorough exactly-once delivery design with deduplication at both client and server levels",
+      "Excellent step-by-step message lifecycle with clear ACK semantics and failure recovery",
+      "Good handling of edge cases: offline delivery, multi-device sync, and thundering herd"
+    ],
+    "weaknesses": [
+      "Capacity estimation was minimal — no QPS or storage math",
+      "Caching strategy was not discussed — no mention of Redis caching for sessions or recent messages"
+    ]
+  }
+}

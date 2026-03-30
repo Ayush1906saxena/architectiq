@@ -1,0 +1,130 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "senior",
+    "candidate_profile": "message-loss",
+    "total_exchanges": 20,
+    "generation_id": "seed_375"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a chat system. I want to focus on message delivery guarantees — specifically, how to handle the gap between 'received by server' and 'acknowledged to client.' Give me the basic message flow first.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "message_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "The basic flow: User A sends a message over a WebSocket connection to a gateway server. The gateway forwards the message to a message service, which writes it to the database (Cassandra, for durability and availability), assigns a sequence number within the conversation, and then delivers it to User B's gateway (if B is online). User B's client receives the message and sends an ACK back. User A's client needs two confirmations: a server ACK ('message received and stored') and a delivery receipt ('message delivered to B').",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket", "message_sequencing", "server_ack", "delivery_receipt", "cassandra"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now the scenario: User A sends a message. The gateway receives it, the message service writes it to Cassandra successfully, assigns sequence number 42. But the server crashes before sending the server ACK back to User A. What does User A see?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "ack_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "User A never receives the ACK. From A's perspective, the message might have been lost — they see it in their chat as 'sending' with a spinner or single checkmark that never turns into a double checkmark. After a timeout — say 5 seconds — A's client will retry by resending the same message. But the message IS in the database. If we're not careful, the retry creates a duplicate: message 42 (from the original) and message 43 (from the retry) both contain the same text. User B sees the message twice.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["retry_behavior", "duplicate_message", "client_timeout", "ack_timeout"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "So you have two problems: the original message wasn't acknowledged, and the retry will create a duplicate. How do you solve both?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "deduplication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Idempotency via client-generated message IDs. When User A creates a message, the client generates a UUID — call it msg_id: 'abc-123'. This ID is part of the message payload. When the message service receives a message, before writing to the database, it checks if a message with that msg_id already exists. If it does, it skips the write and just sends the ACK. The retry with the same msg_id gets deduplicated. The original write at sequence 42 is the only copy. This is exactly-once semantics from the sender's perspective — the message is written once regardless of how many times the client retries.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency", "client_message_id", "deduplication", "exactly_once"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you efficiently check for duplicate msg_ids? You're processing thousands of messages per second. A database lookup for every message is expensive.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "dedup_efficiency" }
+    },
+    {
+      "role": "candidate",
+      "content": "A few approaches. First, use a Bloom filter per conversation. It gives us a fast probabilistic check — if the Bloom filter says 'not present', the message is definitely new (no DB lookup needed). If it says 'maybe present', we do a DB lookup to confirm. False positive rate of 1% means only 1% of messages need a DB check. Second, use a Redis set with a sliding window of recent msg_ids per conversation — keep the last 1,000 msg_ids. Since duplicates only happen due to retries within a short time window, we don't need to check against the entire message history. Third, Cassandra supports lightweight transactions (LWT) with IF NOT EXISTS, which gives us an atomic check-and-insert. But LWTs are slow, so I'd use the Redis approach for the hot path and LWT as a fallback.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["bloom_filter", "redis_dedup", "sliding_window", "lightweight_transaction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now a different failure mode: the server writes the message to the DB, sends the ACK to User A, then crashes before delivering to User B. User A thinks the message was sent. User B never gets it. How do you handle this?",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "delivery_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is actually handled by the pull model. When User B opens the chat or reconnects, their client requests all messages after their last known sequence number. B says 'give me messages after sequence 41' and gets message 42. The message was in the DB all along — B just wasn't online or connected to the crashed server to receive it in real time. For online users: when B's client reconnects to a new gateway server (after the crash or a failover), it sends a sync request with its last-seen sequence number. The server responds with all unseen messages. This pull-based catch-up ensures no messages are permanently lost — they're always in the DB.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pull_model", "sequence_sync", "reconnection_catchup", "durable_storage"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if B is online and connected to a different gateway server? The message is in the DB but B's gateway doesn't know about it.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "cross_server_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "We need a message delivery bus between gateway servers. When the message service writes to the DB, it also publishes to an internal pub/sub channel — Redis Pub/Sub or Kafka — keyed by the recipient's user ID. B's gateway server is subscribed to B's channel. It receives the notification and pushes the message to B's WebSocket. If the original server crashes before publishing, the message is still in the DB. B's gateway can periodically poll for new messages — say every 30 seconds — as a fallback. Or better: when any server in the cluster comes back up, it scans for undelivered messages (messages written to DB but not ACKed by recipients) and re-publishes them. This is a combination of push (pub/sub) and pull (periodic sync).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pub_sub", "message_bus", "periodic_polling", "push_pull_hybrid"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned undelivered messages. How do you track which messages have been delivered and which haven't?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "delivery_tracking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each recipient has a 'last_delivered_seq' per conversation, stored in the database. When B's client receives a message and sends a delivery ACK, we update B's last_delivered_seq to the message's sequence number. The delivery recovery process queries for messages where the message sequence number is greater than the recipient's last_delivered_seq — those are undelivered. For group chats, this is per-member: each member has their own delivery cursor. This is similar to Kafka's consumer offset model — each consumer tracks how far it's read in the log. The message log is the source of truth, and each client maintains its cursor.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["delivery_cursor", "sequence_tracking", "consumer_offset", "delivery_recovery"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about ordering? If the server crashes and messages are redelivered, can they arrive out of order?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes, out-of-order delivery is possible. Imagine messages 42, 43, 44 are written to the DB. Message 42's real-time delivery fails due to the crash. Messages 43 and 44 are processed by a different server and delivered successfully. Then the recovery process delivers 42 late. B's client receives 43, 44, 42. The fix: the client maintains a local sequence buffer. It knows the last in-order message it displayed was 41. It receives 43 — that's a gap (42 is missing). It buffers 43 and 44 without displaying them. It either waits a short timeout (500ms) for 42 to arrive or explicitly requests 42 from the server. Once 42 arrives, it displays 42, 43, 44 in order. This client-side reordering buffer ensures users always see messages in the correct sequence.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["out_of_order_delivery", "client_reordering", "sequence_buffer", "gap_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about read receipts? User A wants to know when B read the message. The read receipt from B has the same failure modes — what if B's read receipt is lost?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "read_receipt_reliability" }
+    },
+    {
+      "role": "candidate",
+      "content": "Read receipts are less critical than messages — losing a read receipt doesn't lose data, it just means A doesn't see the blue checkmarks. I'd treat them as best-effort with eventual consistency. When B reads a message, the client sends a read receipt. If it's lost, B's client will re-send it on the next connection sync. But unlike messages, I wouldn't persist read receipts in the main message store — that doubles the write load for metadata. Instead, store the 'last_read_seq' per user per conversation in a lightweight store — even Redis is fine. If it's lost, it gets re-synced. The trade-off: A might see the read receipts delayed by up to 30 seconds, but they'll eventually arrive.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["read_receipts", "best_effort_delivery", "eventual_consistency", "lightweight_storage"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You showed strong understanding of the message delivery guarantees and the interplay between push and pull models. The client-side reordering buffer was a good detail. I would have liked more discussion on the performance impact of deduplication at scale. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 71,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 5,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Thorough analysis of message deduplication with multiple approaches",
+      "Strong client-side reordering buffer design for out-of-order messages",
+      "Good hybrid push-pull delivery model for reliability"
+    ],
+    "weaknesses": [
+      "No capacity estimation — didn't discuss message throughput or storage requirements",
+      "Bloom filter sizing and false positive rate impact were not quantified",
+      "Didn't discuss end-to-end encryption implications for server-side deduplication"
+    ]
+  }
+}

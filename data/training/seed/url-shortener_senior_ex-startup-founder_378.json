@@ -1,0 +1,190 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "senior",
+    "candidate_profile": "ex-startup-founder",
+    "total_exchanges": 22,
+    "generation_id": "seed_378"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service like bit.ly. It needs to handle significant scale. What questions do you have before we start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "First question — who's paying for this? I ran a startup for four years and the number one lesson: infrastructure costs killed more startups than bad product-market fit. So before I design anything, I need to know: are we bootstrapped, VC-funded, or part of a larger org? That determines my entire architecture.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cost_optimization", "infrastructure_planning"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting framing. Let's say we're a Series A startup — $5M in funding, need to be cost-efficient. Expect 10 million URLs created per month, 100:1 read-to-write ratio.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Perfect, that changes everything. 10M URLs per month is about 4 writes per second average. With 100:1 read ratio, that's 400 reads per second. At our burn rate, I'd use a fully serverless architecture. Lambda + DynamoDB + CloudFront. Total cost: roughly $200/month for 10M URLs. I've done this exact calculation before — DynamoDB on-demand pricing for this volume is about $50/month, Lambda invocations another $30, CloudFront maybe $80 for the redirect traffic. Compare that to running EC2 instances 24/7 — we'd be paying $500+/month just for compute that's idle 90% of the time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cost_optimization", "serverless", "capacity_estimation", "qps_calculation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a very cost-conscious approach. Let's say we grow 10x in the next year. Does serverless still make sense?",
+      "annotation": { "action": "challenge", "phase": "requirements", "target_concept": "scalability" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question. At 100M URLs/month — 40 writes/sec and 4,000 reads/sec — serverless costs start to hurt. Lambda per-invocation costs scale linearly, so we'd be at maybe $2,000/month. At that point, we hit the serverless 'crossover point' — containers on ECS or Fargate become cheaper. My strategy: start serverless day one, but keep the architecture clean enough to swap compute layers. DynamoDB still works at that scale — it's the Lambda we'd replace first.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cost_optimization", "scalability", "serverless"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the high-level architecture for the initial serverless version.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Simple and cheap. Route 53 for DNS. CloudFront as CDN — and here's the trick: CloudFront can cache redirect responses. For a popular URL, the redirect happens at the edge, never hitting our backend. API Gateway in front of two Lambda functions: one for POST /shorten (create), one for GET /{code} (redirect). DynamoDB as the database — single table design with short_code as partition key. No Redis cache needed initially because CloudFront IS our cache layer, and it's geographically distributed for free.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_redirect", "api_design", "serverless", "database_choice"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting — using CloudFront as your cache instead of Redis. What's the trade-off there?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "caching_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "The trade-off is cache invalidation control. With Redis, I can delete a key instantly — say a user deletes their short URL. With CloudFront, invalidation takes seconds to minutes to propagate across all edge locations. For a URL shortener, that's usually acceptable — if someone deletes a URL, a few minutes of stale redirects isn't catastrophic. But if we need instant invalidation, I'd add a Lambda@Edge function that checks a small DynamoDB 'blocklist' table for deleted URLs. That adds maybe 5ms latency but gives us instant control.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_invalidation", "cdn_redirect", "edge_computing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you generate the short codes?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "base62_encoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "At startup scale, I'd keep it dead simple: use a DynamoDB atomic counter to get an incrementing ID, then base62 encode it. DynamoDB's UpdateItem with ADD is atomic and consistent — no race conditions. At 4 writes/sec, a single counter is fine. The counter item costs essentially nothing. If we grow past the point where a single counter becomes a bottleneck — which would be thousands of writes/sec — I'd switch to pre-allocated ranges: each Lambda instance grabs a block of 1,000 IDs, uses them locally, then grabs another block.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["base62_encoding", "atomic_operations", "id_generation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "DynamoDB atomic counters have a known issue — they can occasionally return duplicate values under high contention. Are you aware of that?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "collision_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "You're right — ADD operations are eventually consistent in the return value, though the actual increment is atomic. Honestly, at 4 writes/sec, I've never seen this in practice. But to be safe, I'd add the short_code as the partition key in DynamoDB with a condition expression: attribute_not_exists(short_code). If there's a collision, DynamoDB rejects the write and we retry with the next ID. Belt and suspenders. Cost of the retry: essentially zero.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["collision_handling", "conditional_writes", "eventual_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the DynamoDB table design. What does your schema look like?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "database_schema" }
+    },
+    {
+      "role": "candidate",
+      "content": "Single table design — startup lesson: fewer tables means less operational overhead. Partition key is short_code (string). Attributes: long_url, created_at, expires_at, user_id, click_count. I'd set a TTL attribute pointing to expires_at so DynamoDB automatically deletes expired URLs — zero cost, zero code. For the user lookup use case — 'show me my URLs' — I'd add a GSI on user_id with created_at as sort key. The GSI only costs money when it's used, and with on-demand pricing, we pay per-query. Total DynamoDB cost at our scale: under $50/month.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_schema", "ttl", "secondary_index", "cost_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned click_count as an attribute. How do you update that without making the redirect path slow?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "analytics_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two approaches depending on budget. Cheapskate approach: fire-and-forget DynamoDB UpdateItem with ADD on click_count. It's async from the user's perspective — the redirect returns a 302 immediately, and the Lambda continues updating the count. DynamoDB handles the atomic increment. Cost: one write unit per click. At 400 clicks/sec, that's about $15/month. Proper approach for when we have more budget: send click events to an SQS queue, have a separate Lambda consume in batches, and do batch updates to DynamoDB or write to S3 for analytics. Cheaper per-event, but more moving parts.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["analytics_pipeline", "async", "batch_processing", "cost_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about monitoring and alerting? How do you know the system is healthy?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Another startup lesson: don't pay for Datadog until you have revenue. CloudWatch is included with AWS services. I'd set up alarms on: Lambda error rate above 1%, Lambda p99 duration above 500ms, DynamoDB throttled requests above 0, and API Gateway 5xx rate above 0.5%. CloudWatch dashboards are free for the first 3. Total monitoring cost: about $5/month. When we hit Series B, we can upgrade to Datadog or Grafana Cloud.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["monitoring", "alerting", "cost_optimization"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if DynamoDB has an outage? Your entire system goes down.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "single_point_of_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "True — DynamoDB is a single point of failure here. But it's a calculated risk. DynamoDB's SLA is 99.999% for global tables, 99.99% for single-region. At our scale, the cost of multi-region redundancy doesn't justify the marginal availability gain. If DynamoDB goes down, AWS is having a very bad day and half the internet is probably also down. That said, the CloudFront cache would continue serving cached redirects — so popular URLs still work. New URL creation would fail, but we'd return a friendly error. Once we hit $1M ARR, I'd add DynamoDB global tables for multi-region — it's a checkbox, not a re-architecture.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["single_point_of_failure", "availability", "disaster_recovery", "cost_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle abuse — someone using your service to create millions of spam URLs?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "API Gateway has built-in rate limiting — I'd set it at 10 requests/second per API key for the creation endpoint. Free, no code needed. For unauthenticated users, I'd use API Gateway usage plans tied to IP address. Beyond rate limiting, I'd add a URL reputation check — call Google Safe Browsing API before creating the short URL. It's free for up to 10,000 lookups/day. If the destination URL is flagged as malicious, we reject it. This also protects our domain reputation — if bit.ly starts redirecting to phishing sites, browsers will flag the entire domain.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "abuse_prevention", "security"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's say we've raised Series B and now need to support 1 billion URLs per month. What changes?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "scalability" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 1B URLs/month — about 400 writes/sec and 40K reads/sec — the architecture fundamentally shifts. Lambda costs at this scale would be around $15K/month for compute alone. I'd move to ECS Fargate with auto-scaling — probably $3K-4K/month for the same compute. DynamoDB on-demand at this write volume gets expensive too — I'd switch to provisioned capacity with auto-scaling, or consider moving to a sharded PostgreSQL setup where we control the costs more directly. CloudFront stays — it scales beautifully. The analytics pipeline definitely needs Kinesis or Kafka now — SQS batching won't keep up. Total infrastructure cost: maybe $8K-10K/month instead of the $30K+ it would be if we naively scaled the serverless approach.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scalability", "cost_optimization", "migration_strategy", "sharding_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the migration from serverless to container-based without downtime?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "migration_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Blue-green deployment through API Gateway. The new ECS service sits behind an internal ALB. I'd create a new API Gateway integration pointing to the ALB, deploy it as a canary — send 5% of traffic to the new path, monitor error rates and latency for 24 hours, then gradually shift 25%, 50%, 100%. The database doesn't change — both Lambda and ECS read from the same DynamoDB. Zero downtime, zero data migration. I've done this exact migration twice at my startup. The key insight: separate your compute migration from your data migration. Never do both at once.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["blue_green_deployment", "canary_deployment", "migration_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're nearly out of time. Any final thoughts on this design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three things. First, custom domains — let users bring their own domain for branded short links. That's a premium feature and a revenue driver. Technically, it's just a CloudFront distribution per custom domain with a wildcard SSL cert. Second, I'd build a simple admin dashboard on day one — URL creation trends, top URLs, error rates. Investors love dashboards. Third, the whole thing should deploy from a single CDK or Terraform stack. Infrastructure as code from day one saves you when you need to spin up a staging environment or recover from a disaster. I learned that the hard way when our production database got corrupted and we had no reproducible way to rebuild the infrastructure.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["custom_domains", "infrastructure_as_code", "disaster_recovery", "product_thinking"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great interview. Your cost-awareness and practical operational experience really came through. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 71,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 6,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional cost-awareness — calculated exact dollar amounts for every architectural decision",
+      "Strong migration strategy thinking — knows when to evolve architecture as scale changes",
+      "Practical operational experience from running a real startup came through clearly"
+    ],
+    "weaknesses": [
+      "Over-indexed on cost at the expense of robustness — minimal redundancy in initial design",
+      "Didn't discuss geographic distribution or multi-region until prompted",
+      "Monitoring strategy was minimal — CloudWatch alone may miss important application-level metrics"
+    ]
+  }
+}

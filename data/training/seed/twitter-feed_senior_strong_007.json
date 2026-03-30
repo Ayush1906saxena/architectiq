@@ -1,0 +1,181 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_007"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design the Twitter home feed — the timeline that shows you tweets from people you follow. What clarifying questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Good problem. Let me get some requirements clear. First, are we designing just the read path — fetching the timeline — or also the write path — posting tweets? Second, what scale? How many users, DAU, average follows per user? And is this a chronological feed or a ranked/algorithmic feed?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_path", "write_path", "dau", "ranking"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Both read and write paths. 500 million total users, 200 million DAU. Average user follows 200 people. Chronological feed first, but we should discuss ranking if we have time. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "How many tweets per day? What's the average timeline fetch rate — how often does a user refresh? And do we need to handle media (images, videos) or just text tweets for now?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "media_handling"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500 million tweets per day. Each active user refreshes their timeline about 5 times per day. Text only for now. Let's go.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do the capacity math. Writes: 500M tweets per day is about 5,800 tweets per second. For reads: 200M DAU * 5 refreshes = 1 billion timeline reads per day, which is about 11,600 reads per second. But timeline reads are heavier — each one needs to fetch tweets from up to 200 followees. So the fan-out on read could mean 11,600 * 200 = 2.3 million database lookups per second if we do it naively. That's not going to work. This is where the fan-out problem comes in.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "fan_out"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right, that naive approach won't scale. What are your options?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "There are two fundamental approaches. Fan-out on write: when a user posts a tweet, we precompute the timeline by pushing that tweet to every follower's timeline cache. So when a user reads their timeline, it's just a simple read from their precomputed list. Fan-out on read: we compute the timeline at read time by fetching recent tweets from all followees and merging them. Fan-out on write trades compute and storage at write time for fast reads. Fan-out on read trades compute at read time for simpler writes. Given our ratio of reads to writes, fan-out on write seems better — we do more work once at write time to save on the much higher read volume.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_on_write", "fan_out_on_read", "precomputation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fan-out on write — how does that work for a user with 10 million followers?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "celebrity_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's the celebrity problem. If a user like Elon Musk tweets, we'd need to push that tweet to 10 million timelines. At 5,800 tweets per second and some of those from celebrities, the write amplification becomes massive. It could take minutes to propagate a single celebrity tweet, and the timeline would feel stale. This is where a hybrid approach makes sense.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["celebrity_problem", "write_amplification", "hybrid_fanout"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about the hybrid approach.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "hybrid_fanout" }
+    },
+    {
+      "role": "candidate",
+      "content": "We set a follower threshold — say 10,000 followers. For regular users below this threshold, we do fan-out on write: their tweets get pushed to all followers' timelines. For celebrities above the threshold, we do fan-out on read: their tweets are NOT pushed. Instead, when a user fetches their timeline, we read the precomputed timeline (from regular followees) and merge it with recent tweets from any celebrities they follow. We fetch celebrity tweets from a separate hot cache. This way, a celebrity posting doesn't trigger millions of writes. The read path does a little extra work — merging maybe 5-10 celebrity tweet lists — but it's bounded and fast.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hybrid_fanout", "celebrity_problem", "threshold_based_routing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you determine the threshold? And what happens when a user crosses from regular to celebrity?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "threshold_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "The threshold could be configurable and based on empirical analysis — we'd look at the distribution of follower counts and find the knee of the curve. In practice, it's probably somewhere between 5,000 and 50,000. When a user crosses the threshold, we transition them. Going from regular to celebrity: we stop the fan-out on write for their new tweets. Existing precomputed entries naturally age out of timelines. Going from celebrity to regular is rarer but we'd start fan-out on write again. There's a brief inconsistency during the transition — some followers might see a slight gap — but it resolves quickly.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["threshold_management", "eventual_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about the storage layer. Where do tweets live and where do timelines live?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "storage_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two separate storage systems. Tweets table: this is the source of truth. I'd use a sharded MySQL or PostgreSQL cluster, sharded by user_id. Columns: tweet_id, user_id, content, created_at. Tweet_id would be a Snowflake-style ID that encodes timestamp, so it's sortable. Timeline cache: this is where precomputed timelines live. Redis or Memcached, keyed by user_id, with a sorted list of tweet IDs ordered by timestamp. Each user's timeline cache holds maybe the last 800 tweet IDs — enough for several page loads. When the user scrolls further back, we fall back to a database query.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_sharding", "timeline_cache", "snowflake_id"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How much memory does the timeline cache need?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cache_sizing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let's calculate. 200 million active users, each with a timeline of 800 tweet IDs. Each tweet ID is 8 bytes. So per user: 800 * 8 = 6,400 bytes, roughly 6KB with overhead. Total: 200M * 6KB = 1.2TB. That's a lot for a single Redis, but spread across a Redis cluster of say 40 nodes with 32GB each, it's feasible. We also only need to cache active users — users who haven't logged in recently can have their timeline computed on demand.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_sizing", "redis_cluster"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The timeline cache holds tweet IDs. The client needs tweet content. How does that work?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "data_fetching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two-phase fetch. First, get the list of tweet IDs from the timeline cache. Second, batch-fetch the tweet content for those IDs. The tweet content should also be cached — a separate tweet content cache keyed by tweet_id. Since popular tweets are fetched many times, the hit rate would be excellent. A timeline request becomes: 1) Get 20 tweet IDs from timeline cache, 2) MGET those 20 tweet IDs from content cache, 3) for any cache misses, query the database, 4) return hydrated tweets to the client.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_fetching", "batch_fetch", "content_cache"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "A user posts a tweet and immediately refreshes their timeline. They expect to see it. How do you ensure that?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "read_your_writes" }
+    },
+    {
+      "role": "candidate",
+      "content": "Read-your-writes consistency. When a user posts a tweet, as part of the write path we immediately append it to their own timeline cache before the fan-out to followers begins. This is synchronous — the tweet isn't confirmed to the user until it's in their own timeline. The fan-out to followers happens asynchronously. So the user always sees their own tweet immediately, even if followers haven't received it yet.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_your_writes", "eventual_consistency", "async_fanout"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if the fan-out service crashes mid-delivery? Some followers got the tweet, some didn't.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "fan_out_reliability" }
+    },
+    {
+      "role": "candidate",
+      "content": "We need the fan-out to be reliable and resumable. I'd use a message queue — something like Kafka — for the fan-out work. When a tweet is posted, we enqueue a fan-out job. The fan-out workers consume these jobs and push to follower timelines in batches. If a worker crashes, the message isn't acknowledged, so Kafka redelivers it. We'd need to track progress: for a user with 9,000 followers, the worker might process 1,000 at a time. We store a cursor — 'processed up to follower offset X' — so on restart we resume from where we left off. Some followers might get the tweet twice (at-least-once delivery), but appending a duplicate tweet ID to a timeline is idempotent if we deduplicate by tweet_id.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_queue", "at_least_once", "idempotency", "cursor_based_processing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good resilience thinking. Let's briefly talk about ranking. If we switch from chronological to a ranked feed, what changes?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "A ranked feed adds an ML scoring layer. Instead of sorting by timestamp, we score each candidate tweet based on features: user engagement history, tweet engagement signals (likes, retweets), freshness, content type, and social graph proximity. The timeline fetch becomes: 1) Get candidate tweet IDs from the timeline cache plus celebrity tweets, 2) pass them through a lightweight ranking model, 3) return the top N. The ranking model would be something like a gradient boosted tree or a small neural net, running on the read path. Latency budget is tight — maybe 50ms for ranking — so the model must be fast. We can precompute some features offline and store them alongside the tweet cache.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ranking", "ml_scoring", "feature_engineering"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Anything else you'd want to cover?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. Delete propagation: when a user deletes a tweet, we need to fan out the deletion too, and handle the case where the delete reaches some caches before others. Monitoring: track fan-out lag — the time between tweet creation and delivery to the last follower. If it's growing, we need more fan-out workers. And a cold start strategy for new users or users who haven't logged in — their timeline cache is empty, so we need to build it on-demand from the database, which is expensive. We could have a background job that pre-warms timelines for recently active users.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["delete_propagation", "monitoring", "cold_start", "cache_warming"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. Your hybrid fan-out approach and the reliability of the fan-out pipeline were particularly well done. Thanks!",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 75,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent capacity estimation that naturally led to identifying the fan-out problem",
+      "Deep treatment of the celebrity problem with a practical hybrid solution",
+      "Strong reliability thinking on fan-out pipeline with Kafka and cursor-based resumption",
+      "Good cache sizing math with practical node planning"
+    ],
+    "weaknesses": [
+      "API design was not explicitly covered — jumped straight to architecture",
+      "Ranking discussion was decent but could have discussed feedback loops and A/B testing",
+      "Did not discuss geographic distribution or multi-datacenter timeline consistency"
+    ]
+  }
+}

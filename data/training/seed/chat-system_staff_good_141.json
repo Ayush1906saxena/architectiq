@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "staff",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_141"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a real-time chat system like WhatsApp or Slack. What questions do you have about the requirements?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me clarify a few things. Is this one-on-one chat, group chat, or both? What's the scale — how many concurrent users and messages per day? Do we need features like read receipts, typing indicators, and presence (online/offline)? What about message persistence — should messages be available on new devices?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chat_types", "scale", "presence", "message_persistence"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Both 1:1 and group chat, groups up to 500 members. 50 million concurrent users, 10 billion messages per day. Yes to read receipts, typing indicators, and presence. Messages should sync across devices. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Quick capacity math. 10B messages/day is about 115K messages/sec. If each message averages 200 bytes of content plus metadata, that's ~2TB of new message data per day. For 50M concurrent users, we need to maintain 50M persistent connections. Assuming a single server handles about 50K WebSocket connections with proper tuning, that's roughly 1000 WebSocket servers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation", "connection_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good numbers. Walk me through the connection layer — how does the WebSocket infrastructure work?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "websocket_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "The connection layer is the heart of the system. Each client establishes a WebSocket connection through a load balancer to one of the 1000 WebSocket gateway servers. The load balancer uses consistent hashing on the user ID so reconnections go to the same server when possible — though this isn't strictly required. Each gateway server maintains an in-memory map of user_id to WebSocket connection. When user A sends a message to user B, the gateway receiving A's message needs to route it to B's gateway. Here's where Redis pub-sub comes in. We maintain a Redis cluster specifically for cross-server message routing. Each gateway server subscribes to channels for the users it hosts. When A's gateway receives a message for B, it publishes to B's channel in Redis. B's gateway receives it and pushes it through B's WebSocket.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket_design", "load_balancing", "redis_pub_sub", "message_routing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does Redis pub-sub handle 50M users and 115K messages per second? Are there scalability concerns?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "redis_pub_sub" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good challenge. Plain Redis pub-sub doesn't scale well to millions of channels. I'd shard the pub-sub across a Redis Cluster — hash the recipient user_id to determine which Redis node handles their channel. With 10 Redis nodes, each handles about 5M user channels and ~12K messages/sec, which is well within Redis's capacity. For group chats, rather than publishing to each member's channel individually, I'd use a fan-out service that reads the group membership and publishes to each online member's channel. For a 500-member group, that's 500 Redis publishes per message — but since most group members are offline at any given time, we only publish to online members, which is typically 10-20% of the group.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_pub_sub", "sharding_strategy", "fan_out", "group_chat_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice optimization on only notifying online members. How do you track who's online?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "presence_system" }
+    },
+    {
+      "role": "candidate",
+      "content": "Presence system design: each WebSocket gateway maintains a local set of connected user IDs. When a user connects, the gateway writes a presence entry to Redis with a short TTL — say 30 seconds. The gateway refreshes this TTL via a heartbeat from the client every 20 seconds. When the client disconnects (clean close or heartbeat timeout), the gateway deletes the presence key. To check if a user is online: simple Redis EXISTS check. For broadcasting presence to contacts — like showing the green dot — I'd batch presence updates. Rather than notifying every contact immediately on connect/disconnect, aggregate presence changes every 5 seconds and broadcast in batches. This reduces the fan-out dramatically. For group chats, we can query the presence of all group members with a single Redis MGET. The main challenge is handling ungraceful disconnects — if a gateway server crashes, all its users' presence keys are orphaned until the TTL expires. 30 seconds is an acceptable grace period.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["presence_system", "heartbeat", "ttl", "batching", "failure_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's talk about message storage and ordering. How do you ensure messages appear in the correct order?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "message_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Message ordering is tricky in a distributed system. I'd use Snowflake IDs scoped per conversation. Each conversation has a dedicated ID generator sequence. The Snowflake ID encodes: 41 bits timestamp (millisecond precision), 10 bits shard/machine ID, 13 bits sequence number per millisecond. Within a single conversation, messages are totally ordered by their Snowflake ID. This is important: we don't need global ordering across all conversations, just per-conversation ordering. When a message arrives at the server, it gets assigned a Snowflake ID before being persisted and delivered. This server-assigned ordering avoids the problem of client clocks being out of sync. For display, the client sorts messages by Snowflake ID. Since Snowflake IDs are roughly time-ordered, they also serve as efficient cursor-based pagination keys — 'give me 50 messages after ID X'.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_ordering", "snowflake_id", "cursor_pagination", "distributed_ordering"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What database would you use for message storage?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 2TB per day, we need a database optimized for high write throughput with range scans. I'd use Cassandra. The partition key is the conversation_id, and the clustering key is the Snowflake message_id in descending order. This means all messages for a conversation are co-located on the same node, and fetching the latest N messages is a single sequential read. Write pattern: insert-only, no updates to messages (edits could be stored as new rows with an edit reference). At 115K writes/sec distributed across a Cassandra cluster of maybe 20 nodes, each node handles about 6K writes/sec — very comfortable. For retention, we can use Cassandra's TTL feature to auto-expire messages older than, say, 1 year, or move them to cold storage (S3) for compliance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "cassandra", "partition_key", "write_optimization", "data_retention"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle message delivery guarantees? What if the recipient is offline?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "delivery_guarantee" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd implement a multi-tier delivery system. Tier 1 — Online delivery: if the recipient has an active WebSocket, deliver via Redis pub-sub as described. The client sends an ack back when it receives the message. Tier 2 — Offline queue: if the recipient is offline (no presence key), we store the message in Cassandra and also add an entry to an 'undelivered messages' queue per user. When the user reconnects, they first pull all undelivered messages since their last sync point. The sync point is the last Snowflake ID they received, stored on the client. Tier 3 — Push notification: for offline users, we trigger a push notification via APNs/FCM so they know they have new messages. The actual message content goes through the normal sync flow when they open the app. For at-least-once delivery: the server doesn't consider a message delivered until the client acks. If no ack within 5 seconds, we retry. The client deduplicates using the Snowflake message ID. We don't need exactly-once — idempotent delivery with client-side dedup is sufficient and much simpler.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["delivery_guarantee", "offline_handling", "push_notifications", "at_least_once", "idempotency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do read receipts work in this architecture?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "read_receipts" }
+    },
+    {
+      "role": "candidate",
+      "content": "Read receipts are essentially metadata updates on messages. When user B reads a message from user A, the client sends a 'read' event with the conversation_id and the latest message_id that was read. This implies all prior messages are also read. The server stores the read watermark: (conversation_id, user_id, last_read_message_id). This is stored in a fast key-value store — Redis or even the same Cassandra cluster. Then the server notifies user A via the same WebSocket channel that B has read up to message X. For group chats with 500 members, we don't want to send 500 individual read receipts per message. Instead: we aggregate — the client periodically requests read receipt summaries: 'message Y was read by 47 of 50 members.' We only send per-member read status when the user explicitly taps on a message to see details.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_receipts", "watermark", "aggregation", "group_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a WebSocket gateway server crashes? How do you handle failover?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failover" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a gateway crashes, all 50K connections on that server are dropped. Clients detect the dropped connection and reconnect — the load balancer routes them to a healthy gateway. The new gateway registers them in Redis presence and subscribes to their pub-sub channels. The reconnection flow: the client sends its last received Snowflake ID. The server replays any messages received after that ID from Cassandra. This catch-up is efficient because it's a range query on the clustering key. For messages in-flight during the crash — messages that were received by the old gateway but not yet persisted — we need the write-ahead approach. The gateway should persist to Cassandra before acking to the sender. If the gateway crashes after persist but before delivery, the recipient catches up on reconnection. If it crashes before persist, the sender never received an ack and retries.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["failover", "reconnection", "catch_up", "write_ahead", "message_durability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle typing indicators? They're real-time but also very chatty.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "typing_indicators" }
+    },
+    {
+      "role": "candidate",
+      "content": "Typing indicators are fire-and-forget — they don't need persistence or delivery guarantees. When a user starts typing, the client sends a 'typing' event through the WebSocket. The gateway routes it to the recipient's gateway via Redis pub-sub, same as messages. Key optimizations: client-side throttling — only send typing events every 3 seconds, not on every keystroke. Server-side: typing indicators bypass Cassandra entirely — they're ephemeral. The recipient client auto-expires the typing indicator after 5 seconds if no new typing event arrives. For group chats: only show 'Alice is typing...' or 'Alice and Bob are typing...' — aggregate multiple typers. Don't send typing events to offline group members. The total volume of typing events might be 2-3x the message volume, but since they skip persistence and are best-effort, the infrastructure load is manageable.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["typing_indicators", "throttling", "ephemeral_data", "best_effort"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Last topic — how do you handle multi-device sync? A user has a phone, tablet, and desktop all active.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "multi_device_sync" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each device gets its own WebSocket connection, but they share the same user_id. In the presence system, we track (user_id, device_id) pairs. When a message arrives for user B, we deliver it to all of B's active devices via Redis pub-sub — each device has its own subscription. Each device maintains its own sync cursor (last Snowflake ID received). When a device comes online after being offline, it syncs from its own cursor. Read receipts update the per-conversation watermark regardless of which device generated them, so reading on phone marks as read on desktop too. The tricky part is message sending — if user B sends a message from their phone, the other devices need to see that outgoing message too. We treat the sender's other devices as additional recipients in the fan-out.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_device_sync", "device_tracking", "sync_cursor", "cross_device_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running out of time. Anything you'd add to wrap up?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things I'd add for production: end-to-end encryption for 1:1 chats using Signal Protocol — the server only sees ciphertext. Media message support with pre-signed S3 URLs for upload/download, with thumbnails generated server-side. Rate limiting on message sending to prevent spam. Search via an Elasticsearch index on message content (with E2E encryption, search only works on client-side indexed data). And comprehensive monitoring: WebSocket connection counts, message delivery latency (send to receive), presence accuracy, and Cassandra write/read latencies.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["encryption", "media_handling", "rate_limiting", "search", "monitoring"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You showed strong depth on WebSocket infrastructure, message ordering, and delivery guarantees. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 71,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 7
+    },
+    "strengths": [
+      "Excellent WebSocket + Redis pub-sub architecture with clear cross-server message routing",
+      "Strong message ordering design using Snowflake IDs scoped per conversation",
+      "Good multi-tier delivery system with clear offline handling and catch-up flow"
+    ],
+    "weaknesses": [
+      "Presence system design was decent but could explore more scalable alternatives to Redis for 50M users",
+      "Didn't deeply discuss encryption implications on server-side features like search",
+      "Group chat scalability at 500 members could have been explored more — what about 10K member channels?"
+    ]
+  }
+}

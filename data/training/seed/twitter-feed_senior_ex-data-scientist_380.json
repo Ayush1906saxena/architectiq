@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "ex-data-scientist",
+    "total_exchanges": 20,
+    "generation_id": "seed_380"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed system. Users follow other users and see a timeline of posts. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "My first question is actually about the feed ranking model. Is this a chronological feed or a ranked feed? Because feed ranking is a multi-objective optimization problem: engagement times relevance times diversity times freshness, with constraints on ad density. The system design is completely different depending on which approach we take.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_ranking", "ranking_algorithm", "multi_objective_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's do a ranked feed — similar to what Twitter does today. Assume 200 million daily active users, each following an average of 200 accounts. What else do you need to know?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "How frequently do users refresh their feed? That determines our scoring infrastructure throughput. What's the median and p99 posts per day per user? And critically — what engagement signals are we optimizing for? At my last role we found that optimizing for clicks actually decreased user satisfaction. Time-spent was a much better proxy for value, but it's harder to measure. Do we have an existing ML infrastructure, or are we building from scratch?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["engagement_metrics", "ml_infrastructure", "user_behavior"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Average 10 feed refreshes per user per day. Median 2 posts/day per active user, p99 around 50. Optimize for time-spent. Existing ML platform with feature store and model serving. Now, walk me through the architecture.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with capacity. 200M DAU times 10 refreshes = 2 billion feed requests per day, about 23,000 feed requests per second. Each feed request needs to score maybe 500 candidate posts from the user's followed accounts. That's 23K times 500 = 11.5 million scoring operations per second. That's a lot of ML inference. We need a multi-stage ranking pipeline to make this tractable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "ranking_pipeline"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me more about this multi-stage ranking pipeline.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "ranking_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three stages, each progressively more expensive but more accurate. Stage 1 — Candidate Generation: for each user, retrieve the latest posts from their followed accounts. This gives us maybe 2,000-5,000 candidates. Use a lightweight filter: remove posts already seen, apply basic freshness decay. This is a simple database lookup, very fast. Stage 2 — Light Ranking: a simple model — logistic regression or a shallow neural net — scores all candidates on predicted engagement. Features: post age, author historical engagement rate, content type (text/image/video), user-author affinity score. This reduces 5,000 candidates to the top 500. Stage 3 — Heavy Ranking: a deep neural network with hundreds of features. This is the expensive model — transformer-based, considers post content embeddings, user interest embeddings, social graph context. Scores 500 candidates, returns the top 50 for the feed. The key insight: stage 1 processes 5,000 items cheaply, stage 3 only processes 500 items expensively. That 10x reduction is what makes the system feasible at scale.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ranking_pipeline", "candidate_generation", "ml_inference", "content_embeddings"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you compute the user-author affinity score you mentioned?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "affinity_scoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Affinity is a composite signal from multiple interaction types. I'd build a feature vector per (user, author) pair: number of likes on author's posts in last 30 days, number of replies, number of profile visits, whether user has notifications enabled for this author, recency of last interaction. These raw features feed into a learned embedding. But there's a cold-start problem — new follows have no interaction history. For cold start, I'd use the social graph: if user A follows authors B and C who are similar to new author D (by content similarity or shared followers), we can bootstrap D's affinity from B and C's scores. This is essentially collaborative filtering on the social graph.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["affinity_scoring", "collaborative_filtering", "cold_start", "feature_engineering"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great depth on the ML side. Now let's talk about the infrastructure. How do you actually store and retrieve the candidate posts for Stage 1?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, the infrastructure side... there are two main approaches. Fan-out-on-write: when a user posts, push the post ID into every follower's timeline cache. This makes reads fast — just read the pre-built timeline. Fan-out-on-read: when a user requests their feed, query all followed accounts' posts in real-time. I know fan-out-on-write is the standard answer for large-scale timelines. I'd use that for most users, with fan-out-on-read for celebrity accounts — users with millions of followers — since fan-out-on-write for them is too expensive.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["fan_out_on_write", "fan_out_on_read", "celebrity_problem"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What data store would you use for the timeline cache?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, I'm less confident on this part. I'd use Redis with sorted sets — the score being the post timestamp, so we can efficiently retrieve the latest N posts for a user. Each entry in the sorted set would be the post ID. The actual post content lives in a separate store — probably a key-value store like DynamoDB or Cassandra keyed by post ID. When the ranking pipeline needs the full post content for feature extraction, it does a batch lookup. For 200M users, each with a timeline of maybe 1,000 post IDs at 8 bytes each — that's about 1.6TB of Redis storage. We'd need a Redis cluster.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["redis_caching", "sorted_sets", "database_choice", "storage_estimation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's go back to your strength — the ranking model. How do you handle the diversity constraint you mentioned?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "feed_diversity" }
+    },
+    {
+      "role": "candidate",
+      "content": "Diversity is critical and often overlooked. Without it, the feed becomes an echo chamber — the model keeps showing posts from the same 5 accounts because they historically had high engagement. I'd add a post-ranking diversification step using Maximal Marginal Relevance (MMR). After the heavy ranker produces a scored list, we re-rank using: score(post) = lambda * relevance_score - (1 - lambda) * max_similarity_to_already_selected. Lambda around 0.7 works well in practice. This penalizes posts that are too similar (same author, same topic) to posts already in the feed. We also enforce hard constraints: no more than 3 consecutive posts from the same author, at least 2 content types (text, image, video) in every 10 posts, and sponsored content ratio capped at 1 in 5.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_diversity", "mmr", "ranking_constraints", "echo_chamber"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you evaluate whether your ranking changes are actually improving user experience?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "experimentation" }
+    },
+    {
+      "role": "candidate",
+      "content": "A/B testing with careful metric selection. Primary metric: daily time-spent per user. But time-spent alone is dangerous — doomscrolling increases time-spent but decreases satisfaction. So we add guardrail metrics: daily active users (retention), user-reported satisfaction surveys (sampled), and 'regretted actions' — when a user unfollows someone right after seeing their post or hides a post. We run experiments for at least 2 weeks to capture weekly patterns. Minimum detectable effect should be 0.5% change in time-spent with 95% confidence. For 200M DAU, even a 0.1% experiment group gives us millions of users — plenty of statistical power. One thing I learned painfully: always check for novelty effects. A new ranking algorithm might boost engagement for the first week simply because the feed looks different, then regress to baseline.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ab_testing", "experimentation", "guardrail_metrics", "statistical_significance"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong experimentation knowledge. Let's go back to infrastructure — what happens when the ML model serving layer goes down? Users can't see their feed at all?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "ml_serving_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good question. If the heavy ranker is unavailable, we fall back to the light ranker. If both are down, we fall back to a chronological feed — just return the most recent posts from the pre-built timeline cache sorted by timestamp. No ML needed. The user gets a slightly worse experience, but they still see content. We'd also cache the most recent ranked feed for each active user. If all ranking is down, serve the last cached ranked feed with a 'stale' flag — the client can show a small indicator that the feed might not be fully up to date.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["graceful_degradation", "fallback_strategy", "cache_staleness"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the feature store that feeds your ranking models? That's a critical dependency.",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "feature_store" }
+    },
+    {
+      "role": "candidate",
+      "content": "The feature store is actually where I have the most experience. Two layers: an offline feature store for batch-computed features (user embeddings, author engagement rates, content topic models) — updated every few hours via Spark jobs, stored in something like Feast backed by Redis for online serving. And a real-time feature store for streaming features (post like count in last hour, trending topics) — computed from a Kafka stream using Flink, materialized to a low-latency store. The offline features are the backbone — if the real-time features are stale or unavailable, the model still works, just slightly less accurate. We design model features to degrade gracefully: every real-time feature has an offline fallback. Post like count in last hour unavailable? Fall back to average daily like count.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feature_store", "batch_processing", "stream_processing", "kafka", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about content moderation? How does that integrate with the feed?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "content_moderation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Content moderation is another ML problem I care about deeply. It integrates at two points: pre-indexing and at ranking time. Pre-indexing: when a post is created, run it through a moderation classifier — toxicity, spam, misinformation. Posts flagged with high confidence are removed immediately. Posts in the 'gray zone' (say 0.4-0.8 toxicity score) are demoted in ranking — the toxicity score becomes a negative feature in the ranking model. At ranking time: we can apply user-specific content preferences. Some users opt into more aggressive filtering. The moderation signal is just another feature in the ranking model — the beauty is it composes naturally with all other signals.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["content_moderation", "toxicity_classification", "ranking_features"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running low on time. What aspects of infrastructure would you want to strengthen if you had more time?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Honestly, the infrastructure gaps in my design are: I didn't detail the post storage and retrieval system enough — the actual database schema, sharding strategy, and replication. I'd also want to talk about the write path — how a new post gets indexed, features computed, and fan-out triggered. And global distribution — serving feeds with low latency across continents requires careful placement of both the data and the ML model serving. I know these are weaknesses in my background — I'm much stronger on the ranking and ML side than the distributed infrastructure side.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["self_awareness", "database_schema", "sharding_strategy", "global_distribution"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "I appreciate the self-awareness. Your ranking expertise is genuinely impressive. Thank you for the discussion.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 62,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 5,
+      "database_design": 4,
+      "caching_strategy": 5,
+      "scalability": 5,
+      "failure_handling": 6,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional depth on feed ranking — multi-stage pipeline, diversity constraints, and evaluation methodology",
+      "Strong experimentation mindset with nuanced metric selection",
+      "Honest self-awareness about infrastructure weaknesses"
+    ],
+    "weaknesses": [
+      "Database design and storage architecture were superficial — couldn't detail sharding or schema",
+      "API design was never discussed — no endpoint definitions or data contracts",
+      "Infrastructure components (load balancing, service mesh, deployment) were largely skipped"
+    ]
+  }
+}

@@ -1,0 +1,181 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "principal",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_019"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service. Given your principal-level experience, I want to explore both the architecture and the strategic decisions around building this. What are your initial questions?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. First, I want to understand why we're building this in-house. Are there reasons we can't use an existing service like Bitly's API or Rebrandly? Is there a strategic need — data ownership, specific integration requirements, cost at scale? Also, what's the current state — are we migrating from an existing solution or building greenfield?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["build_vs_buy", "migration"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great question. We're currently using Bitly's enterprise API but we're spending $200K/year and we need deeper analytics integration with our internal tools. We also want branded short domains. It's a migration from Bitly. Expected scale is 50 million URLs per day.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "build_vs_buy" }
+    },
+    {
+      "role": "candidate",
+      "content": "That context is critical. So we have an existing corpus of short URLs already in Bitly that users have shared — those links need to keep working during and after migration. Let me ask: how many existing short URLs are we migrating? What's our redirect SLA — any tolerance for increased latency during migration? And is the $200K/year primarily API costs, or does that include their analytics dashboard?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["migration", "backward_compatibility", "sla"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "About 500 million existing URLs in Bitly. Redirect latency must stay under 100ms during migration. The $200K is split roughly 60/40 between API usage and analytics. Let's design the system.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the build vs buy analysis since that frames everything. Building in-house: infrastructure cost at 50M URLs/day — I'd estimate $3K-5K/month for compute, $2K/month for database, $1K/month for Redis, plus engineering time. Call it $80K/year in infra plus maybe 2 engineers half-time for maintenance, so $250K total. That's more than the $200K Bitly cost. But — we get full data ownership, deep analytics integration, custom branding, and no vendor lock-in. The break-even is about 18 months considering the analytics integration we'd otherwise need to build on top of Bitly's API anyway. I'd recommend building, but with a phased approach.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["build_vs_buy", "cost_optimization", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair analysis. Walk me through the architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "High-level: a load balancer in front of stateless application servers. The app layer handles two main APIs — POST /shorten for creation and GET /:code for redirects. Behind the app servers, a Redis cluster for caching hot URLs, and PostgreSQL for persistent storage. For URL creation, we generate a short code using base62 encoding of a counter-based ID. For redirects, we check Redis first, then fall back to Postgres. Analytics events are published to Kafka asynchronously. A separate consumer processes them into our analytics store.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["load_balancing", "api_design", "redis_caching", "base62_encoding", "kafka"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid baseline. Now tell me about the migration. How do you move 500 million URLs from Bitly without breaking existing links?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "migration" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the hardest part of the project. I'd do it in three phases. Phase 1 — Shadow Mode: we set up our system and start creating all new URLs in both Bitly and our service. We compare redirect behavior to validate correctness. Phase 2 — Bulk Migration: we use Bitly's export API to bulk-export all 500M URL mappings and import them into our database. At 500 bytes per record, that's about 250GB of data — we can import this in a few hours with batch inserts. Phase 3 — DNS Cutover: we update DNS for our short domains to point to our infrastructure instead of Bitly. We keep Bitly as a fallback — if our service gets a cache miss and database miss, we check Bitly's API as a last resort. This catch-all handles any URLs that might have been missed in the bulk export.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["migration", "shadow_mode", "dns_cutover", "backward_compatibility"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the risk with the DNS cutover? What if something goes wrong?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "migration" }
+    },
+    {
+      "role": "candidate",
+      "content": "The main risk is redirect failures during cutover — broken links directly impact our users' end customers. My mitigation: First, we do the cutover with a low DNS TTL — set it to 60 seconds a week before cutover. This means if we need to roll back, we point DNS back to Bitly and within 60 seconds traffic returns to the old system. Second, we run the Bitly fallback for at least 30 days post-cutover. Third, we monitor redirect success rate in real-time — if it drops below 99.9%, we auto-rollback. The one thing I'm less sure about is whether Bitly's export API gives us truly complete data or if there are edge cases with very old URLs that might not export cleanly.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["dns_ttl", "rollback", "monitoring", "migration"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good thinking on the rollback plan. Let's discuss the database design. You mentioned PostgreSQL — what's the schema look like?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_schema" }
+    },
+    {
+      "role": "candidate",
+      "content": "Core table is urls with columns: id (bigint, primary key), short_code (varchar(10), unique index), destination_url (text), created_at (timestamp), expires_at (timestamp nullable), owner_id (bigint, foreign key to accounts), custom_domain_id (bigint nullable, foreign key), click_count (bigint, denormalized counter), is_active (boolean). For custom domains, a separate domains table: id, domain_name, account_id, ssl_certificate_id, verified (boolean). I'd partition the urls table by created_at — monthly partitions — so we can efficiently archive or drop old data. The primary index for redirects is a composite index on (custom_domain_id, short_code) since the same short code could exist under different custom domains.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["database_schema", "partitioning", "indexing", "custom_domains"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "At 50 million URLs per day, you'll have billions of rows within months. How does partitioning by created_at help with redirect lookups, which are by short_code?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "You're right — partitioning by created_at helps with maintenance operations like archival, but it doesn't help with redirect lookups because we'd have to scan across all partitions to find a short_code. For the redirect path, what I actually need is sharding by short_code. I'd use hash-based sharding — take the first 2 characters of the short_code as the shard key. With base62, that's 3,844 possible prefixes, which gives us plenty of room to distribute across, say, 16 initial shards. Each shard is a separate PostgreSQL instance. The application layer or a proxy like PgBouncer with custom routing logic handles the shard selection. I should have led with this instead of time-based partitioning.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["sharding_strategy", "hash_sharding", "partitioning"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good correction. How about the current monolith — you mentioned migrating from Bitly. But is your current internal architecture a monolith?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "monolith_migration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good question — let me address this properly. If we're building greenfield, I'd actually start as a monolith. A URL shortener has a small enough domain that microservices would be premature. One service handles creation and redirect, with Kafka for async analytics. As we scale, the first thing to extract would be the analytics pipeline as a separate service, because its scaling characteristics are completely different — it's write-heavy and batch-oriented while redirects are read-heavy and latency-sensitive. The second extraction would be the custom domain management service, because SSL certificate provisioning and domain verification have their own lifecycle. I'd resist splitting the core redirect and creation paths into separate services until we have a clear need — the overhead of service-to-service communication and distributed transactions isn't worth it for a relatively simple domain.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monolith_migration", "microservices", "service_extraction"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's pragmatic. Let's talk about the caching layer. You mentioned Redis — how do you handle cache consistency when a URL is updated or deleted?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "cache_consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "For URL updates — say changing the destination — we use a write-through pattern: update the database first, then invalidate the Redis key. The next redirect request causes a cache miss, loads from the database, and re-populates the cache. There's a brief window where the old URL is served, but it's bounded by the time between the DB write and the cache invalidation — typically under 10ms on the same network. For deletes, same pattern — delete from DB, delete from Redis. I'd also set a TTL of 24 hours on all cached entries as a safety net. One edge case: if the invalidation fails after the DB write, we could serve stale data for up to 24 hours. To handle this, I'd log all invalidation failures and have a reconciliation job that checks for stale cache entries every hour.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cache_consistency", "write_through", "cache_invalidation", "reconciliation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Reasonable. Let's talk about monitoring and observability. What metrics would you track?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Core business metrics: redirect success rate (target 99.99%), redirect latency at p50, p95, p99 (target under 100ms at p99), URL creation success rate, and URLs created per second. Infrastructure metrics: cache hit rate (should be above 95%), database query latency, Kafka consumer lag for analytics, and error rates by endpoint. I'd also track migration-specific metrics: Bitly fallback hit rate (should decrease to zero over time), and data consistency checks comparing our redirect results with Bitly's. For alerting, I'd set up PagerDuty integration with tiered severity — redirect success rate below 99.9% is a P1, cache hit rate below 80% is a P2.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["monitoring", "alerting", "slo", "cache_hit_rate"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What about security? How do you prevent the service from being used to shorten malicious URLs?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "security" }
+    },
+    {
+      "role": "candidate",
+      "content": "A few layers. Rate limiting on URL creation — token bucket per API key. URL scanning at creation time against Google Safe Browsing API and internal blocklists. For enterprise accounts, we can allow-list destination domains. Post-creation scanning on a periodic basis since destinations can change. If a URL is flagged, we disable the redirect and show a warning page. I'd also implement CAPTCHA or proof-of-work for unauthenticated creation endpoints to prevent bot abuse.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["rate_limiting", "security", "abuse_prevention", "safe_browsing"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's zoom out. What are the top 3 risks you see with this project?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Risk one: migration data loss. If we miss URLs in the Bitly export, existing shared links break. Mitigation is the Bitly fallback layer I described, plus extensive pre-migration auditing. Risk two: underestimating the analytics engineering effort. Rebuilding what Bitly gives us out of the box for analytics will take longer than the core URL service. I'd recommend keeping Bitly's analytics running in parallel for 6 months while we build ours. Risk three: operational burden. Running a URL shortener at 50M URLs/day with 99.99% availability requires on-call, monitoring, incident response — ongoing cost that isn't captured in the initial build estimate. I'd budget for 1.5 FTE of ongoing operational support.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["risk_assessment", "migration", "operational_cost"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Would you ultimately recommend building this in-house or staying with Bitly?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": "build_vs_buy" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd recommend building, but with staged investment. Phase 1: build the core redirect service and migrate URL creation, keeping Bitly as read fallback. This can ship in 8-10 weeks. Phase 2: build the analytics pipeline over the next quarter. Phase 3: fully deprecate Bitly after 6 months of parallel running. If at any point the internal solution proves more expensive or complex than expected, we can halt and stay on Bitly for analytics while running our own redirect path. The key insight is that we don't have to replace everything at once.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["build_vs_buy", "phased_migration", "risk_mitigation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You brought a practical perspective on migration and build-vs-buy that's important at the principal level. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 8,
+      "strategic_thinking": 8
+    },
+    "strengths": [
+      "Excellent build vs buy analysis with concrete cost comparison and phased migration strategy",
+      "Pragmatic approach to monolith vs microservices — start simple, extract when needed",
+      "Strong migration plan with rollback safety nets and Bitly fallback"
+    ],
+    "weaknesses": [
+      "Initially proposed time-based partitioning that didn't help the primary access pattern — needed correction",
+      "Didn't discuss multi-region deployment or geographic distribution",
+      "Cache consistency approach was adequate but not deeply explored"
+    ]
+  }
+}

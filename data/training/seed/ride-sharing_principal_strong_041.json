@@ -1,0 +1,149 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "principal",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_041"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing platform like Uber. Riders request rides, drivers accept and complete them. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. What's the geographic scope — single city, single country, or global? What ride types — just standard rides or also shared rides, luxury tiers? What's the scale — concurrent rides, active drivers? Are we including the payment system or treating that as external? And what about regulatory requirements — different cities have different rules.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geographic_scope", "ride_types", "scale", "payment", "regulatory"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Global — 500 cities. Standard rides only. 5 million concurrent rides at peak, 2 million active drivers at any time. Payment is external but you should describe the integration. Yes, regulatory matters — discuss it as part of the design.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's a substantial scale. Let me think about the key data flows. The most latency-sensitive operation is the dispatch — matching a rider's request to a nearby available driver. Drivers send location updates continuously. And the system needs to handle a dynamic supply-demand equilibrium. Let me break this into major subsystems: dispatch/matching, location tracking, trip management, pricing, safety, and the driver onboarding pipeline. I'll start with dispatch since it's the core.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dispatch", "location_tracking", "supply_demand", "system_decomposition"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good decomposition. Walk me through the dispatch system.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "dispatch_system" }
+    },
+    {
+      "role": "candidate",
+      "content": "The dispatch system needs to answer: given a rider at location (lat, lng), find the best available driver nearby. 'Best' considers distance, estimated pickup time, driver rating, and potentially fairness (distributing rides evenly among drivers). I'd partition the world into geohash cells. A geohash encodes a geographic area into a string — longer strings mean smaller areas. For dispatch, I'd use precision level 6, which gives roughly 1.2km x 0.6km cells. Each cell maintains a list of available drivers currently in that cell. When a ride request comes in, the dispatch service identifies the rider's geohash cell, queries that cell and adjacent cells for available drivers, ranks them by ETA (computed using the routing engine), and sends a request to the top candidate. If that driver doesn't accept within 15 seconds, we fall back to the next candidate.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geohash", "spatial_indexing", "dispatch_algorithm", "eta_calculation", "driver_ranking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you partition and scale the dispatch system across 500 cities?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "dispatch_partitioning" }
+    },
+    {
+      "role": "candidate",
+      "content": "The dispatch system can be partitioned geographically. Each city — or metro area — gets its own dispatch service instance. This is natural because rides don't cross city boundaries, and the driver supply in one city is independent of another. Within a large city, I'd further partition by geohash prefix. For example, New York might have 4-6 dispatch partitions, each handling a section of the city. The partition boundary doesn't prevent cross-boundary matching — we always query adjacent cells, so a rider near a boundary can be matched with a driver across it. This partitioning also aligns well with how we deploy infrastructure: each major city gets regional infrastructure (compute, caches, databases) to minimize latency. Smaller cities can share regional infrastructure.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geographic_partitioning", "city_level_dispatch", "cross_boundary_matching", "regional_infrastructure"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "2 million active drivers sending location updates. What's the write load and how do you handle it?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "location_tracking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Drivers send GPS updates every 4 seconds. 2 million drivers times updates every 4 seconds is 500,000 location writes per second. Each update is small — driver ID, lat, lng, timestamp, heading, speed — maybe 100 bytes. The location service needs to handle 500K writes/sec and also support spatial queries for dispatch. I'd use a two-tier approach. The hot tier is an in-memory spatial index — Redis with geospatial commands (GEOADD, GEOSEARCH) or a custom in-memory grid. This supports the dispatch queries with sub-millisecond latency. The cold tier writes all location events to Kafka for downstream consumers: trip tracking, ETA recalculation, historical analytics, and the ML pipeline for demand prediction. The in-memory store only keeps the latest location per driver — we don't need history there.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["location_qps", "spatial_index", "redis_geospatial", "two_tier_storage", "kafka_streaming"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. Tell me about the driver onboarding pipeline.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "driver_onboarding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Driver onboarding is a multi-step async pipeline. The driver submits: personal identity documents, driver's license, vehicle registration, insurance proof, and in some cities, additional certifications (like a TLC license in NYC). Each document goes through verification — a combination of automated checks (OCR to extract data, check expiration dates, validate against government databases) and manual review for edge cases. Background checks run through a third-party service (like Checkr) and can take days. The pipeline has a state machine per driver: application submitted, documents under review, background check pending, background check complete, approved, or rejected. Each stage can progress independently — we don't wait for the background check to start document verification. The driver can see their progress in the app. Crucially, the pipeline must be idempotent — if a step fails and retries, it shouldn't create duplicate applications.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["onboarding_pipeline", "document_verification", "background_checks", "state_machine", "idempotency", "async_processing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now let's talk about safety. What safety features does the system need?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "safety_features" }
+    },
+    {
+      "role": "candidate",
+      "content": "Safety is multi-layered. Pre-trip: the rider and driver see each other's names, photos, and ratings. The rider gets the car make, model, color, and license plate for verification. The app shows a trip-sharing feature — the rider can share their real-time trip status with trusted contacts who can follow the car on a map. During the trip: an in-app emergency button that with one tap calls local emergency services and shares the rider's GPS location. The system also monitors for anomalies — did the trip deviate significantly from the expected route? Has the car been stopped for an unusually long time? These trigger automatic check-in prompts. Post-trip: both rider and driver rate each other. Low-rated drivers get reviewed. Reports of unsafe behavior trigger immediate investigation. From an infrastructure perspective, the safety service needs to be highly available — the emergency button must work even if other services are degraded. I'd run it as an independent service with its own redundancy, separate from the main ride management system.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["trip_sharing", "emergency_button", "anomaly_detection", "route_deviation", "safety_service_isolation", "high_availability"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about regulatory compliance. You mentioned different cities have different rules.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "regulatory_compliance" }
+    },
+    {
+      "role": "candidate",
+      "content": "Regulatory compliance is one of the hardest parts of a global ride-sharing platform. Different jurisdictions require different things: driver licensing requirements vary by city — NYC needs TLC, London needs a PCO license. Some cities cap the number of ride-share vehicles or enforce minimum fares. Data residency laws in the EU (GDPR) and other regions require that rider data stays within certain boundaries. Some cities mandate data sharing — trip data reported to transportation authorities. Architecturally, I'd model regulations as a configuration layer. Each city has a regulatory profile that affects: which driver documents are required (onboarding pipeline), minimum fare rules (pricing engine), data handling (which database region stores what), and operating hours. The pricing engine, dispatch rules, and data pipeline all read from this regulatory config. When we launch in a new city, the operations team configures the regulatory profile before go-live. Changes to regulations trigger a config update, not a code deployment.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["regulatory_compliance", "data_residency", "gdpr", "regulatory_config", "city_profiles"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the pricing engine work? Specifically surge pricing.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "pricing_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "The pricing engine has two components: base fare calculation and dynamic pricing (surge). Base fare is straightforward: base fee + per-mile rate + per-minute rate, computed from the routing engine's estimated distance and duration. Dynamic pricing is more interesting. It's driven by supply-demand imbalance at a local level. The system tracks, per geohash cell, the ratio of ride requests to available drivers. When demand exceeds supply beyond a threshold, a surge multiplier kicks in. The multiplier is calculated based on the severity of the imbalance — maybe 1.2x for mild, up to 3x for severe. The goal is to incentivize more drivers to move to that area and to reduce demand slightly through higher prices. The pricing service needs to be fast — it's called during ride request before the rider confirms. I'd cache the current surge multiplier per cell in Redis, updated every 30 seconds by a pricing computation service that aggregates supply-demand signals from the dispatch system.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["base_fare", "surge_pricing", "supply_demand_balance", "geohash_pricing", "real_time_pricing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What about trip management — the state machine for a ride from request to completion?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "trip_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "A trip goes through these states: requested (rider submitted), matched (driver assigned), driver_en_route (driver heading to pickup), arrived (driver at pickup location), trip_started (rider in car, heading to destination), trip_completed (arrived at destination), and payment_processed. Any state can also transition to cancelled — by the rider or the driver, with different penalty rules depending on the timing. The trip service is the state machine owner. Each state transition is persisted as an event — event sourcing pattern — so we have a complete audit trail. The trip service publishes state change events to Kafka, consumed by: the notification service (push notifications to rider/driver), the payment service (triggers charge on trip_completed), the analytics pipeline, and the safety service.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["trip_state_machine", "event_sourcing", "state_transitions", "event_driven_architecture", "audit_trail"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost out of time. Any final considerations?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three things. First, the payment integration: we hold the rider's payment method authorization at ride request time and only capture on completion. Disputes and refunds need a dedicated workflow. Second, analytics and demand prediction: historical trip data feeds ML models that predict demand by time and location, informing driver positioning suggestions and proactive surge pricing. Third, disaster recovery: each city's dispatch system needs to fail over independently. A data center outage in one region shouldn't affect cities in another region. I'd design for regional isolation with cross-region replication for account data only.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payment_integration", "demand_prediction", "disaster_recovery", "regional_isolation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Outstanding interview. You covered the full breadth of a ride-sharing system with depth in each area — dispatch, safety, regulation, and pricing. Exactly what I'd expect at the principal level. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 84,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 8,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Excellent dispatch system design with geohash-based partitioning and concrete scaling math",
+      "Comprehensive safety features discussion with architectural isolation of safety services",
+      "Mature understanding of regulatory compliance as a configuration problem, not a code problem"
+    ],
+    "weaknesses": [
+      "Could have discussed ETA calculation algorithms in more depth",
+      "Payment integration was left to the wrap-up — deserved more discussion"
+    ]
+  }
+}

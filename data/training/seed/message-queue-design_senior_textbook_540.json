@@ -1,0 +1,152 @@
+{
+  "metadata": {
+    "problem_id": "message-queue-design",
+    "level": "senior",
+    "candidate_profile": "textbook_no_experience",
+    "total_exchanges": 22,
+    "generation_id": "seed_540"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a distributed message queue like Kafka. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd like to understand the throughput requirements, delivery guarantee semantics (at-most-once, at-least-once, or exactly-once), message ordering guarantees, retention period, and the expected message size distribution.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["throughput", "delivery_semantics", "ordering", "retention", "message_size"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "5M messages/sec, at-least-once with exactly-once option, per-partition ordering, 7-day retention, average 1KB messages. Design the system.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "The core data structure is an append-only commit log, partitioned across multiple brokers. Each partition is an ordered, immutable sequence of messages. Producers publish to partitions based on a hash of the message key, ensuring messages with the same key always land in the same partition — this provides per-key ordering. Consumers read sequentially from partitions, maintaining an offset that represents their position in the log. Consumer groups enable parallel consumption: partitions are assigned to consumers in the group such that each partition is consumed by exactly one consumer, providing both parallelism and ordering guarantees.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["append_only_log", "commit_log", "partitioning", "key_hashing", "ordering", "offset", "consumer_groups", "partition_assignment"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Textbook Kafka description. Now a production question: your cluster is running fine, then you notice consumer lag growing on a critical topic. It was at 0, now it's at 500K messages and climbing. What do you do?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "consumer_lag" }
+    },
+    {
+      "role": "candidate",
+      "content": "Consumer lag growing means the consumer can't keep up with the producer rate. Possible causes: the consumer's processing logic is slow (maybe a downstream database is slow), the consumer has insufficient parallelism (fewer consumers than partitions), or the producer rate spiked. To fix: add more consumers to the consumer group (up to the partition count). If already at max, increase partitions — but that requires rebalancing. If processing is the bottleneck, optimize the consumer's code or batch processing.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["consumer_lag_causes", "slow_processing", "insufficient_parallelism", "producer_spike", "add_consumers", "increase_partitions", "batch_processing"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good theoretical causes. But in production, you need to diagnose which one it is. What metrics would you check, and in what order?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "production_diagnosis" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd check... the producer rate first — has it spiked? Look at messages-per-second on the topic. Then consumer throughput — messages-processed-per-second per consumer. If producer rate is stable and consumer throughput dropped, the problem is on the consumer side. Then check the consumer's downstream dependencies — database latency, external API response times. And check if a consumer group rebalance happened — rebalances pause all consumption and can cause lag spikes. I'd also check if one partition is hot — if all messages are going to one partition due to a bad key distribution, one consumer is overloaded while others are idle. Honestly though, I'm reasoning from first principles here — I haven't actually debugged Kafka consumer lag in production.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["producer_rate", "consumer_throughput", "downstream_latency", "rebalance_pause", "hot_partition", "key_distribution"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good diagnostic reasoning even without production experience. Let's go deeper on the storage engine. How does the append-only log work on disk?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "storage_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each partition is stored as a sequence of segment files on disk. Each segment is a fixed-size file — typically 1GB. Messages are appended to the active segment. When it reaches the size limit, it's closed (becomes immutable) and a new active segment is opened. Each segment has an associated index file that maps offsets to byte positions within the segment for fast lookups. Reads are sequential: the consumer provides an offset, we use the index to find the byte position, then read sequentially from there. This is efficient because modern disks (both HDD and SSD) have excellent sequential read throughput. For retention: a background thread deletes segment files whose latest message timestamp is older than 7 days.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["segment_files", "fixed_size", "active_segment", "offset_index", "sequential_reads", "retention_deletion"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good description. Now a production scenario: you're getting latency spikes every few hours. P50 is fine at 5ms but P99 jumps to 200ms periodically. What could cause this?",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "latency_spikes" }
+    },
+    {
+      "role": "candidate",
+      "content": "Periodic P99 spikes... could be garbage collection pauses on the JVM? Kafka is Java-based and GC can cause stop-the-world pauses. Or could it be related to log segment rolling — when the active segment fills up and a new one is created? Or maybe disk I/O contention from log compaction or segment cleanup running in the background. In theory, any background process that competes for disk I/O or CPU could cause spikes. But I'm not sure how to diagnose which one without looking at the actual metrics — GC logs, I/O utilization, compaction timing.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["gc_pauses", "jvm", "segment_rolling", "disk_io_contention", "compaction"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "All of those are valid production causes. GC tuning and compaction scheduling are the most common. The fact that you identified the right categories is good even without hands-on experience. How does replication work?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each partition has a configurable replication factor N (typically 3). One replica is the leader, the rest are followers. All reads and writes go through the leader. Followers continuously fetch from the leader's log to stay in sync. The set of caught-up followers is called the ISR — in-sync replica set. A follower is 'in-sync' if it's within a configurable lag threshold. With acks=all, the producer's write is acknowledged only after all ISR members have replicated it. This ensures that any ISR member can take over as leader without data loss. If the leader fails, the controller (a specially designated broker) elects a new leader from the ISR.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["replication_factor", "leader_follower", "fetch_replication", "isr", "lag_threshold", "acks_all", "leader_election", "controller"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if ISR shrinks to just the leader because both followers are down? A producer with acks=all writes a message — only the leader has it. Then the leader crashes.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "data_loss_scenario" }
+    },
+    {
+      "role": "candidate",
+      "content": "If ISR is just the leader and the leader crashes, that message is lost — it was only on one machine and that machine is gone. This is prevented by min.insync.replicas. Set it to 2: if ISR drops below 2 members, the broker rejects writes rather than accepting them without sufficient durability. The producer gets a NotEnoughReplicas error. It's a choice: reject the write and preserve durability, or accept it and risk data loss. For critical data, always set min.insync.replicas ≥ 2.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["data_loss", "min_insync_replicas", "write_rejection", "durability_vs_availability"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does exactly-once delivery work?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "exactly_once" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two components. Producer idempotency: each producer is assigned a unique producer ID. Each message gets a monotonically increasing sequence number per partition. The broker tracks the latest sequence per (producer_id, partition). If a message arrives with a sequence number the broker has already seen, it's a duplicate and discarded. This handles network retry duplicates. Transactional API: for read-process-write patterns, a producer can atomically write to multiple output partitions and commit input offsets in one transaction. The broker implements this with a two-phase commit: prepare markers are written to the output partitions, then a commit marker makes them visible to consumers. Consumers configured with isolation.level=read_committed only see committed messages.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["producer_idempotency", "producer_id", "sequence_number", "deduplication", "transactional_api", "two_phase_commit", "prepare_commit_markers", "read_committed_isolation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good protocol knowledge. Production question: you deploy the transactional API and a consumer starts seeing messages appear out of order. What went wrong?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "transaction_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Out-of-order with transactions... I'm not sure. Maybe the consumer isn't configured with read_committed isolation? With read_uncommitted (the default), it sees prepare markers and uncommitted data, which could appear out of order if transactions commit in a different order than they started. Or maybe there are multiple producers writing to the same partition with different transaction IDs, and their interleaved prepare/commit markers create apparent reordering. I'm speculating here — this is the kind of issue I'd need to look at the Kafka documentation to debug.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["isolation_level_misconfiguration", "multiple_producers", "interleaved_transactions"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The read_committed isolation hint is likely correct — that's the most common misconfiguration. We're out of time. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Monitoring: consumer lag, under-replicated partitions, and request latency percentiles. Log compaction as an alternative to time-based retention for changelog topics. Schema management with a schema registry for backward-compatible evolution. And quotas per producer/consumer to prevent resource exhaustion.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["monitoring", "log_compaction", "schema_registry", "quotas"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good coverage. Your theoretical knowledge is strong — replication, exactly-once, and storage engine were well-explained. The gap shows in production scenarios: consumer lag diagnosis, latency spike debugging, and transaction ordering issues. That's the textbook-to-production gap. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 56,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 4,
+      "api_design": 5,
+      "database_design": 7,
+      "caching_strategy": 4,
+      "scalability": 6,
+      "failure_handling": 5,
+      "communication": 6
+    },
+    "strengths": [
+      "Clean textbook knowledge of Kafka internals — segment files, ISR, exactly-once protocol",
+      "Good min.insync.replicas explanation with clear durability-vs-availability trade-off",
+      "Reasonable diagnostic reasoning for consumer lag despite no production experience"
+    ],
+    "weaknesses": [
+      "Every production scenario exposed knowledge gaps — consumer lag diagnosis, P99 spikes, and transaction ordering all got uncertain answers",
+      "No capacity estimation — didn't calculate broker count, storage, or network requirements",
+      "Latency spike diagnosis was a guess list rather than a structured runbook",
+      "Couldn't debug the transaction ordering issue — admitted needing documentation",
+      "No discussion of page cache, zero-copy, or why Kafka achieves high throughput"
+    ]
+  }
+}

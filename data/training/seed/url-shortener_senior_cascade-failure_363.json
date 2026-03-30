@@ -1,0 +1,180 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "senior",
+    "candidate_profile": "cascade-failure",
+    "total_exchanges": 22,
+    "generation_id": "seed_363"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service. But today I want to focus on resilience — specifically, what happens when things go wrong in a chain reaction. Let's start with the basics though: what are your assumptions about scale?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "failure_cascading" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. I'll assume 100 million URLs created per day, so roughly 1,150 writes per second. With a 100:1 read ratio, that's about 115K redirect reads per second. We'll need Redis for caching, a sharded database layer, and load balancers in front of app servers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "redis_caching"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's jump straight to the scenario I want to explore. It's 2 AM. Your Redis cluster dies — total failure, all nodes. Walk me through what happens next in your system, second by second.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, so Redis dies at T+0. All 115K reads per second that were being served by cache now become cache misses. The app servers detect the Redis connection failure — hopefully within a few hundred milliseconds via health checks or connection timeouts. But those requests still need to be served, so they all fall through to the database.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cache_failure", "thundering_herd"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right. So now 115K reads per second are hitting your database directly. What happens to your database?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "database_overload" }
+    },
+    {
+      "role": "candidate",
+      "content": "The database is provisioned to handle maybe 10-15K reads per second across the read replicas — that's what leaks through cache misses normally. Now it's getting 10x that load. Connection pools fill up within seconds. Queries start queuing. Response times go from 5ms to 500ms, then to 5 seconds. The database starts rejecting new connections as it hits max_connections limits.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_overload", "connection_pooling", "latency_spike"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now the database is drowning. What happens to your app servers while they're waiting for those slow database responses?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "thread_exhaustion" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each app server has a thread pool or connection pool — say 200 worker threads. If each request is now waiting 5 seconds for a database response instead of 5ms, the throughput drops from 40K requests per second per server to 40. Worker threads are all blocked waiting on DB responses. The request queue on each app server fills up. New incoming requests start getting queued at the OS level, then eventually time out or get rejected.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["thread_exhaustion", "connection_pooling", "backpressure"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now your app servers are unresponsive. What does the load balancer see?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "health_check_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The load balancer runs health checks — typically an HTTP endpoint like /health every 5-10 seconds. When the app server can't even process the health check request because all its threads are blocked, the health check times out. After 2-3 consecutive failures, the load balancer marks that server as unhealthy and removes it from the pool. But here's the problem — it's happening to ALL app servers simultaneously because they're all hitting the same dead Redis and overwhelmed database.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["health_check_failure", "load_balancing", "cascading_failure"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly. So the load balancer starts pulling servers out of rotation. Maybe it keeps 2 out of 10 that happen to respond to the health check. What happens to those 2 remaining servers?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "cascading_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Those 2 servers now receive ALL the traffic that was previously spread across 10. They were already struggling, and now they get 5x more traffic. They die even faster — maybe within 30 seconds. Then the load balancer has zero healthy backends. Depending on configuration, it either returns 502/503 to all users or — even worse — some load balancers will add servers back into the pool once they start recovering, only for them to be immediately overwhelmed again. You get a flapping cycle.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cascading_failure", "load_shedding", "thundering_herd"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've described the cascade perfectly: Redis dies, DB overwhelmed, app servers queue up, health checks fail, remaining servers die. Total outage. Now — how do you design the system to prevent this cascade?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "resilience_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "The key is breaking the chain at multiple points. First layer: Redis resilience. Run Redis Cluster with at least 3 masters and 3 replicas across availability zones. If a master fails, the replica promotes automatically. A total Redis failure is much less likely. Second layer: circuit breakers. If Redis is down, don't let all traffic hit the DB. The circuit breaker trips open after a few failures — say 50% error rate over 10 seconds — and subsequent requests get a fast failure or a stale cached response from a local in-process cache.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_cluster", "circuit_breaker", "local_cache"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good start. But what about protecting the database itself? Even with a circuit breaker, some traffic will still get through.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "database_protection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, the DB needs its own protections. First, connection pooling with hard limits — use PgBouncer or similar, and cap at the number of connections the DB can actually handle, say 500. Any request beyond that gets a fast rejection rather than queuing indefinitely. Second, I'd implement request-level timeouts — if the DB doesn't respond in 200ms, abort and return an error. This prevents thread exhaustion on the app server. Third, read replicas with their own connection pools so we can independently scale read capacity.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["connection_pooling", "database_protection", "read_replicas", "timeout_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned returning errors. But users are trying to access shortened URLs — they need redirects, not error pages. How do you degrade gracefully?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "graceful_degradation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fair point. A few strategies. First, a local in-process cache — each app server maintains an LRU cache of the top 100K URLs. That covers maybe 80% of traffic by the Pareto principle. This cache survives even when Redis is completely down. Second, for URLs not in any cache, we could serve a temporary redirect to a 'please try again in a moment' page — not great, but better than a raw 503. Third, if we can afford the storage, we could pre-compute a static file of the top 1M URL mappings and serve them from disk or even the CDN as a last resort.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["graceful_degradation", "local_cache", "cdn_redirect"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now let's talk about the health check problem. How do you prevent the load balancer from making things worse by pulling servers out?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "health_check_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "The health check endpoint should be lightweight and not depend on downstream services. Instead of checking 'can I reach Redis and the DB', it should just confirm 'is this process alive and can it accept connections'. A simple 200 OK response. That way, even if Redis and the DB are down, the app server stays in the load balancer pool and can serve from local cache or return graceful errors. I'd add a separate deep health check endpoint for monitoring dashboards that checks all dependencies, but the load balancer should use the shallow one.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["health_check_design", "shallow_health_check", "monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good distinction between shallow and deep health checks. What about load shedding? If the system is overwhelmed, how do you decide what to drop?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "load_shedding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Load shedding should prioritize redirect reads over URL creation writes, since reads are the core user experience. I'd implement an adaptive concurrency limiter — something like Netflix's concurrency-limits library. It measures request latency and automatically reduces the number of in-flight requests when latency increases. Requests beyond the limit get an immediate 503. For writes, I'd queue them in Kafka and process them asynchronously, returning a 202 Accepted. That way, the write path doesn't compete with reads for database connections.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["load_shedding", "adaptive_concurrency", "priority_queuing", "kafka"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's say despite all these protections, you still have a cascade event. You're paged at 2 AM. Walk me through your recovery procedure.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "incident_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step one: reduce inbound traffic. If we have a CDN layer, increase its cache TTLs to hold more at the edge. If we can, enable rate limiting at the load balancer level to cap requests to what the system can handle without Redis. Step two: bring Redis back. If nodes crashed, restart them. The cache will be cold, so don't just open the floodgates — use a warming script to preload the top URLs from the database before accepting full traffic. Step three: gradually increase allowed traffic. Don't go from rate-limited to full open all at once. Ramp up over 10-15 minutes while monitoring DB and Redis metrics.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["incident_recovery", "cache_warming", "rate_limiting", "gradual_ramp"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about cold cache stampede during recovery? As Redis comes back, isn't it empty?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "cache_warming" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes, exactly. That's why the warming script is critical. Before switching traffic back to Redis, we preload the cache with the top URLs — we can identify them from analytics data or recent access logs. I'd also implement request coalescing: if 1,000 requests come in for the same URL while the cache is being populated, only one request goes to the database, and the other 999 wait for that single response. Libraries like groupcache or singleflight in Go implement this pattern. It dramatically reduces the DB load during cache warming.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_warming", "request_coalescing", "singleflight"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Last question — how do you test for cascading failures before they happen in production?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "chaos_engineering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Chaos engineering. I'd run regular game days where we intentionally kill Redis in a staging environment and verify that circuit breakers, local caches, and load shedding all work as expected. We can use tools like Chaos Monkey or Gremlin. We should also do this in production — in a controlled way — during low-traffic periods. Kill a single Redis node and measure the blast radius. If the cascade starts, we know our protections aren't strong enough. We should also set up dashboards that track the cascade indicators: cache hit rate, DB connection pool utilization, app server thread pool exhaustion, and health check failure rates.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["chaos_engineering", "monitoring", "game_days"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You did a solid job tracing the cascade and proposing mitigations, though I'd have liked to see more depth on the database protection layer and some of the trade-offs around fail-open vs fail-closed. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 70,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent sequential reasoning through the cascade failure chain",
+      "Strong understanding of circuit breakers and request coalescing",
+      "Good distinction between shallow and deep health checks"
+    ],
+    "weaknesses": [
+      "Database protection strategies were somewhat surface-level — missing adaptive query prioritization",
+      "Didn't discuss fail-open vs fail-closed trade-offs explicitly",
+      "Recovery procedure lacked specific runbook details like rollback triggers"
+    ]
+  }
+}

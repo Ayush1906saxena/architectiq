@@ -1,0 +1,172 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "staff",
+    "candidate_profile": "struggling",
+    "total_exchanges": 22,
+    "generation_id": "seed_022"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design the Twitter news feed — the home timeline that shows tweets from people you follow, in chronological order. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Let me clarify a few things. How many users are we designing for? What's the average number of followers per user? Do we need to support media attachments or just text? And are we including algorithmic ranking or strictly chronological?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["requirements_gathering", "scale"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500 million users, 200 million daily active. Average user follows 200 people. Text and media. Chronological for now — we can discuss ranking later. Walk me through your design.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay. So when a user posts a tweet, the most efficient approach is fan-out on write. When user A posts a tweet, we immediately push that tweet ID into the home timeline cache of every follower of user A. That way, when any follower opens their feed, the timeline is pre-computed — just read from cache. Each user's timeline is a sorted list in Redis, sorted by timestamp. For posting: user tweets, we look up their follower list, and for each follower, we LPUSH the tweet ID into their timeline list in Redis.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fan_out_on_write", "redis_caching", "timeline_precomputation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting. Let's think about a specific scenario. A celebrity — say someone with 50 million followers — posts a tweet. Walk me through what happens with your fan-out on write approach.",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "fan_out_on_write" }
+    },
+    {
+      "role": "candidate",
+      "content": "So when a celebrity with 50 million followers posts... we'd need to push that tweet into 50 million timeline caches. That's... 50 million Redis writes for a single tweet. At even 100K writes per second, that takes 500 seconds — over 8 minutes. During those 8 minutes, some followers see the tweet and others don't. That's a problem.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fan_out_on_write", "hot_user", "write_amplification"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right, that's the classic hot user problem. How would you solve it?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "hot_user" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm. We could... maybe use more Redis instances to parallelize the writes? Like shard the follower list and write to multiple Redis clusters simultaneously? That might get it down to under a minute.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["sharding_strategy"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Even at 1 million writes per second, that's still 50 seconds for a single tweet. And celebrities tweet multiple times per hour. The write amplification is the fundamental problem — can you think of a different approach for these users?",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "fan_out_on_read" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right... so the write amplification is too high for high-follower accounts. What if we... batch the writes? Like, instead of pushing immediately, we queue them and process them over time? The timeline would be eventually consistent.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["eventual_consistency", "batching"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That just makes the 8-minute delay intentional. The core issue is: should a celebrity's tweet be pushed to followers at all, or should it be pulled when the follower loads their feed?",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "fan_out_on_read" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh — you mean fan-out on read? Instead of pushing the tweet to all followers, when a user loads their timeline, we pull tweets from the celebrities they follow at read time? So the work happens at read time instead of write time?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["fan_out_on_read"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right. But pure fan-out on read has its own problem — if a user follows 200 people, you'd need to fetch and merge tweets from 200 different sources on every timeline load. That's slow. Can you think of a way to combine both approaches?",
+      "annotation": { "action": "guide", "phase": "deep_dive", "target_concept": "hybrid_fanout" }
+    },
+    {
+      "role": "candidate",
+      "content": "A hybrid? So... for normal users with under some threshold of followers — say 10,000 — we do fan-out on write. For celebrities above that threshold, we don't fan out their tweets. Then at read time, we take the user's pre-computed timeline from the fan-out on write, and then also fetch recent tweets from the celebrities they follow, and merge them together?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["hybrid_fanout", "fan_out_on_write", "fan_out_on_read"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's the hybrid approach Twitter actually uses. Good. Now, the merge at read time — how do you do that efficiently? If a user follows 5 celebrities, you need to fetch and merge 5 lists with the pre-computed timeline.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "hybrid_fanout" }
+    },
+    {
+      "role": "candidate",
+      "content": "So the pre-computed timeline is already sorted by timestamp in Redis. The celebrity tweets... we'd cache each celebrity's recent tweets in a separate Redis sorted set. At read time, we fetch the user's pre-computed timeline plus each celebrity's recent tweets. Then we do a k-way merge — like merge sort on k sorted lists — to combine them in chronological order. With only 5-10 celebrity lists to merge, this should be fast, maybe a few milliseconds.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["k_way_merge", "redis_caching", "timeline_merge"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about the storage layer. Where do you store the actual tweet data?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "The tweets themselves go in a database — I'd use something like MySQL or Postgres sharded by tweet_id. The tweet table has tweet_id, user_id, content, created_at, media_urls. The Redis timelines only store tweet_ids, not full tweet data — so when rendering a timeline, we fetch the list of tweet_ids from Redis, then batch-fetch the full tweet objects from the database. We'd also cache hot tweets in a separate cache layer to avoid database hits for popular tweets.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["database_choice", "sharding_strategy", "database_schema", "caching"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How about the social graph — how do you store and query who follows whom?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "social_graph" }
+    },
+    {
+      "role": "candidate",
+      "content": "The follows relationship is stored in a database — follows table with follower_id and followee_id. For the fan-out on write, when a user tweets, we need to look up all their followers. With an index on followee_id, that's a range scan. For users with millions of followers, we'd cache the follower list. Actually, for the 50M follower celebrity, we probably wouldn't even cache the full list — we don't need it since we don't fan out. We only need follower lists for non-celebrity users.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["social_graph", "database_schema", "indexing", "caching"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good insight. Let's talk about failures. What happens if the fan-out worker crashes midway through distributing a tweet?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "fan_out_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the fan-out worker crashes after pushing to some followers but not others, some users see the tweet and some don't. Hmm... I'm honestly not sure of the best way to handle this. We could track progress — like a cursor showing which followers we've processed — and resume from there. Store the cursor in the task queue alongside the tweet ID.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["failure_recovery", "cursor", "task_queue"], "depth": "shallow", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That works. Using a message queue like Kafka with offsets would give you that cursor naturally — if the consumer crashes, it resumes from the last committed offset. The fan-out tasks could be partitioned by followee_id ranges. What about cache eviction — how do you keep timeline caches from growing unbounded?",
+      "annotation": { "action": "teach", "phase": "scaling_failures", "target_concept": "cache_eviction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, each user's timeline list in Redis would be capped — LTRIM to keep only the most recent 800 tweet IDs, since that's more than most users would scroll through. For users who haven't opened the app in weeks, their timeline cache would be empty or expired — we'd rebuild it on demand by fetching recent tweets from the accounts they follow.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cache_eviction", "redis_caching", "timeline_rebuild"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's wrap up. What are the biggest technical risks in this design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The biggest risk is the Redis memory cost — storing pre-computed timelines for 200 million daily active users. At 800 tweet IDs per timeline, 8 bytes each, that's about 1.3TB of Redis memory. That's expensive but feasible with a large cluster. The second risk is the fan-out lag for semi-popular accounts — someone with 500K followers is below the celebrity threshold but still takes 5 seconds to fan out. We might need to tune the threshold dynamically. Third risk is cache cold starts for returning users — rebuilding a timeline from scratch is expensive.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["capacity_estimation", "cache_cold_start", "threshold_tuning"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good analysis. Thank you for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 42,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 5,
+      "api_design": 4,
+      "database_design": 5,
+      "caching_strategy": 5,
+      "scalability": 4,
+      "failure_handling": 3,
+      "communication": 5
+    },
+    "strengths": [
+      "Identified the write amplification problem with fan-out on write for celebrities with correct math",
+      "Good understanding of timeline caching with Redis sorted sets and LTRIM",
+      "Decent capacity estimation for Redis memory in the wrap-up"
+    ],
+    "weaknesses": [
+      "Got stuck on the celebrity problem for 3 exchanges — couldn't arrive at hybrid approach without significant guidance",
+      "For staff level, should have known the hybrid fan-out pattern from the start",
+      "Weak on failure handling — couldn't articulate a fan-out recovery strategy",
+      "Didn't discuss API design, pagination, or timeline ranking at all",
+      "No discussion of trending topics, search, or any features beyond basic timeline"
+    ]
+  }
+}

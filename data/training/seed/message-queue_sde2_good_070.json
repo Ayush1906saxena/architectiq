@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "message-queue",
+    "level": "sde2",
+    "candidate_profile": "good",
+    "total_exchanges": 20,
+    "generation_id": "seed_070"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed message queue — something like Kafka. What questions do you have to start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. First, what's the expected throughput — messages per second? What's the average message size? And do we need message ordering guarantees?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["throughput", "message_size", "ordering"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Throughput: 100,000 messages per second. Average message size: 1KB. We need ordering within a topic. Messages should be durable — no data loss. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "What's the retention policy — how long do we keep messages? And do we need exactly-once delivery or is at-least-once acceptable? Also, how many producers and consumers are we expecting?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["retention", "delivery_semantics", "producers_consumers"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Retain messages for 7 days. At-least-once delivery is fine. Maybe 50 producer services and 100 consumer services, with multiple instances of each. Let's start designing.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the core concepts. A topic is a logical channel for messages — like 'order-events' or 'user-activity'. Producers send messages to a topic, and consumers read from it. Multiple consumer groups can independently read the same topic. Each consumer group tracks its own position, so different applications can process the same messages at their own pace.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["topics", "producers", "consumers", "consumer_groups"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How does a topic store its messages? Walk me through the storage model.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "storage_model" }
+    },
+    {
+      "role": "candidate",
+      "content": "A topic is basically an append-only log. New messages are appended to the end, and each message gets a sequential offset — like an auto-incrementing ID. Consumers track their position by offset. To read, a consumer says 'give me messages starting from offset 5000'. The log is stored on disk as a series of segment files. When a segment reaches a size limit, say 1GB, we start a new one. Old segments beyond the 7-day retention window are deleted. Disk storage is actually efficient for this — sequential writes are fast even on spinning disks, and the OS page cache handles reads of recent data.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["append_only_log", "offsets", "segment_files", "sequential_io"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice. Let me do a quick storage calculation with you. 100K messages/sec at 1KB each, retained for 7 days. How much storage do we need?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "100K messages per second times 1KB is 100MB per second. Per day that's about 8.6TB. Over 7 days, about 60TB. With replication — let's say 3 replicas — that's 180TB total. We'd need a decent-sized cluster. If each broker has 10TB of disk, we'd need at least 18 brokers just for storage.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["capacity_estimation", "replication", "cluster_sizing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. You mentioned 18 brokers. Walk me through the high-level architecture — what components exist in this system?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "system_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "The main components: Brokers — these are the servers that store and serve messages. Each broker handles a portion of the topics. A metadata service — this stores the topic configuration, partition assignments, and consumer group offsets. This could be ZooKeeper like Kafka uses, or a built-in consensus protocol. Producers — client libraries that send messages to the appropriate broker. Consumers — client libraries that pull messages from brokers and track offsets.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["brokers", "metadata_service", "zookeeper", "client_libraries"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does a producer know which broker to send a message to?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_routing" }
+    },
+    {
+      "role": "candidate",
+      "content": "The producer fetches metadata from the metadata service — this tells it which broker is the leader for each topic. For a simple design, each topic has one leader broker that accepts all writes for that topic. The producer hashes the message key to determine the topic, then looks up the leader. If there's no message key, it round-robins across topics to distribute load. The metadata is cached on the producer side and refreshed periodically or when a send fails.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["leader_election", "message_routing", "metadata_caching"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You said each topic has one leader broker. With 100K messages per second, could one broker handle all writes for a high-traffic topic?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "partitioning" }
+    },
+    {
+      "role": "candidate",
+      "content": "You're right, that could be a bottleneck for popular topics. In Kafka, the solution is partitions — a topic is split into multiple partitions, and each partition has its own leader broker. So a topic with 10 partitions can spread writes across 10 brokers. The producer determines which partition a message goes to — usually by hashing the message key. Messages within a partition are ordered, but across partitions there's no global ordering. That's the trade-off for parallelism.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["partitioning", "partition_ordering", "parallelism"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How does replication work? You mentioned 3 replicas earlier.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each partition has a leader and 2 follower replicas on different brokers. The producer sends messages to the leader. The leader writes to its local log, then the followers pull the messages from the leader and write to their own logs. For durability, the producer can wait for different acknowledgment levels: ack=0 means fire-and-forget (fastest, might lose data), ack=1 means wait for the leader to write (good balance), ack=all means wait for all replicas to confirm (safest, slower). Since we need no data loss, I'd use ack=all for the default.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["replication", "leader_follower", "ack_levels", "durability"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if a leader broker dies?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "leader_election" }
+    },
+    {
+      "role": "candidate",
+      "content": "The metadata service detects the broker failure through heartbeats. It then elects a new leader for each partition that was on the dead broker — typically the most up-to-date follower becomes the new leader. Producers and consumers get notified of the new leader through metadata refresh. There's a brief period of unavailability for those partitions during the election — maybe a few seconds. Consumers that were reading from followers can switch to the new leader. The key thing is that no data is lost because ack=all ensures messages are on all replicas before being acknowledged.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["leader_election", "failure_detection", "availability_gap"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does a consumer group coordinate which consumer reads which partition?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "consumer_coordination" }
+    },
+    {
+      "role": "candidate",
+      "content": "Within a consumer group, each partition is assigned to exactly one consumer — so if a topic has 10 partitions and the consumer group has 5 consumers, each consumer handles 2 partitions. The assignment is coordinated through the metadata service. When a consumer joins or leaves the group, a rebalance happens — partitions are redistributed among the remaining consumers. Each consumer periodically commits its offset for each partition — so if it crashes, the new owner of that partition picks up where it left off.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["partition_assignment", "rebalancing", "offset_commit"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost out of time. Any final additions to the design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. Message compression — at 100MB/s, compressing messages with snappy or lz4 could cut bandwidth and storage by 50-70%. Batching on the producer side — instead of sending one message at a time, batch messages and send them together for better throughput. And I'd add monitoring: consumer lag (how far behind consumers are), broker disk usage, and replication lag between leader and followers.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["compression", "batching", "monitoring", "consumer_lag"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid design. You understand the core pub-sub concepts well and covered the fundamentals of partitioning, replication, and consumer coordination. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 58,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 6,
+      "caching_strategy": 4,
+      "scalability": 6,
+      "failure_handling": 6,
+      "communication": 7
+    },
+    "strengths": [
+      "Solid understanding of core pub-sub concepts: topics, partitions, consumer groups",
+      "Good capacity estimation — computed storage requirements with replication",
+      "Understood replication and acknowledgment trade-offs"
+    ],
+    "weaknesses": [
+      "Didn't discuss partitioning proactively — needed prompting to realize single-leader bottleneck",
+      "No discussion of exactly-once semantics or deduplication",
+      "Limited depth on failure scenarios — didn't cover split-brain or data consistency during failover"
+    ]
+  }
+}

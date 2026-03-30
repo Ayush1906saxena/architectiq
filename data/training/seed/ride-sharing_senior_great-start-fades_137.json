@@ -1,0 +1,184 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "senior",
+    "candidate_profile": "great-start-fades",
+    "total_exchanges": 24,
+    "generation_id": "seed_137"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing system like Uber or Lyft. Riders request rides, drivers accept them, and we handle real-time matching and tracking. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great topic. Let me clarify the scope. How many cities do we operate in? What's the peak concurrency for riders and drivers? What's the acceptable matching time — how fast should a rider get matched with a driver? Do we support shared rides or just individual? What about different vehicle classes? And what's the expected trip volume per day?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scale", "matching_sla", "ride_types", "vehicle_classes"], "depth": "deep", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "100 cities, 500K concurrent riders, 300K concurrent drivers at peak. Matching within 15 seconds. Individual rides only, two vehicle classes (standard and premium). 10 million trips per day. Let's go.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "ride_matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do capacity estimation. 10M trips per day is about 116 rides per second on average, but peak is probably 3-5x, so let's say 500 ride requests per second. Each active driver sends GPS pings every 4 seconds, so 300K drivers generating 75K location updates per second. That's significant write throughput for the location service. For storage, each trip generates maybe 2 KB of metadata plus a GPS trace — at 10M trips/day, that's 20 GB of trip data daily.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation", "gps_throughput"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid estimation. Walk me through the high-level architecture.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Five core services. First, the Location Service — ingests driver GPS pings, maintains a real-time geospatial index of driver positions. Second, the Matching Service — when a rider requests a ride, finds nearby available drivers and selects the best one based on ETA. Third, the Trip Service — manages the ride lifecycle from request to completion. Fourth, the Pricing Service — calculates fares, applies surge pricing based on supply/demand. Fifth, the Notification Service — pushes ride offers to drivers, updates to riders. The data layer: Redis for real-time driver locations, PostgreSQL for trip records and user profiles, a message queue (Kafka) for event streaming between services.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["location_service", "ride_matching", "trip_service", "pricing_service", "microservices", "redis_caching", "kafka"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent overview. Let's dive into the location service. How does the geospatial index work?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "geospatial_index" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a geohash-based index in Redis. Geohashing converts a latitude/longitude to a string where longer prefixes represent smaller areas. For ride matching, we need a resolution of about 500 meters — that's a geohash of length 6 or 7. When a driver sends a GPS ping, we update their position: remove from old geohash cell, add to new cell. Using Redis sorted sets, members are driver IDs and scores encode their precise position. For nearest-driver queries, we query the rider's geohash cell plus the 8 surrounding cells to handle boundary cases, filter by availability and vehicle class, and sort by distance. Redis GEO commands (GEOADD, GEORADIUS) natively support this.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geohash", "geospatial_index", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "With 75K location updates per second, can a single Redis instance handle this?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "redis_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "A single Redis instance can do about 100K-200K simple operations per second, but GEO operations are heavier. We'd shard by city — each city gets its own Redis instance or cluster. Since ride matching is always within a city, queries never span shards. The biggest cities (NYC, London) might need their own dedicated instances, while smaller cities can share. With 100 cities and maybe 30 Redis instances, each handles 2,500 updates per second — very comfortable. For high availability, each instance has a replica for failover.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_scaling", "sharding_strategy", "high_availability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great. Walk me through the matching algorithm in more detail.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "matching_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a ride request comes in: 1) Query the location index for available drivers within a radius — start with 2 km, expand to 5 km if needed. Filter by vehicle class. 2) For each candidate driver, estimate ETA using a routing service. Straight-line distance is misleading — a driver 500m away across a highway might have a 10-minute ETA. 3) Rank by ETA, then by rating as a tiebreaker. 4) Send the ride offer to the top driver with a 15-second acceptance window. 5) If declined or timed out, offer to the next driver. 6) If no driver within 5 km accepts, expand the radius and try again, up to a configurable max. If still no match, notify the rider that no drivers are available.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["matching_algorithm", "eta_estimation", "expanding_radius"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent detail. Now tell me about surge pricing — how does it work technically?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing is about balancing supply and demand per zone. We divide each city into hexagonal zones — H3 indexing from Uber works well for this. Every 60 seconds, a background job computes the demand/supply ratio per zone: demand is recent ride requests, supply is available drivers. When the ratio exceeds a threshold, like 1.5, we apply a surge multiplier. The multiplier scales with the ratio — 1.5x at ratio 2, 2x at ratio 3, capped at some maximum. The pricing service returns the current multiplier when a rider requests a fare estimate.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_pricing", "h3_indexing", "supply_demand"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great first 15 minutes. Now let's talk about the trip lifecycle and payment flow.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "trip_lifecycle" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, the trip lifecycle. So after matching, the trip goes through states: matched, driver_en_route, arrived_at_pickup, in_progress, completed. Each state transition is an event published to Kafka. For payment, when the trip completes, we calculate the final fare based on distance, time, and surge multiplier. Then we charge the rider's payment method. I mentioned this already — the pricing service handles fare calculation.",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["trip_lifecycle", "state_machine", "kafka", "payment_flow"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Can you go deeper on how the fare is calculated? What data do you need?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "fare_calculation" }
+    },
+    {
+      "role": "candidate",
+      "content": "The fare uses the GPS trace from the trip — total distance traveled plus time elapsed. Base fare + per-mile rate + per-minute rate, multiplied by the surge multiplier. We use the driver's GPS trace to calculate the actual route distance, not the straight-line distance. I think I already covered the surge pricing component. The calculation is pretty straightforward — distance times rate plus time times rate.",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["fare_calculation"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about disputes? What if the rider says the GPS trace is wrong and the fare is too high?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "fare_disputes" }
+    },
+    {
+      "role": "candidate",
+      "content": "We'd have a dispute resolution system. The rider submits a dispute, we review the GPS trace against the expected route, and if the actual route deviated significantly from the optimal route, we can adjust the fare. I already mentioned the GPS trace — we'd compare it to the expected route.",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["fare_disputes"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's move to failure handling. What are the key failure scenarios?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Failures... well, if the location service Redis goes down, we can't match riders with drivers. We'd need replicas, as I mentioned earlier. If the matching service goes down, same thing — replicas behind a load balancer. If a driver's app crashes mid-trip, the rider can see the last known location. I think I covered most of this when I talked about the Redis sharding approach with replicas.",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["redis_failure", "service_failure"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about a more nuanced failure — a rider is matched with a driver, but the driver's app loses connectivity. The rider sees 'driver is on the way' but the driver never shows up. How does the system detect and handle this?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "driver_connectivity" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the driver's app disconnects, we stop receiving GPS pings. We could detect this — if no ping for 30 seconds, flag the trip. Then notify the rider that there's a connectivity issue and start looking for a replacement driver. But I think this is similar to what I said before about the driver's app crashing. The detection mechanism is the same — missing GPS pings.",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["driver_connectivity", "heartbeat"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How about data consistency? What if the matching service matches a driver to two different riders simultaneously?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "race_conditions" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, double-matching. We'd need to lock the driver when they're offered a ride. Use an optimistic lock or a distributed lock in Redis — SET driver_123_locked true NX EX 20. If the lock is already taken, the second match attempt fails and moves to the next driver. I think I mentioned earlier that drivers are filtered by availability — the lock would mark them as unavailable during the matching window.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["distributed_lock", "race_conditions"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost out of time. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add monitoring on matching success rates and ETA accuracy, driver rating and feedback systems, and fraud detection for fare manipulation. I realize my answers got less detailed in the second half — I feel like I covered the most interesting parts early and then struggled to add new depth. I should have saved more energy for the failure scenarios.",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["monitoring", "fraud_detection"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's an accurate self-assessment. Your first 15 minutes were exceptional — the geospatial index, matching algorithm, and surge pricing were some of the best answers I've seen. But the last 10 minutes were noticeably weaker — repetitive references to previous answers and surface-level failure analysis. Consistency matters as much as peak performance. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 55,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 9,
+      "api_design": 5,
+      "database_design": 5,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 3,
+      "communication": 5
+    },
+    "strengths": [
+      "Excellent geospatial index design with geohash and city-based sharding",
+      "Detailed matching algorithm with ETA-based ranking and expanding radius",
+      "Strong capacity estimation with GPS throughput calculation",
+      "Good surge pricing design using H3 hexagonal zones"
+    ],
+    "weaknesses": [
+      "Performance faded dramatically after the first 15 minutes",
+      "Repeated 'I already mentioned that' three times instead of adding new depth",
+      "Failure handling was superficial and mostly referred back to earlier answers",
+      "Trip lifecycle and payment flow were surface-level after excellent earlier components",
+      "No discussion of database schema, data model, or consistency guarantees",
+      "No API design discussion"
+    ]
+  }
+}

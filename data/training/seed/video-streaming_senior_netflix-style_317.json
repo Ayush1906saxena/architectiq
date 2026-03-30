@@ -1,0 +1,140 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "senior",
+    "candidate_profile": "netflix-style",
+    "total_exchanges": 22,
+    "generation_id": "seed_317"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a video streaming platform. Our CDN has 17,000 servers in 158 countries. How do you decide which content to push to which edge server?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "content_placement" }
+    },
+    {
+      "role": "candidate",
+      "content": "Before I design the content placement strategy, I need to understand the constraints. How much storage does each edge server have? What's the total content library size? How frequently is new content added? And what's the distribution of viewership — is it Zipf-like where a small percentage of titles account for most views?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["storage_constraints", "content_library", "viewership_distribution"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Each edge server has 100 TB of SSD storage. Total content library: 20,000 titles, each encoded at multiple bitrates totaling about 100 GB per title — so 2 PB total. Very Zipfian: the top 10% of titles account for 80% of views. New content: about 50 titles per week. Now solve the placement problem.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "content_placement" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each edge server with 100 TB can hold about 1,000 titles at full quality. With 20,000 titles total, each edge can only hold 5% of the library. The placement problem is: which 1,000 titles does each of the 17,000 servers store? This is a cache placement optimization. I'd model it as a prediction problem: for each edge server, predict which titles will be most watched in the next time window. Factors: global popularity (trending titles, new releases), regional popularity (Bollywood titles in India, K-dramas in South Korea), time-of-day patterns (kids content in mornings, adult content evenings), and upcoming promotional campaigns. The objective: maximize the fraction of views served from the edge cache — the 'cache hit ratio' — which directly determines how much traffic hits the origin and how much latency users experience.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["content_placement", "cache_optimization", "regional_popularity", "cache_hit_ratio"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you operationalize that? What's the actual algorithm that runs to decide content placement?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "placement_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd run a placement optimization pipeline every 6 hours. The algorithm: Step 1 — demand prediction. For each (region, title) pair, predict views in the next 24 hours. Use a time-series model trained on historical viewing patterns, accounting for day-of-week, seasonality, new release schedules, and marketing campaigns. Step 2 — capacity allocation. For each edge server, rank titles by predicted local demand. Fill the 100 TB greedily: add the highest-demand title first, then the next, until the server is full. But not just the top-level bitrate — prioritize the most common bitrate per region (e.g., if most users in rural India watch at 720p, store the 720p variant first, 1080p second). Step 3 — incremental updates. Don't replace the entire cache each cycle. Compute the diff: which titles to add and which to evict. Only move the delta to minimize bandwidth usage on the fill network. Step 4 — headroom. Keep 10% of each server's storage free for reactive caching — titles that suddenly spike in demand (a viral moment, surprise hit) can be pulled from the origin on-demand and cached locally.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["placement_algorithm", "demand_prediction", "greedy_allocation", "incremental_updates", "reactive_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you push 100 GB titles to 17,000 edge servers for a new release? That's a massive data distribution problem.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "content_distribution" }
+    },
+    {
+      "role": "candidate",
+      "content": "Pushing 100 GB to 17,000 servers from a single origin is 1.7 PB of data transfer — infeasible from one source. I'd use a tree-based distribution model. The origin sends the content to 20-30 regional hubs. Each hub sends to 100-200 edge servers in its region. This forms a 3-level tree: origin -> regional hubs -> edge servers. Each hop transfers 100 GB only to its direct children. Total bandwidth from origin: 100 GB * 30 = 3 TB, not 1.7 PB. We can also use peer-to-peer within a region: once some edge servers have the file, they can serve chunks to nearby servers that don't. The content is split into 2 MB chunks, and the distribution is chunk-by-chunk with verification hashes. For a major release like a new season of a popular show, we start the distribution 48 hours before launch — the content is encrypted with a time-locked key that unlocks at the premiere time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["content_distribution", "tree_distribution", "peer_to_peer", "chunk_transfer", "pre_positioning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now let's talk about the streaming itself. A user presses play. What happens?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "streaming_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step 1 — manifest request. The client requests the video manifest file from the control plane. The manifest lists all available bitrate variants and their segment URLs. We use HLS or DASH with segments typically 4-6 seconds long. Step 2 — edge selection. A steering service tells the client which edge server to use, based on the client's IP geolocation, server load, and whether the requested title is cached there. This returns the URL of the edge server. Step 3 — segment streaming. The client starts by downloading the first few segments at a low bitrate for fast startup. The adaptive bitrate algorithm on the client measures download throughput and buffer level, then adjusts the bitrate up or down. If throughput is 20 Mbps and the buffer is healthy, switch to 4K at 16 Mbps. If throughput drops, switch to 1080p at 5 Mbps. Step 4 — continuous monitoring. The client reports quality-of-experience metrics every 30 seconds: rebuffering events, bitrate switches, play start time. These feed into a real-time dashboard and also back into the edge selection algorithm to avoid overloaded servers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["streaming_flow", "adaptive_bitrate", "manifest", "edge_selection", "qoe_metrics"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The edge server doesn't have the requested title. What happens? The user shouldn't notice.",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "cache_miss" }
+    },
+    {
+      "role": "candidate",
+      "content": "An edge cache miss is handled transparently. When the edge server receives a segment request for a title it doesn't have, it becomes a proxy: it fetches the segment from the nearest server that has it — either a sibling edge server or the regional hub. It streams the response to the user while simultaneously caching it locally for future requests. The user experiences slightly higher latency on the first segment — maybe 200ms instead of 50ms — but subsequent segments are served from the now-warmed local cache. To minimize the first-segment delay, the edge can prefetch: when it receives the manifest request and notices the title isn't cached, it starts pulling the first few segments proactively before the client requests them. We also use a tiered fallback: edge -> sibling edge -> regional hub -> origin. Each tier adds latency but provides resilience.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_miss", "proxy_fetch", "prefetching", "tiered_fallback"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "A new show drops and 10 million users try to watch the first episode simultaneously. How does the CDN handle this?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "thundering_herd" }
+    },
+    {
+      "role": "candidate",
+      "content": "A premiere event creates a massive demand spike concentrated on a single title. Our defenses: First, pre-positioning. As I mentioned, we push the content to all 17,000 edge servers 48 hours before launch. This eliminates cache misses. Second, capacity planning. If we expect 10 million concurrent streams at an average of 5 Mbps, that's 50 Tbps of total bandwidth. Distributed across 17,000 servers, each serves about 3 Gbps — well within a 10G-connected server's capacity. In popular regions, we might need to handle 50 Gbps per edge. We pre-scale by deploying additional temporary edge capacity in high-demand regions. Third, staggered start. We don't release at exactly midnight globally — we roll out by timezone or even by user cohort with 1-2 minute jitter. This spreads the load. Fourth, fallback to lower bitrate. If an edge is overloaded, the adaptive bitrate algorithm naturally adjusts — users get lower quality but no rebuffering. We prioritize continuity of playback over visual quality.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["thundering_herd", "pre_positioning", "capacity_planning", "staggered_release", "adaptive_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you encode video for multiple bitrates efficiently? 20,000 titles, each needing 10+ variants.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "video_encoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "The encoding pipeline is a major compute investment. For each title, we generate a bitrate ladder: typically 10-12 variants from 240p at 300 Kbps to 4K HDR at 16 Mbps. Netflix's approach, which I'd adopt, is per-title encoding optimization. Rather than a fixed bitrate ladder, we analyze each title's complexity. A simple animated show achieves great quality at lower bitrates than a complex action movie. We do a first pass to measure per-scene complexity, then optimize the bitrate for each variant to achieve a target quality score (VMAF). The encoding itself runs on a distributed compute cluster. A single title takes about 100 CPU-hours to encode all variants. With 50 new titles per week, that's 5,000 CPU-hours per week — a few hundred machines continuously. We also re-encode the back catalog when better codecs become available. The shift from H.264 to H.265 to AV1 each delivers about 30% bitrate savings at the same quality, which translates directly to CDN bandwidth savings.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["video_encoding", "per_title_encoding", "bitrate_ladder", "vmaf", "codec_evolution"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "An ISP in Brazil is throttling traffic from our CDN. Users in Sao Paulo experience constant rebuffering. How do you detect and handle this?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "isp_throttling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Detection: our QoE telemetry from clients is the primary signal. We aggregate rebuffer rate by ASN (autonomous system number — the ISP identifier). If Brazil Telecom's users have a rebuffer rate 3x the national average while other ISPs in the same city are fine, that's a strong signal of throttling. We can also run synthetic tests from measurement probes inside that ISP's network. Handling: first, try peering. We offer ISPs the option to host our Open Connect Appliances — edge servers inside their network. This eliminates the throttling point since traffic never crosses the ISP's interconnection links. Second, if the ISP won't cooperate, we can embed our edge servers in IXPs (Internet Exchange Points) where the ISP peers. Third, technical workaround: use HTTPS to make our traffic indistinguishable from regular web browsing. Most ISPs won't throttle all HTTPS traffic. Fourth, reduce bitrate for affected users to stay within the throttled bandwidth — 720p with no rebuffering is better than 1080p with constant stuttering. Fifth, this becomes a business development conversation — our content team negotiates with the ISP.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["isp_throttling", "qoe_telemetry", "peering", "open_connect", "traffic_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you monitor the health of 17,000 edge servers globally?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Monitoring at this scale needs both centralized and decentralized approaches. Each edge server reports health metrics every 30 seconds to a regional aggregation point: CPU, memory, disk I/O, network bandwidth, active streams, cache hit ratio, and error rate. The regional aggregators forward summarized metrics to a central monitoring system. Alerts at three levels: per-server (disk failure, high error rate), per-region (if more than 10% of servers in a region are unhealthy), and global (overall cache hit ratio dropping below 95%). We also use client-side telemetry as ground truth — if clients report poor experience from a specific edge server, that's more meaningful than server-side metrics that say everything is fine. A real-time anomaly detection system monitors for deviations from historical baselines. And a fleet management system automatically drains unhealthy servers from the serving rotation — it redirects traffic to healthy servers before alerting the ops team.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "fleet_management", "anomaly_detection", "client_telemetry"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent content delivery depth. You clearly understand the CDN and streaming challenges. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 73,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 5,
+      "database_design": 6,
+      "caching_strategy": 9,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Outstanding CDN and content placement strategy with demand prediction and incremental updates",
+      "Strong video encoding pipeline knowledge including per-title optimization and codec evolution",
+      "Excellent handling of ISP throttling with multiple mitigation strategies"
+    ],
+    "weaknesses": [
+      "API design was not discussed — no streaming API or DRM protocol details",
+      "Database design for the metadata service (user profiles, viewing history, recommendations) was absent",
+      "Did not discuss the recommendation engine or personalization, which is core to Netflix's value"
+    ]
+  }
+}

@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "sde2",
+    "candidate_profile": "practical-thinker",
+    "total_exchanges": 20,
+    "generation_id": "seed_345"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a real-time chat system like Slack or WhatsApp. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "How many concurrent users? Do we need to support both 1-on-1 and group chats? What's the maximum group size? And how important is message delivery guarantee — can we lose messages or must every message be delivered?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["concurrency", "group_chat", "delivery_guarantees"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "5 million concurrent users at peak. Both 1-on-1 and group chats, groups up to 500 members. No message loss — every message must be delivered. Go ahead.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me think about this practically. My team uses Slack. When I send a message, everyone sees it instantly. How does that work? There must be a persistent connection between my Slack client and Slack's servers. If it were regular HTTP, I'd have to keep polling — 'any new messages?' every second. That would be incredibly wasteful. So there must be a way for the server to push data to me whenever a new message arrives.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["persistent_connection", "push_vs_poll"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right. What protocol enables that?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "websocket" }
+    },
+    {
+      "role": "candidate",
+      "content": "WebSocket. It starts as a regular HTTP request that gets upgraded to a persistent, full-duplex TCP connection. Both sides can send data at any time. This is how I've seen real-time features work in web apps I've built — we used socket.io, which is a WebSocket library. So each user's client maintains a WebSocket connection to our servers. When I type a message, it goes over that WebSocket to the server. The server then pushes it over the recipient's WebSocket connection. No polling needed.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["websocket", "full_duplex", "real_time_delivery"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. With 5 million concurrent WebSocket connections, you can't have them all on one server. How do you handle that?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "connection_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "In my experience, a single server can hold maybe 50K-100K WebSocket connections — it's mainly limited by memory for the connection state. So we need 50-100 connection servers. I'll call them Gateway Servers. When a user connects, a load balancer assigns them to a gateway. The problem is: User A is on Gateway 3, User B is on Gateway 7. When A sends B a message, Gateway 3 needs to know that B is on Gateway 7. We need some kind of registry — like a phone book — that maps user_id to gateway_id. Redis is perfect for this: fast key-value lookups, and the data is ephemeral (cleared when a user disconnects).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["connection_gateway", "presence_registry", "redis_routing"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good practical reasoning. Walk me through the full message flow now.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "message_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step by step. User A sends 'Hello' to User B via WebSocket to Gateway 3. Gateway 3 forwards the message to a Message Service. The Message Service does three things: 1) Writes the message to the database for durability. 2) Looks up User B in the Redis presence registry to find Gateway 7. 3) Sends the message to Gateway 7. Gateway 7 pushes the message over User B's WebSocket. User B sees 'Hello'. If User B is offline (not in the registry), we skip step 3 and just store it. When B comes back online, their client fetches unread messages from the database since their last-seen timestamp.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_flow", "message_persistence", "presence_lookup", "offline_delivery"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What database would you use for message storage?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Thinking about the access pattern: messages are written once and read sequentially — like scrolling up through chat history. That's an append-heavy, sequential-read pattern. Cassandra fits well here. I'd partition by conversation_id, with the clustering key as message_timestamp. All messages in a conversation land on the same partition, and reading recent history is a single sequential scan. A practical consideration from Slack: when I open a channel, I see the last 50 messages immediately. That's a single Cassandra query: SELECT * FROM messages WHERE conversation_id = ? ORDER BY timestamp DESC LIMIT 50. Fast and efficient.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cassandra", "partition_key", "clustering_key", "sequential_reads"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does group chat work? 500 members in a group and someone sends a message.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "group_messaging" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a message is sent to a group, the Message Service writes it once to the messages table (conversation_id = group_id). Then it looks up all online members of the group from the presence registry and the group membership table. For each online member, it routes the message to their gateway. With 500 members and maybe 200 online, that's 200 gateway pushes — manageable. I wouldn't write separate copies per member — the message is stored once per conversation, not once per recipient. When member #501 scrolls through history, they read from the same conversation partition. The practical insight: this is how Slack channels work. There's one copy of each message, and everyone in the channel sees it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["group_messaging", "single_copy_storage", "online_member_routing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle message ordering? Two users send a message at the same time.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is tricky because clocks on different servers aren't perfectly synchronized. From my experience with collaborative tools, the solution is a server-assigned sequence number per conversation. The Message Service maintains a counter per conversation_id — in Redis, that's an INCR operation on key seq:{conversation_id}. Each message gets the next sequence number. Since INCR is atomic, two simultaneous messages get different sequence numbers. The client displays messages ordered by sequence number, not timestamp. The timestamp is still stored for display ('2:34 PM') but ordering uses the sequence. This matches what I see in Slack — messages always appear in a consistent order for everyone, even when sent simultaneously.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sequence_numbers", "atomic_increment", "server_side_ordering"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about read receipts? Like the blue checkmarks in WhatsApp.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "read_receipts" }
+    },
+    {
+      "role": "candidate",
+      "content": "Read receipts are a lightweight signal. When User B reads a message (scrolls to it), the client sends a 'read' event with the conversation_id and the latest message sequence number they've seen. This is stored in a simple Redis hash: key = read_receipt:{conversation_id}, field = user_id, value = last_read_sequence. When User A is online, we push the read receipt over their WebSocket so they see the blue checkmarks update in real-time. For 1-on-1, we show 'read' when the other person's sequence matches the latest message. For groups, we aggregate — 'read by 15 of 20.' The key insight: we don't need to persist read receipts to Cassandra — they're ephemeral. If the system restarts, the worst case is checkmarks resetting, which is acceptable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_receipts", "redis_hash", "ephemeral_state", "aggregation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a Gateway server crashes?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "gateway_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a gateway crashes, all its WebSocket connections drop — maybe 50-100K users. Clients detect the broken connection and auto-reconnect through the load balancer to a different gateway. On reconnect, the client tells the new gateway its last-seen sequence number per conversation. The gateway fetches any newer messages from Cassandra and delivers them. During the disconnection window (maybe 5-10 seconds), incoming messages are stored in Cassandra but not delivered in real-time. They're delivered as a batch on reconnect. The presence registry entries for the crashed gateway's users become stale — a heartbeat mechanism detects this. Each gateway sends heartbeats to Redis; if heartbeats stop, a cleanup process removes all presence entries for that gateway. Messages sent during the stale window get a delivery failure and are retried after the user reconnects.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["auto_reconnect", "sequence_based_recovery", "heartbeat", "stale_entry_cleanup"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final additions?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Push notifications for offline users — when a user is not connected, we send push notifications via APNs (iOS) or FCM (Android). A Notification Service checks the presence registry: if the user is offline, queue a push notification. We'd debounce — don't send a push for every message in a rapid conversation, bundle them. Typing indicators: fire-and-forget WebSocket events, no persistence needed. If lost, the worst case is a missing 'typing...' bubble. File sharing through a separate upload service with S3 storage and CDN delivery. And message search using Elasticsearch, indexed by conversation_id for scoped searches. These are all features I use daily in Slack, which made this design feel very concrete to me.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["push_notifications", "notification_debouncing", "typing_indicators", "file_sharing", "search"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "I liked how you used your practical experience with Slack to derive design decisions rather than just reciting patterns. Strong interview. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 58,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 5,
+      "api_design": 5,
+      "database_design": 7,
+      "caching_strategy": 6,
+      "scalability": 6,
+      "failure_handling": 6,
+      "communication": 7
+    },
+    "strengths": [
+      "Derived WebSocket from practical experience rather than memorized knowledge — authentic reasoning",
+      "Strong message ordering solution with atomic sequence numbers",
+      "Practical and grounded approach — every decision tied to observable product behavior"
+    ],
+    "weaknesses": [
+      "Minimal capacity estimation — didn't compute message throughput or storage requirements",
+      "No API design discussion — didn't define endpoints or message format",
+      "Limited scalability discussion — didn't address cross-region deployment or horizontal scaling strategies"
+    ]
+  }
+}

@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "staff",
+    "candidate_profile": "discusses-migration",
+    "total_exchanges": 22,
+    "generation_id": "seed_216"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a real-time chat system like Slack or WhatsApp. Before we dive in, what questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several questions. How many concurrent users are we targeting? Do we need to support 1:1 chats, group chats, or both? What about message types — text only, or also images, files, reactions? What are our delivery guarantees — at-least-once, exactly-once? And is there an existing system we're building on or is this greenfield?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scale_estimation", "feature_scope", "delivery_guarantees", "migration_context"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "50 million concurrent users. Both 1:1 and group chats up to 500 members. Text and images. At-least-once delivery is fine. And here's the twist — we have an existing polling-based system that works but is inefficient. We want to migrate to WebSockets without disrupting the 50 million users currently on the polling system. How would you approach this?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "migration_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's a fascinating constraint. The migration from polling to WebSocket is actually the most interesting engineering challenge here. Let me first sketch the target architecture, then focus on the migration strategy. For the target state: clients establish WebSocket connections to a fleet of connection servers. Each connection server holds thousands of persistent connections. When a message is sent, it goes to a message service that persists it to a database and then routes it to the correct connection server(s) holding the recipient's connection. A presence service tracks which user is on which connection server.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket_architecture", "connection_servers", "message_routing", "presence_service"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good overview. Now the hard part — how do you migrate without disrupting existing users?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "migration_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd break this into four phases using feature flags. Phase 1 — Dual Protocol Support: deploy connection servers that support both polling and WebSocket simultaneously. The message delivery layer is protocol-agnostic — it just says 'deliver message to user X' and the connection server decides whether to push via WebSocket or hold for the next poll. Phase 2 — Shadow Mode: for a subset of users (say 1%), the client opens both a polling connection and a WebSocket. All messages are delivered via polling (the trusted path) but also pushed via WebSocket. The client logs any discrepancies. This validates WebSocket delivery without any user impact.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feature_flags", "dual_protocol", "shadow_mode", "canary_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting. What about Phases 3 and 4?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "migration_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Phase 3 — Gradual Cutover: once shadow mode shows WebSocket delivery matches polling with 99.99% consistency, we start switching users. We use a percentage-based feature flag: 1% → 5% → 25% → 50% → 100%. At each stage, the flagged users use WebSocket as primary, with polling as fallback — if the WebSocket connection drops and can't reconnect within 5 seconds, the client falls back to polling automatically. Phase 4 — Cleanup: once 100% of users are on WebSocket and metrics are stable for two weeks, we remove the polling code path, the dual-protocol support, and the shadow mode infrastructure. But we keep the polling endpoint alive as a degraded-mode fallback that can be re-enabled via feature flag.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gradual_rollout", "fallback_mechanism", "feature_flags", "cleanup_phase"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a WebSocket user sends a message to a polling user? Do they experience different latency?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "cross_protocol_communication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes, and this is a key concern during migration. A WebSocket user gets messages in real-time — sub-second delivery. A polling user only gets messages on their next poll, which might be every 3-5 seconds. In a group chat with both types of users, WebSocket users see the message instantly while polling users see a delay. There are two approaches: one, accept the inconsistency — polling users already experience this latency today so it's not a regression. Two, for the transition period, add a lightweight long-polling fallback — the server holds the HTTP request open for up to 30 seconds and responds immediately when a message arrives. This gives near-real-time delivery without full WebSocket.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["latency_asymmetry", "long_polling", "user_experience_during_migration"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the connection servers. With 50 million concurrent WebSocket connections, how do you design that layer?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "connection_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each connection server can handle about 50K-100K concurrent WebSocket connections depending on the hardware — mainly limited by file descriptors and memory (each connection uses about 20KB of buffer). At 50M users, we need 500-1000 connection servers. I'd deploy them behind a Layer 4 load balancer — not Layer 7, since we need the TCP connection to persist. The load balancer uses least-connections algorithm. When a connection is established, the connection server registers itself in a presence store — Redis or a dedicated presence service — mapping user_id → server_id.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["connection_scaling", "load_balancing", "presence_service", "resource_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a connection server crashes? It had 100K users connected.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "connection_server_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a connection server dies, 100K users lose their WebSocket connection simultaneously. The client-side reconnection logic kicks in: exponential backoff starting at 100ms, with jitter to prevent thundering herd. The load balancer routes them to healthy servers. The presence store entries for that server are invalidated — either via a heartbeat TTL (the crashed server stops heartbeating) or the new connection server overwrites the old mapping. During reconnection, messages are buffered in the message queue. The client, upon reconnecting, sends its last received message ID and the server replays any missed messages. This is where the at-least-once guarantee matters — clients deduplicate by message ID.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["reconnection_logic", "exponential_backoff", "jitter", "message_replay", "idempotent_delivery"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How long do you buffer undelivered messages? What if a user is offline for hours?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_persistence" }
+    },
+    {
+      "role": "candidate",
+      "content": "Messages are always persisted to the database, so they're never truly lost. The buffer I mentioned is a hot queue for fast replay — I'd keep it in Redis with a 24-hour TTL per user. When a user reconnects, we check the hot queue first. If it's expired or empty, we fall back to querying the database for messages since their last-seen message ID. For users offline for days, the database is the source of truth. On the write side: when a message arrives, we write to the database and the Redis hot queue in parallel. If Redis write fails, no problem — the database has it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_persistence", "hot_queue", "database_fallback", "write_path_resilience"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's discuss the database. What's your storage choice for messages?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "Messages are append-only, queried by conversation_id ordered by timestamp, and need to scale massively. I'd use Cassandra. The partition key is conversation_id, clustering key is timestamp descending. This gives us efficient range queries for loading chat history. For 1:1 chats, the conversation_id is a deterministic hash of both user IDs. For group chats, it's the group ID. Cassandra handles the write throughput well and scales horizontally. The existing polling system probably uses MySQL or Postgres — during migration, we need to migrate message history too, which I'd do lazily: migrate a conversation's history the first time someone scrolls back in it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cassandra", "partition_key_design", "data_migration", "lazy_migration"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've been thoughtful about migration throughout. What metrics would you track to know the migration is going well?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "migration_metrics" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd define a migration health dashboard with four categories. Delivery metrics: message delivery latency p50/p99 per protocol (polling vs WebSocket), delivery success rate, and dropped message rate — the WebSocket path should be strictly better than polling. Connection metrics: WebSocket connection success rate, reconnection frequency, time-to-reconnect, and the ratio of users on each protocol. Consistency metrics: in shadow mode, the discrepancy rate between polling and WebSocket delivery. And user experience metrics: client-side error rates from app logs, user complaints, and engagement metrics (are users sending more messages on WebSocket, which we'd expect due to lower latency?). Any regression in these triggers an automatic rollback of the feature flag.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["migration_metrics", "delivery_monitoring", "automatic_rollback", "user_experience_metrics"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the biggest risk in this migration?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "migration_risks" }
+    },
+    {
+      "role": "candidate",
+      "content": "The biggest risk is message loss during the protocol switch. When a user transitions from polling to WebSocket, there's a brief moment where the polling connection is closed and the WebSocket isn't yet established. If a message arrives in that gap, it could be lost if we're not careful. My mitigation: the client doesn't close the polling connection until the WebSocket is fully established AND the client has confirmed it received all messages up to the latest timestamp via the WebSocket. This overlap period means messages might be received twice (once via poll, once via WebSocket), but the client deduplicates by message ID. Duplicate delivery is safe; lost messages are not.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_loss_risk", "protocol_overlap", "deduplication", "safety_over_correctness"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running short on time. Any final additions?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Two things. First, I'd maintain a kill switch — even after full migration, we keep the ability to revert any user cohort back to polling within minutes. WebSocket infrastructure is more complex (stateful connections, more failure modes), so having the escape hatch is critical. Second, this migration approach — feature flags, shadow mode, gradual rollout, automatic rollback — is a pattern I'd encode as an organizational practice. We'll need to do more protocol or infrastructure migrations in the future, and having this playbook ready saves weeks of planning each time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kill_switch", "migration_playbook", "organizational_practices", "risk_management"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent migration thinking throughout. The shadow mode and protocol overlap ideas were particularly well thought through. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 75,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 6,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Migration strategy was comprehensive — four clear phases with rollback at every stage",
+      "Shadow mode idea shows mature operational thinking",
+      "Protocol overlap to prevent message loss during transition was a key insight"
+    ],
+    "weaknesses": [
+      "Capacity estimation was light — didn't calculate message throughput or storage needs",
+      "API design was not discussed — no endpoint definitions or message format",
+      "Didn't address group chat fan-out or message ordering in distributed delivery"
+    ]
+  }
+}

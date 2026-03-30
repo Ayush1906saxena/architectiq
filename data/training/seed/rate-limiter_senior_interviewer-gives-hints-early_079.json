@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "senior",
+    "candidate_profile": "interviewer-gives-hints-early",
+    "total_exchanges": 22,
+    "generation_id": "seed_079"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Today we're going to design a distributed rate limiter — think of the kind of thing API gateways use to throttle requests. Before we jump in, what questions come to mind?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, let me think. What kind of rate limiting are we talking about — per-user, per-IP, per-API-key? And what's the expected scale?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["rate_limiting_types"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good start. Let me also hint — you might want to ask about the rate limiting algorithm itself. There are several: token bucket, sliding window, fixed window, leaky bucket. Each has very different properties. Think about which requirements would push you toward one versus another. So yes — per-user and per-API-key, and assume 50,000 requests per second across all users.",
+      "annotation": { "action": "hint", "phase": "requirements", "target_concept": "rate_limiting_algorithms" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's helpful. So I should consider which algorithm fits. Let me ask a few more: do we need hard rate limits where absolutely no excess requests get through, or soft limits where small bursts are okay? Should the rate limiter be centralized or distributed across multiple data centers? And what's the acceptable latency overhead per request for the rate limit check?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting_algorithms", "distributed_systems", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice — those are exactly the right questions. Soft limits are fine, small bursts of 10-20% over are acceptable. Distributed across two data centers. And the rate limit check should add no more than 5 milliseconds to request latency at p99. Let's start with the algorithm choice.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "rate_limiting_algorithms" }
+    },
+    {
+      "role": "candidate",
+      "content": "Given that bursts are acceptable, I'd go with a token bucket algorithm. Each user gets a bucket that refills at a steady rate — say 100 tokens per minute — and can hold a burst capacity of, say, 120 tokens. When a request comes in, we try to take a token. If the bucket is empty, we reject. This naturally allows short bursts while enforcing average rate limits.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["rate_limiting_algorithms", "token_bucket"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good choice. I want to steer you toward thinking about why token bucket specifically beats the alternatives here. A fixed window counter is simpler to implement. What's its weakness that made you choose token bucket?",
+      "annotation": { "action": "hint", "phase": "high_level_design", "target_concept": "rate_limiting_algorithms" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right — fixed window has a boundary problem. If a user sends 100 requests at 11:59:59 and another 100 at 12:00:01, they've sent 200 requests in 2 seconds but neither window sees a violation. Sliding window log fixes this but requires storing every request timestamp, which is expensive at 50K requests per second. Token bucket is a nice middle ground — smooth rate enforcement without per-request storage. The only state per user is the token count and last refill timestamp.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting_algorithms", "token_bucket", "sliding_window"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly right — that boundary problem is the classic gotcha. Now, where do you store the token bucket state? And here's a nudge: think about what happens when the storage layer goes down.",
+      "annotation": { "action": "hint", "phase": "high_level_design", "target_concept": "redis_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use Redis for storing token bucket state. Each user's bucket is a Redis key with two fields: remaining tokens and last refill timestamp. The check-and-decrement needs to be atomic, so I'd use a Lua script in Redis — it reads the current state, calculates tokens to add based on elapsed time, decrements if available, and returns allow/deny. All in one round trip, no race conditions. If Redis goes down... we need a fallback. I'd fail open — allow requests through rather than blocking all traffic. We can also keep a local in-memory rate limiter on each app server as a degraded mode.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "single_point_of_failure", "atomic_operations"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great instinct on failing open. A lot of candidates say 'fail closed' without thinking about the business impact. Now, you mentioned two data centers. How do you handle a user whose requests hit both data centers?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, that's tricky. If user requests are split across data centers, each data center's Redis sees only half the requests. So a user with a 100/minute limit could effectively get 200/minute — 100 in each DC. One approach is to have a single global Redis, but that adds cross-DC latency. Another is to split the rate limit — give each DC half the quota, so 50/minute each. But that's unfair if all traffic comes from one DC.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["distributed_rate_limiting", "consistency"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You're circling the right ideas. Let me give you a push: think about eventual consistency. What if each DC tracks locally and periodically syncs? You said bursts of 10-20% over are acceptable...",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh — that's clever. Since we accept soft limits, we can use eventual consistency. Each data center maintains its own local token bucket in its local Redis. Periodically — say every 2-3 seconds — the DCs sync their counters. During the sync gap, a user could exceed their limit by roughly the burst tolerance, which we've already said is acceptable. So each DC gets the full rate limit locally, and the background sync ensures the global count converges. If a DC goes down, the other DC continues independently with the full limit — graceful degradation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_rate_limiting", "consistency", "eventual_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly — that's the production pattern. Stripe and Cloudflare both do something similar. Now walk me through the full request flow end to end.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Request comes in to the API gateway or a dedicated rate limiter service sitting in front of the application. The service extracts the rate limit key — could be user ID from the auth token or API key from the header. It sends the key to the local Redis instance with the Lua script I mentioned — atomically check tokens, refill based on time elapsed, decrement if allowed. Redis returns allow or deny. If allowed, the request passes through to the backend service. If denied, we return HTTP 429 Too Many Requests with a Retry-After header. We also include rate limit headers in every response — X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset — so clients can self-throttle.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "rate_limiting_algorithms", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Should the rate limiter be a library in each service or a centralized service? Think about the tradeoffs — I'll hint that both are used in industry for different reasons.",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "architecture_patterns" }
+    },
+    {
+      "role": "candidate",
+      "content": "Centralized service — like a sidecar or API gateway plugin — gives you a single point of enforcement. All services get rate limiting without code changes, and you can update rules centrally. The downside is it's an extra network hop and a potential single point of failure. A library approach — embedded in each service — eliminates the network hop and has no central dependency. But rate limit rules are scattered across services, harder to update, and each team might implement differently. For our case, I'd go with an API gateway approach — a thin centralized layer. At 50K RPS, a dedicated rate limiter service adds maybe 1-2ms, well within our 5ms budget. And centralized rule management is a huge operational win.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["architecture_patterns", "single_point_of_failure", "latency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid reasoning. Let's talk about rate limit rules configuration. How do operators define and update rules?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "configuration_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rules should be stored in a configuration store — I'd use a database table or something like etcd/Consul. Each rule defines: the key type (user, IP, API key), the limit (tokens per time window), burst capacity, and which endpoints it applies to. The rate limiter service watches for config changes and hot-reloads rules without restart. I'd also support rule hierarchies — a global default, overrides per plan tier (free users get 100/min, paid get 1000/min), and per-user overrides for special cases. An admin API lets ops teams update rules in real time.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["configuration_management"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now here's a scenario — a malicious user creates 10,000 API keys to bypass per-key rate limits. How do you handle that?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "abuse_prevention" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's an enumeration attack on our rate limiting. Multiple layers of defense. First, rate limit API key creation itself — no one legitimately needs 10,000 keys. Second, add IP-based rate limiting as a secondary dimension — even if they have many keys, requests from the same IP cluster get throttled. Third, monitor for anomalous patterns — an account creating many keys in a short period triggers an alert and potentially an automatic block. Fourth, tie rate limits to the account level, not just the individual key level — aggregate all keys under one account toward a shared quota.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["abuse_prevention", "rate_limiting_types", "monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent — the account-level aggregation is the key insight. Let's discuss monitoring. What metrics would you track for the rate limiter itself?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the rate limiter service: request count and latency (p50, p95, p99), allow rate versus deny rate, Redis operation latency and error rate, and cross-DC sync lag. For business visibility: top users by denial count (to identify who's being throttled), denial rate by endpoint (to see if limits are too aggressive), and burst frequency (to tune burst capacity). Alerting on: Redis going down, denial rate spiking above baseline, and sync lag exceeding 5 seconds. I'd also expose a dashboard showing real-time rate limit utilization per customer tier.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "observability"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Really thorough. One last question — how would you test this system? Specifically, how do you test that the rate limits actually work correctly under load?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Unit tests for the Lua script logic — mock the Redis state and verify token bucket math: refill rates, burst capacity, edge cases like exactly zero tokens. Integration tests with a real Redis instance — send exactly N+1 requests and verify the last one is rejected. Load testing with a tool like k6 or Locust — simulate 50K RPS from multiple clients and verify that per-user limits hold while throughput is sustained. Chaos testing — kill a Redis node during load and verify fail-open behavior. And cross-DC tests — route a single user's traffic to both DCs simultaneously and verify the eventual consistency sync keeps the total within the burst tolerance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["testing", "load_testing", "chaos_engineering"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great interview. You built a solid design, and I could see you getting more confident as we went along. The distributed consistency piece was well handled. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 62,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 5,
+      "api_design": 7,
+      "database_design": 6,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 6
+    },
+    "strengths": [
+      "Built effectively on interviewer hints — showed strong learning ability",
+      "Solid understanding of token bucket algorithm and its tradeoffs versus alternatives",
+      "Good instinct on failing open and eventual consistency for distributed rate limiting"
+    ],
+    "weaknesses": [
+      "Needed hints to get to distributed consistency model — didn't arrive there independently",
+      "Capacity estimation was minimal — didn't calculate Redis memory or network bandwidth requirements",
+      "Initial requirements questions were thin until prompted by interviewer"
+    ]
+  }
+}

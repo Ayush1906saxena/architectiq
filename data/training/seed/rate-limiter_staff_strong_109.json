@@ -1,0 +1,189 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_109"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter. This is used to protect APIs from abuse and ensure fair usage. What would you like to clarify before we start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. A few things I'd like to understand. What kind of rate limits are we enforcing — per-user, per-IP, per-API-key, or per-endpoint? Are we building this as a standalone service or as middleware embedded in the API gateway? What's the expected request volume? And how strict does enforcement need to be — is it okay to occasionally allow a few extra requests through, or do we need exact enforcement?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_scope", "enforcement_strictness", "qps"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Per-API-key rate limiting, deployed as a centralized service that API gateways call. 500K requests per second across all clients. Soft enforcement is fine — occasional slight over-limit is acceptable. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Should the rate limits be configurable per client — different tiers like free, pro, enterprise? Do we need to support different time windows — per second, per minute, per hour? And do we need real-time visibility into current usage, like a dashboard showing how close a client is to their limit?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_scope", "time_windows", "monitoring"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes to configurable tiers. Multiple time windows — per second and per minute. Dashboard is nice to have. Let's get into the design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the algorithm choice. For this use case, I'd go with the leaky bucket algorithm rather than token bucket. The key difference: token bucket allows bursts up to the bucket capacity, while leaky bucket smooths traffic into a constant rate. Since we're protecting APIs from overload, a steady flow is more desirable than allowing bursts. The leaky bucket works like a queue with a fixed drain rate — requests enter the bucket, and they're processed at a constant rate. If the bucket is full, new requests are rejected.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leaky_bucket", "token_bucket", "rate_smoothing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting choice. Most people reach for token bucket. Can you elaborate on why leaky bucket is better here?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "leaky_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Token bucket is great when you want to allow legitimate bursts — like a user loading a page that fires 20 API calls at once. But for API protection, bursts are exactly what cause problems. A token bucket with 100 tokens/second and a burst of 500 means a client could send 500 requests in one second. That's a mini-DDoS. Leaky bucket enforces a maximum average rate with a small buffer for network jitter but doesn't allow sustained bursts. The trade-off is that leaky bucket is slightly less user-friendly for bursty workloads, but at the platform protection level, that's the right trade-off.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leaky_bucket", "token_bucket", "burst_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair enough. Now, we also need to support per-minute windows. How does that fit with leaky bucket?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "sliding_window" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the per-minute window, I'd use a sliding window log approach. We store the timestamp of every request in a sorted set in Redis — one sorted set per API key. To check the rate, we remove all entries older than 60 seconds, then count the remaining entries. If the count exceeds the limit, reject. The advantage over a fixed window counter is no boundary spike problem — where a client sends the full limit at 0:59 and again at 1:01. The sliding window log gives exact counts. The downside is memory — we're storing every timestamp. But with Redis sorted sets, it's quite efficient.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sliding_window_log", "sorted_sets_redis", "fixed_window_problem"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned memory. Let's quantify that. How much memory does the sliding window log use?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let's say a client has a limit of 1000 requests per minute. Each timestamp in the sorted set takes about 20 bytes — 8 bytes for the score (timestamp), 8 bytes for the member, plus overhead. So per client: 1000 * 20 = 20 KB at peak. If we have 100K active API keys, that's 100K * 20 KB = 2 GB for the per-minute window. For per-second limits, the sorted set is much smaller — maybe 100 entries max — so negligible. 2 GB is very manageable for Redis. If it became a concern, we could switch to sliding window counters which use constant memory, but lose some accuracy at window boundaries.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "storage_estimation", "sliding_window_counter"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the high-level architecture and request flow.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The API gateway receives a request and extracts the API key. It makes a lightweight RPC to the rate limiter service. The rate limiter service looks up the client's tier configuration from a local cache (synced from a config database). Then it executes the rate check against Redis — for both per-second (leaky bucket) and per-minute (sliding window log). If either limit is exceeded, it returns a 429 with Retry-After and X-RateLimit-Remaining headers. The rate limiter service is stateless — all state lives in Redis. Multiple instances sit behind a load balancer. Redis is clustered and sharded by API key using Redis Cluster's hash slots.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_gateway", "redis_caching", "load_balancing", "sharding_strategy", "rate_limit_headers"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you implement the leaky bucket in Redis specifically? What commands?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "leaky_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd implement the leaky bucket using a Redis Lua script for atomicity. The state per key is: last_request_time and water_level (current bucket fill). On each request, the script calculates how much water has leaked since last_request_time based on the drain rate, subtracts that from water_level, adds 1 for the new request, and checks if it exceeds capacity. All in one atomic operation. The Lua script looks like: local now = tonumber(ARGV[1]); local rate = tonumber(ARGV[2]); local capacity = tonumber(ARGV[3]); local leaked = (now - last_time) * rate; water_level = max(0, water_level - leaked) + 1; if water_level > capacity then reject. This runs in microseconds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leaky_bucket", "redis_lua_scripts", "atomic_operations"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Similarly, the sliding window log — how do you do that atomically in Redis?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "sliding_window_log" }
+    },
+    {
+      "role": "candidate",
+      "content": "Again, a Lua script wrapping Redis sorted set commands. ZREMRANGEBYSCORE to remove entries older than now - window_size. Then ZADD to insert the current timestamp with a unique member (timestamp + random suffix to handle same-millisecond requests). Then ZCARD to count remaining entries. If count exceeds limit, we ZREM the entry we just added and reject. All atomic. For the sorted set member, I use the timestamp concatenated with a request UUID to ensure uniqueness. We also set an EXPIRE on the sorted set key equal to the window size, so stale keys auto-clean.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sorted_sets_redis", "sliding_window_log", "redis_lua_scripts", "atomic_operations"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "At 500K requests per second, how do you scale Redis? Is a single cluster enough?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "redis_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "A single Redis node handles roughly 100-200K operations per second for simple commands, but our Lua scripts are more expensive — maybe 50-80K per second per node since each request triggers 3-4 operations inside the script. With 500K RPS, we need at least 7-10 Redis shards. Redis Cluster handles this well — we shard by API key, so all rate limit state for a given key lives on one shard. No cross-shard coordination needed. I'd deploy 16 shards for headroom, each with a replica for failover. That gives us about 30K RPS per shard, well within limits.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_scaling", "sharding_strategy", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if Redis goes down? Do you fail open or fail closed?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a critical design decision. I'd fail open — allow requests through — for most clients. The reasoning: rate limiting exists to protect the backend from overload and abuse. If Redis is down briefly, the backend still has its own capacity limits and circuit breakers. Failing closed would mean a Redis outage causes a complete API outage, which is worse than temporarily allowing unlimited traffic. However, for known bad actors or accounts flagged for abuse, I'd maintain a local blocklist in the rate limiter service memory that fails closed regardless of Redis state. The gateway should also have a basic local rate limiter as a fallback — a simple in-memory token bucket per instance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_failure", "fail_open_closed", "circuit_breaker", "local_rate_limiting"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about distributed consistency? If a client's requests hit different gateway instances, they might see different rate limits.",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "distributed_consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Since all state is in centralized Redis and our Lua scripts are atomic, there's no consistency issue during normal operation. All instances see the same state. The challenge arises during network partitions — if some gateway instances can reach Redis and others can't. Those that can't reach Redis fall back to local rate limiting, which is per-instance and thus less accurate. To mitigate, I'd use Redis Cluster's multi-zone deployment so a single AZ failure doesn't partition Redis from all gateways. I'd also set the local fallback limits to be more conservative — if the global limit is 100 RPS, each of 10 gateway instances would enforce 15 RPS locally (slightly over-provisioned to handle uneven distribution).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_consistency", "network_partitions", "local_rate_limiting", "availability_zones"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle rate limit configuration changes? Say a client upgrades their tier.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "configuration_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rate limit configs are stored in a configuration database — Postgres is fine. The rate limiter services maintain a local in-memory cache of configs, refreshed every 30 seconds via polling or pushed via a config change event through Kafka. When a client upgrades, the config is updated in the database, and within 30 seconds all rate limiter instances pick up the change. For immediate effect, we could also expose an admin API that forces a cache refresh. The key is that rate limit state in Redis and the config are separate concerns — changing the config doesn't require resetting the Redis counters. The new limits just apply to the next check.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["configuration_management", "cache_refresh", "kafka"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about monitoring and observability for the rate limiter itself?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several dimensions to monitor. First, the rate limiter service latency — p50, p95, p99 of the Redis call. If this creeps up, it directly impacts API latency. Second, the rate of 429 responses — broken down by client tier. A spike in rejections might indicate an attack, a misconfigured limit, or a legitimate traffic surge. Third, Redis memory and CPU utilization per shard. Fourth, I'd track the rate of fallback-to-local events — that indicates Redis connectivity issues. For alerting: alert on rate limiter latency exceeding 5ms (it should be sub-millisecond), alert on Redis shard failover events, and alert on unusual 429 spikes. All metrics exported via Prometheus with Grafana dashboards.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "latency_tracking", "alerting", "prometheus_grafana"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final thoughts or things you'd do differently if you had more time?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few additions. First, I'd add a distributed rate limiting mode for multi-region deployments — each region enforces a fraction of the global limit locally, with periodic synchronization. Second, I'd implement rate limit response headers consistently: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset — these are critical for client developers to build proper retry logic. Third, I'd consider adding a 'warm-up' period for new API keys where limits are temporarily lower to catch abuse early. And finally, for very high-value enterprise clients, I'd consider dedicated Redis shards to eliminate noisy-neighbor effects.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_region", "rate_limit_headers", "abuse_prevention", "noisy_neighbor"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great discussion. I really liked the leaky bucket choice and the thorough Redis implementation details. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 77,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 8,
+      "api_design": 8,
+      "database_design": 8,
+      "caching_strategy": 9,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Justified leaky bucket over token bucket with clear reasoning about traffic smoothing",
+      "Deep Redis implementation details — Lua scripts, sorted sets, atomicity",
+      "Nuanced fail-open vs fail-closed analysis with local fallback strategy"
+    ],
+    "weaknesses": [
+      "Could have discussed multi-region rate limiting in more depth earlier",
+      "Didn't explore alternative backends to Redis (e.g., local + gossip approaches)"
+    ]
+  }
+}

@@ -1,0 +1,159 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "staff",
+    "candidate_profile": "deep-sharding",
+    "total_exchanges": 20,
+    "generation_id": "seed_393"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We've been talking about a URL shortener that handles 100 million new URLs a day with a 100:1 read-to-write ratio. You mentioned you'd use PostgreSQL. Let's go deep on sharding — with 180 billion rows after 5 years, walk me through why you need to shard in the first place.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 180 billion rows, a single PostgreSQL instance hits several hard walls. First, index size: a B-tree on the short_code column alone would be on the order of several terabytes. That won't fit in memory, so every lookup potentially requires multiple disk seeks, pushing p99 latency well beyond our 50ms target. Second, vacuum and maintenance operations become unmanageable — autovacuum on a multi-terabyte table causes massive I/O storms that degrade read performance. Third, backups and point-in-time recovery become operationally painful — restoring a single node from a 90TB snapshot takes days. Sharding lets us keep each shard at a manageable size — say 1-3TB — where indexes fit in RAM, vacuums are fast, and backup/restore is tractable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_strategy", "database_scaling", "index_sizing", "vacuum_overhead"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good motivation. Now the critical decision: what do you use as the shard key, and why?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "shard_key_selection" }
+    },
+    {
+      "role": "candidate",
+      "content": "The shard key should align with our primary access pattern, which is point lookups by short_code during redirects. So I'd shard on the short_code itself. Specifically, I'd take a hash of the short_code — say the first 2 bytes of an MD5 — and use that to determine the shard. This way, every redirect request can be routed to exactly one shard with no scatter-gather. An alternative would be sharding by creation timestamp, which keeps writes sequential, but reads would require knowing which time range a code belongs to, adding a lookup step. Another option is sharding by user_id, but that only helps if you're listing a user's URLs — it doesn't help the redirect hot path at all.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["shard_key_selection", "access_pattern_alignment", "hash_based_routing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You chose hash-based sharding. What are the concrete trade-offs between hash-based and range-based sharding for this system?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "hash_vs_range_sharding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hash-based gives us uniform data distribution — no hotspots from popularity skew, since the hash scrambles the natural ordering of short codes. The downside is that range queries become expensive. If someone asks 'give me all URLs created between dates X and Y,' we'd have to scatter-gather across every shard. Range-based sharding on, say, the short_code's lexicographic order preserves range scan capability, but it creates hotspots because new short codes cluster on a single shard — the latest range partition absorbs all writes. For our use case, 99.9% of queries are point lookups by short_code, so hash-based is the clear winner. The only range query we need — listing a user's URLs — can be served by a secondary index in a separate store or by an async analytics pipeline.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hash_vs_range_sharding", "hotspot_avoidance", "scatter_gather", "write_distribution"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How many shards do you start with, and how do you arrive at that number?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "shard_count_planning" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd work backwards from the per-shard capacity target. Each shard should hold at most 2TB of data to keep indexes in memory and vacuums manageable. At 50GB per day across the whole system, after 5 years that's about 91TB total. 91TB / 2TB per shard = 46 shards minimum. I'd round up to 64 because powers of two simplify hash-space partitioning — the hash keyspace of 0 to 2^16-1 divides cleanly into 64 ranges of 1024 each. But I'd provision the hash space for 256 logical shards from day one, even if we only deploy 64 physical instances. Each physical instance hosts 4 logical shards. When we need to scale, we split a physical shard by migrating its logical shards to new hardware — no rehashing required. This is the virtual shard pattern.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["shard_count_planning", "virtual_shards", "capacity_planning", "power_of_two_sharding"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Smart. Now talk me through rebalancing. When one shard starts getting disproportionately large or hot, how do you rebalance without downtime?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "shard_rebalancing" }
+    },
+    {
+      "role": "candidate",
+      "content": "The virtual shard approach makes this tractable. To rebalance, we pick one or more logical shards from the overloaded physical host and migrate them to a less-loaded host. The migration process: first, set up logical replication from the source to a new target for just that logical shard's data, filtered by the hash range. Once the replica catches up, we briefly pause writes to that logical shard — this is a very short pause, on the order of seconds — update the routing table in our shard map service to point that logical shard to the new host, then resume writes. The pause can be minimized further with a double-write approach: after the routing table update, we write to both old and new for a brief window, then cut over reads, and finally stop writes to the old location. For truly zero downtime, tools like pg_logical or Vitess's VReplication handle this by streaming the changelog and doing a hot cutover. The key is that only a fraction of the data moves — one logical shard out of 256 — so it's fast.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["shard_rebalancing", "logical_replication", "zero_downtime_migration", "routing_table"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now, are there any scenarios in this system that require cross-shard queries? How do you handle those?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cross_shard_queries" }
+    },
+    {
+      "role": "candidate",
+      "content": "A few scenarios. First, listing all URLs for a given user — since we shard by short_code hash, a single user's URLs are scattered across all shards. Second, analytics queries like 'total URLs created today' or 'most popular URLs this hour.' Third, collision checks if we use random code generation — though with hash-based IDs from a range allocator, we avoid this. For user-specific queries, I'd maintain a separate user-to-URLs index, possibly in a different store optimized for that access pattern — say a user_id-sharded table or even an Elasticsearch index. For analytics, I'd avoid querying the operational database entirely — push events to Kafka and aggregate in ClickHouse or a data warehouse. The principle is: design the sharding for the dominant access pattern (redirect lookups) and solve secondary access patterns with purpose-built secondary indexes or materialized views, not with expensive scatter-gather queries across 64+ shards.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cross_shard_queries", "secondary_indexes", "scatter_gather", "cqrs_pattern"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned Vitess earlier. Can you elaborate on how a shard proxy like Vitess fits into this architecture versus building your own routing layer?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "shard_proxy_vitess" }
+    },
+    {
+      "role": "candidate",
+      "content": "Vitess was built at YouTube specifically for sharding MySQL at massive scale, and there's growing PostgreSQL support. The core value proposition is that Vitess handles shard routing, connection pooling, query rewriting, and online schema changes — all things we'd otherwise build ourselves. With Vitess, our application sends standard SQL to a VTGate proxy, which parses the query, extracts the shard key from the WHERE clause, and routes to the correct VTTablet (which manages the underlying MySQL/Postgres instance). For scatter-gather queries, VTGate transparently fans out to all shards and merges results. The tradeoffs: Vitess adds operational complexity — it's another distributed system to deploy, monitor, and upgrade. It adds a network hop and ~1-2ms of latency per query through VTGate. And it constrains your schema — certain SQL features like cross-shard JOINs or foreign keys aren't supported. For a URL shortener where queries are simple point lookups, the proxy overhead is minimal and the operational benefits — especially VReplication for resharding and online DDL — are enormous compared to building a custom routing layer.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["shard_proxy_vitess", "vtgate_routing", "connection_pooling", "online_schema_changes", "vreplication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about hotspot detection. Even with hash-based sharding, hotspots can emerge. How would you detect them?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "hotspot_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hotspots can emerge from two sources even with hash sharding: data volume skew (one shard accumulates more data if the hash function has slight non-uniformity) and query volume skew (a viral short URL gets millions of hits, and all those reads hit the same shard). For detection, I'd instrument multiple layers. At the database level, monitor per-shard metrics: QPS, p99 latency, CPU utilization, disk I/O, and connection count. If any shard's QPS exceeds 2x the mean, that's a hotspot. At the application level, track per-short_code access frequency with a Count-Min Sketch in each app server — this gives us approximate top-K hot keys with O(1) memory. If a single key exceeds a threshold — say 1000 QPS — flag it as a hot key. At the caching layer, Redis already absorbs most hot-key traffic, but if a hot key's cache entry expires, we get a thundering herd to one shard. So I'd also monitor cache hit rate per shard bucket. Alerting: Prometheus + Grafana dashboards with alerts when per-shard p99 exceeds 20ms or when any single key exceeds 5000 QPS.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hotspot_detection", "count_min_sketch", "per_shard_monitoring", "thundering_herd", "hot_key_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Once you detect a hot key, what do you actually do about it?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "hotspot_mitigation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three levels of mitigation depending on severity. Level 1: extend the cache TTL for the hot key or make it never expire until explicitly invalidated — this keeps it in Redis and off the database. Level 2: replicate the hot key across multiple Redis nodes with read-from-replica, so the load is spread. The app server randomly picks one of N replicas for each read, distributing the per-key QPS across N nodes. Level 3: for extreme cases like a viral link with millions of QPS, serve it from an in-process local cache in each application server. Each app server holds the mapping in memory, refreshed every 30 seconds from Redis. This means the hot key never even leaves the app server — zero network hops for the lookup. The tradeoff is stale data for up to 30 seconds, but for a redirect URL that almost never changes, that's completely acceptable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hotspot_mitigation", "cache_replication", "local_cache", "tiered_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Finally, let's talk about the migration path. You've inherited a production system running on a single PostgreSQL instance with 500 million rows and growing. How do you migrate to a sharded architecture with zero downtime?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "migration_single_to_sharded" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the hardest part of sharding in practice. I'd do it in four phases. Phase 1: Introduce the shard routing layer in shadow mode. Deploy the shard-aware application code that computes the target shard for every query but still sends all queries to the monolithic database. Log the computed shard alongside each query. This validates routing correctness without any risk. Phase 2: Set up the target shards and start logical replication. Create the N target shard databases. Use a custom CDC pipeline — or Debezium streaming from the monolith's WAL — to replicate rows to the correct target shard based on their hash key. Each row flows to exactly one shard. Continue writing to the monolith. Phase 3: Double-write verification. Switch the application to dual-write mode — writes go to both the monolith and the correct shard. Reads still come from the monolith. Run a background consistency checker that samples rows from each shard and compares them to the monolith. Fix any discrepancies. Phase 4: Cut over reads. Start routing reads to the shards. This can be done incrementally — route 1% of traffic, then 10%, then 50%, then 100%. Monitor latency and error rates at each step. Once 100% of reads are on shards and the consistency checker shows zero discrepancies for 48 hours, decommission the monolith writes. Keep the monolith in read-only mode for a week as a safety net. Total timeline: 4-6 weeks for a team of 2-3 engineers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["migration_single_to_sharded", "dual_write", "cdc_pipeline", "shadow_mode", "incremental_cutover", "consistency_checking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the biggest risk in that migration, and how do you mitigate it?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "migration_risks" }
+    },
+    {
+      "role": "candidate",
+      "content": "The biggest risk is data inconsistency during the dual-write phase. If a write succeeds on the monolith but fails on the shard — due to a network partition or shard being temporarily unavailable — you have diverged state. Mitigation: make the monolith the source of truth during migration. Every write goes to the monolith first. The CDC pipeline (Debezium reading the WAL) is the canonical path for populating shards. The dual-write from the application is an optimization for lower replication lag, not the primary mechanism. If the application-level write to a shard fails, we don't retry or block — the CDC pipeline will catch it within seconds. The consistency checker runs continuously, comparing row counts and checksums per hash bucket between the monolith and each shard. Any drift is resolved by replaying from the monolith's WAL. The second risk is that the migration takes so long that the monolith hits its scaling ceiling before we finish. To mitigate, we set a hard deadline and have a fallback plan — vertical scaling the monolith (bigger instance) or table partitioning within the single instance as a stopgap.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_consistency", "cdc_as_source_of_truth", "checksumming", "fallback_planning"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent deep dive on sharding. You covered the full lifecycle from motivation through migration. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "One thing I'd emphasize: sharding should be the last resort, not the first. Before sharding, exhaust simpler options — read replicas, caching, table partitioning, archiving old data to cold storage. Sharding introduces permanent operational complexity: every schema change is now a distributed operation, every new query needs shard-awareness, and debugging production issues requires correlating logs across N shards. If you must shard, invest heavily in tooling upfront — a shard-aware query analyzer, automated rebalancing with safety checks, and comprehensive per-shard observability. The technology is the easy part; the operational discipline is what makes or breaks a sharded system at scale.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_as_last_resort", "operational_complexity", "tooling_investment", "observability"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Well said. Thank you — that was a thorough treatment of the topic.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 78,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 9,
+      "api_design": 6,
+      "database_design": 10,
+      "caching_strategy": 7,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional depth on sharding mechanics — covered virtual shards, shard key selection, and hash vs range tradeoffs with concrete reasoning",
+      "Practical migration plan with four clearly defined phases and rollback strategy",
+      "Strong hotspot detection and mitigation with tiered caching approach"
+    ],
+    "weaknesses": [
+      "Requirements gathering was skipped — jumped directly into sharding without revisiting scope",
+      "API design and high-level architecture were not discussed in this deep dive"
+    ]
+  }
+}

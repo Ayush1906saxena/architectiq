@@ -1,0 +1,163 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "principal",
+    "candidate_profile": "ml-platform",
+    "total_exchanges": 22,
+    "generation_id": "seed_437"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design the ML platform for a ride-sharing company. Multiple teams use ML for different products. How would you architect a shared platform?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Matching, pricing, ETA, fraud detection — all ML models. And that's just the ride-sharing vertical. Add food delivery ETA, driver onboarding risk scoring, customer support ticket routing, and you have 20+ production models owned by 8 different teams. We need a shared ML platform: feature store, model registry, A/B testing framework, model monitoring, and auto-retraining pipelines. Without this platform, each team builds their own ML infrastructure, and we end up with 8 incompatible training pipelines, duplicated feature computation, and no standardized way to deploy or monitor models.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ml_platform", "feature_store", "model_registry", "ab_testing", "model_monitoring", "auto_retraining", "platform_consolidation"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What are the specific requirements for this ML platform?",
+      "annotation": { "action": "probe", "phase": "requirements", "target_concept": "requirements_gathering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Requirements from three perspectives. Data scientists: they want to iterate fast — go from idea to experiment in hours, not weeks. They need Jupyter notebooks, access to training data, easy hyperparameter tuning, and the ability to deploy a model to A/B test without filing an engineering ticket. ML engineers: they need reproducible training pipelines, version control for data and models, standardized serving infrastructure that handles 100K+ predictions per second, and alerts when model performance degrades. Engineering leadership (my perspective): I need cost efficiency (GPU spend is our second-largest infra cost after maps), reliability (the pricing model going down means we can't charge riders), governance (who trained what model on what data, and is the model biased?), and platform adoption (if teams don't use the platform, it has no value). Scale parameters: 20 production models, 200+ experimental models at any time, 50 data scientists, 100K predictions per second aggregate, 50TB of training data, and 500 GPU-hours per day of training compute.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["user_personas", "iteration_speed", "reproducibility", "gpu_cost", "model_governance", "scale_parameters"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the platform architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "platform_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Six components. One: Feature Store — centralized computation and storage of ML features, shared across all models. Two: Training Pipeline — orchestrated, reproducible model training with versioning. Three: Model Registry — version-controlled model artifacts with metadata, lineage, and approval workflows. Four: Model Serving — low-latency inference infrastructure that scales automatically. Five: Experimentation Platform — A/B testing framework for comparing model versions in production. Six: Monitoring and Observability — real-time tracking of model performance, data drift, and system health. These components form a continuous loop: features feed training, training produces models, models are registered and deployed for serving, serving generates predictions that are measured by the experimentation platform, monitoring detects degradation that triggers retraining, which starts the cycle again. The key architectural principle: separation of concerns. Data scientists interact with the Feature Store and Training Pipeline. ML engineers own the Model Registry and Serving infrastructure. The Experimentation Platform and Monitoring are shared tools used by everyone.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feature_store", "training_pipeline", "model_registry", "model_serving", "experimentation_platform", "monitoring", "continuous_loop"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's go deep on the Feature Store. Why is this critical?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "feature_store" }
+    },
+    {
+      "role": "candidate",
+      "content": "The Feature Store solves three problems. Feature duplication: without it, the pricing team computes 'driver supply in zone' one way, the ETA team computes it a different way, and the matching team computes it a third way. Same concept, three implementations, three potential bugs, three times the compute cost. Training-serving skew: during training, data scientists compute features in batch from a data warehouse. In production, features must be computed in real-time. If the computation logic differs — even slightly — the model performs differently in production than in training. The Feature Store guarantees that the same feature definition is used in both contexts. Feature discovery: a new data scientist shouldn't spend 2 weeks figuring out what features exist. The Feature Store is a catalog with documentation, data types, freshness guarantees, and usage statistics. Architecture: two stores — an offline store (data warehouse, Hive or BigQuery) for batch training and a online store (Redis or DynamoDB) for real-time serving. Feature pipelines compute features and write to both stores. Features are defined declaratively: 'driver_supply_zone_5min: count of available drivers in the rider's H3 hex, computed over a 5-minute sliding window.' The pipeline handles the computation; the definition is the single source of truth. At our scale — 50TB of training data and 500+ defined features — the Feature Store is the most impactful infrastructure investment because it multiplies every team's productivity.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feature_store", "feature_duplication", "training_serving_skew", "feature_discovery", "offline_online_stores", "declarative_features"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the training pipeline work? Walk me through a model training lifecycle.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "training_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The lifecycle from idea to production model. Step 1 — Exploration: a data scientist opens a Jupyter notebook connected to the platform. They browse the Feature Store catalog, select relevant features, and pull a training dataset. The dataset is a point-in-time snapshot — features as they existed at the time of each historical event, not current values. This prevents data leakage. Step 2 — Experimentation: they train multiple model versions using the platform's training API, which wraps frameworks like PyTorch or XGBoost. Each training run is automatically logged: hyperparameters, training data version, feature set, metrics (AUC, RMSE, etc.), and the model artifact. Runs use managed GPU instances from a shared pool — the platform handles scheduling and resource allocation. Step 3 — Validation: before any model can be registered, it must pass automated validation checks. Statistical checks: does the feature distribution in training data match production data? Performance checks: does the model meet minimum accuracy thresholds? Bias checks: does the model perform equitably across demographic groups (e.g., does the pricing model charge more in predominantly minority neighborhoods)? Step 4 — Registration: the validated model is registered in the Model Registry with its complete lineage — training data version, feature versions, code version, and validation results. Step 5 — Deployment approval: a model reviewer (senior ML engineer or the team lead) approves the model for production deployment. This is the human gate before anything touches real users.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["training_lifecycle", "point_in_time_features", "experiment_tracking", "automated_validation", "bias_detection", "model_lineage", "deployment_approval"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does model serving work at 100K predictions per second?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "model_serving" }
+    },
+    {
+      "role": "candidate",
+      "content": "Model serving is the most latency-sensitive component — the pricing model must return a fare estimate in under 50ms, and it's called on every ride request. Architecture: a model serving fleet of containers, each loading one or more models into memory. Models are deployed as Docker containers with a standardized gRPC interface: predict(features) -> prediction. This uniformity means the platform handles deployment, scaling, and monitoring regardless of whether the model is XGBoost, a neural network, or a custom model. Scaling strategy: each model has its own auto-scaling group based on its traffic pattern. The pricing model scales to 50K RPS during rush hour, while the fraud model runs at a steady 5K RPS. The matching model has the tightest latency requirement (20ms p99) and runs on GPU instances for neural network inference. For models with less strict latency, CPU instances are more cost-effective. Feature fetching: at inference time, the serving container fetches the user's features from the online Feature Store (Redis). This is a single round-trip to Redis for all features needed by the model — typically 20-50 features, pre-computed and stored as a single serialized blob per entity. This fetch takes 1-3ms. The remaining latency budget goes to model inference. Caching: for some models, predictions are cacheable. The ETA model for the same origin-destination pair can be cached for 30 seconds. The pricing model changes every minute based on supply-demand dynamics, so shorter cache TTL. Caching reduces load by 40% during peak.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["model_serving", "grpc_interface", "auto_scaling", "gpu_vs_cpu", "feature_fetching", "prediction_caching", "latency_budget"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the A/B testing framework work for ML models?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ab_testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "A/B testing for ML models is different from A/B testing for UI changes — the metrics are different, the time to significance is longer, and the risks are higher (a bad pricing model costs real money). The framework: each model can have multiple 'variants' deployed simultaneously. A routing layer assigns users to variants based on a hash of their user_id — deterministic assignment so a user always sees the same variant during the experiment. Traffic split is configurable: typically 90% on the current champion model, 10% on the challenger. For high-risk models like pricing, we start at 1% and ramp slowly. Metric collection: the experimentation platform logs every prediction with the model variant that produced it. Downstream outcomes (rider completed trip, driver accepted, customer filed a dispute) are joined with predictions to compute business metrics per variant. Statistical framework: we use sequential testing (not fixed-horizon t-tests) so experiments can be stopped early when results are conclusive — important because running a worse model for longer costs money. We also monitor guardrail metrics: even if the challenger model improves the primary metric (e.g., ride acceptance rate), if it degrades a guardrail metric (e.g., customer complaints increase by >5%), the experiment is automatically stopped. Experiment lifecycle: propose (specify hypothesis and metrics), configure (set traffic split and duration), run (automated data collection), analyze (statistical significance report), decide (approve or reject), and promote (swap champion to challenger with full traffic). The entire lifecycle is auditable — regulators may ask why the pricing model charges what it charges.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ab_testing", "sequential_testing", "guardrail_metrics", "traffic_routing", "experiment_lifecycle", "deterministic_assignment", "auto_stop"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you detect when a model is degrading in production?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "model_monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Model degradation is insidious — it happens gradually and often isn't caught until a business metric drops weeks later. Four monitoring layers. Data drift detection: continuously compare the distribution of incoming feature values against the training distribution. If a feature's distribution shifts beyond a threshold (measured by KL divergence or Population Stability Index), alert. Example: if 'driver supply' features start skewing because of a holiday or a driver strike, the model's predictions become unreliable. Prediction drift: monitor the distribution of model outputs. If the pricing model suddenly starts predicting fares 20% higher on average, something is wrong — either the inputs changed or the model is behaving unexpectedly. Outcome monitoring: track the correlation between predictions and actual outcomes. For ETA: predicted ETA vs actual trip duration. For pricing: predicted ride acceptance rate vs actual. For matching: predicted driver proximity vs actual pickup time. If the correlation degrades, the model is losing accuracy. System health: inference latency, error rates, memory usage, and GPU utilization. A memory leak in the serving container could cause gradually increasing latency, which manifests as model 'degradation' from the user's perspective. Each monitoring layer has automated responses. Data drift alert: notify the model owner. Prediction drift: increase logging and enable shadow scoring (run the previous model version in parallel and compare). Outcome degradation: trigger automatic retraining if a retraining pipeline is configured. System health issue: trigger container restart or scaling event.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["model_monitoring", "data_drift", "prediction_drift", "outcome_monitoring", "kl_divergence", "automated_responses", "shadow_scoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about auto-retraining. How do you keep models fresh without manual intervention?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "auto_retraining" }
+    },
+    {
+      "role": "candidate",
+      "content": "Auto-retraining is the automation of the training lifecycle — triggered by schedule or by monitoring signals. Two trigger modes. Scheduled retraining: the ETA model retrains weekly on the latest 90 days of trip data. The pricing model retrains daily because supply-demand dynamics change rapidly. The fraud model retrains bi-weekly because fraud patterns evolve slower. Each schedule is configured per model. Event-triggered retraining: when the monitoring system detects data drift or outcome degradation beyond a threshold, it triggers an immediate retraining cycle for the affected model. The retraining pipeline: fetch latest training data from the Feature Store (same feature definitions, newer data), train using the same hyperparameters as the current champion (optionally with hyperparameter search), run automated validation (same checks as manual training — statistical, performance, bias), compare against the current champion on a holdout set, and if the new model is better on the primary metric without degrading guardrails, auto-promote to A/B test at 5% traffic. If the A/B test shows improvement after sufficient statistical power, auto-promote to champion. If at any stage — validation, A/B test — the new model is worse, the pipeline stops and alerts the model owner for investigation. The critical safety guardrail: auto-retraining never deploys to 100% without human review for high-criticality models (pricing, matching). It deploys to A/B test automatically, but promotion from A/B test to full deployment requires human approval. For low-criticality models (customer support routing), full auto-promotion is allowed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["auto_retraining", "scheduled_retraining", "event_triggered_retraining", "automated_validation", "auto_promotion", "safety_guardrails", "criticality_tiers"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle model fairness and bias? The pricing model is particularly sensitive.",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "model_fairness" }
+    },
+    {
+      "role": "candidate",
+      "content": "Model fairness in ride-sharing has real-world consequences — if the pricing model charges more in low-income neighborhoods or the matching model makes riders in certain areas wait longer, we're perpetuating systemic inequities. Built into the platform: every model training run automatically generates a fairness report. For the pricing model: compare predicted fares across census tract income levels, racial demographics, and urban vs suburban areas. For the matching model: compare predicted wait times across the same dimensions. For the fraud model: compare false positive rates across demographic groups (is the model more likely to flag minority users as fraudulent?). The fairness metrics: equalized odds (similar false positive and false negative rates across groups), demographic parity (similar prediction distributions), and individual fairness (similar inputs produce similar outputs). No model passes validation if it exceeds fairness thresholds — specifically, if the disparity ratio between any two demographic groups exceeds 1.2 (20% difference) on any fairness metric, the model is flagged. The tricky part: some fairness disparities are caused by the training data reflecting real-world inequality, not by the model itself. If drivers avoid certain neighborhoods (leading to longer ETAs), the ETA model accurately predicts longer waits — is that the model being biased or the model being accurate? This requires a product and policy decision, not just a technical fix. The platform surfaces the disparity; the business decides the response — which might be subsidizing driver incentives in underserved areas rather than manipulating the model.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["model_fairness", "equalized_odds", "demographic_parity", "fairness_thresholds", "structural_inequality", "policy_distinction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you manage the GPU compute costs for this platform?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "cost_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "GPU compute is our most expensive and most scarce resource. Cost management operates at three levels. Scheduling efficiency: a centralized GPU cluster managed by Kubernetes with a gang-scheduling plugin. Training jobs are queued and scheduled based on priority and resource availability. Interactive notebooks (low priority, preemptible) yield to production training jobs (high priority). Spot/preemptible instances for training (not serving) — training is fault-tolerant via checkpointing, so interrupted jobs resume from the last checkpoint. This saves 60-70% on training compute. Instance right-sizing: not all models need A100 GPUs. XGBoost trains on CPU. Small neural networks train on T4 GPUs. Only the largest models (the matching model's deep learning architecture) need A100s. The platform recommends instance types based on model framework and dataset size. Cost attribution: each team is charged for their GPU-hours at an internal transfer price. This creates accountability — a team running expensive hyperparameter sweeps every night will question whether the marginal accuracy improvement justifies the cost when they see the bill. We publish a 'cost per prediction' metric for each model: total infrastructure cost divided by prediction volume. If the ETA model costs $0.001 per prediction and the ML team proposes a new architecture that's 5% more accurate but costs $0.01 per prediction, the 10x cost increase might not be justified. This framing keeps ML teams grounded in business value rather than optimizing metrics in isolation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gpu_cost_management", "spot_instances", "checkpointing", "instance_right_sizing", "cost_attribution", "cost_per_prediction"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the adoption strategy? How do you get 8 teams to migrate to your platform?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "adoption_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Adoption follows the same pattern as any internal platform: lead with value, not mandates. Phase 1 — Pick the early win: partner with the ETA team (they have clear pain points with training-serving skew). Co-develop the Feature Store with their use case. When their model accuracy improves because training-serving skew is eliminated, publicize the result internally. Phase 2 — Feature Store as wedge: the Feature Store is the most universally valuable component. Once teams start sharing features, they naturally adopt the rest of the platform because training and serving from the Feature Store is easier through our pipeline than through a custom one. Phase 3 — Make migration easy: provide migration tools. A CLI that converts an existing training script to a platform-compatible pipeline. An adapter that wraps an existing model artifact for the platform's serving infrastructure. The migration shouldn't require a rewrite — it should be a 2-hour task. Phase 4 — Create urgency without mandates: publish a quarterly 'ML Health Report' showing model freshness, monitoring coverage, and incident response time per team. Teams using the platform will have better metrics. Social pressure and visibility drive adoption faster than mandates. The one mandate I would make: all new production models must go through the Model Registry and Serving infrastructure. Existing models can migrate at their own pace. This prevents the platform from falling further behind while we build momentum.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["adoption_strategy", "early_win", "feature_store_wedge", "migration_tooling", "social_pressure", "selective_mandates"], "depth": "strategic", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. The combination of deep ML systems knowledge with practical platform thinking and cost management was exactly what we needed at this level. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 82,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 8,
+      "api_design": 8,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 9,
+      "failure_handling": 7,
+      "communication": 9,
+      "ml_systems": 10,
+      "platform_design": 9,
+      "organizational_awareness": 9
+    },
+    "strengths": [
+      "Exceptional ML platform architecture covering the full lifecycle from feature engineering to monitoring",
+      "Strong fairness framework with practical acknowledgment of structural inequality vs model bias distinction",
+      "Pragmatic adoption strategy with concrete phased approach and selective mandates"
+    ],
+    "weaknesses": [
+      "Could have explored failure handling for the model serving infrastructure in more depth",
+      "Didn't discuss data versioning and dataset management in detail",
+      "Limited discussion of multi-region model serving for global ride-sharing operations"
+    ]
+  }
+}

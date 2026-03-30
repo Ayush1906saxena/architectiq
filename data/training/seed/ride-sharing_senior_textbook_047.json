@@ -1,0 +1,172 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "senior",
+    "candidate_profile": "textbook",
+    "total_exchanges": 22,
+    "generation_id": "seed_047"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing service like Uber. Riders request rides, drivers get matched, trips happen. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. What's the scale — how many cities, concurrent rides, active drivers? Do we need to support ride pooling or just single rides? What's the target matching latency — how fast should a driver be assigned after a request? And do we need surge pricing?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["scale", "ride_types", "matching_latency", "surge_pricing"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "50 cities, 1 million concurrent rides at peak, 500,000 active drivers at any time. Single rides only. Matching within 10 seconds. Yes to surge pricing. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great. Let me start with the location indexing system, which is the foundation of the dispatch. To match riders with nearby drivers, we need a spatial index of driver locations. I'd use geohashing. A geohash is a hierarchical spatial encoding that converts a 2D latitude/longitude coordinate into a 1D string. The algorithm works as follows: the world is divided into a grid. Each cell is assigned a base-32 character. Increasing the string length increases precision. For example, a geohash of length 4 covers an area of roughly 39km x 20km. Length 5 gives 5km x 5km. Length 6 gives 1.2km x 0.6km. For ride matching, length 6 is ideal because it covers roughly a city block area — close enough for driver proximity. The key property of geohashing is that nearby locations share a common prefix. So all drivers in the same area have geohashes starting with the same characters. This lets us use a simple prefix query to find nearby drivers. To handle edge cases at cell boundaries, we query the target cell plus all 8 adjacent cells.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geohashing", "spatial_encoding", "prefix_query", "adjacent_cells"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a very thorough description of geohashing. Now, your driver app sends a location update every 4 seconds for 1 million active drivers. What's the write QPS and how do you handle it?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "location_write_qps" }
+    },
+    {
+      "role": "candidate",
+      "content": "... 1 million drivers, every 4 seconds... that's 250,000 writes per second. That's... a lot.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["qps_calculation"], "depth": "surface", "has_reasoning": false, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right. 250,000 location updates per second. Each update needs to update the spatial index so dispatch queries reflect the latest positions. How would you handle this write load?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "location_write_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "I... could use Redis for the spatial index? Redis supports geospatial commands — GEOADD and GEOSEARCH. But 250K writes per second... a single Redis instance handles about 100-200K ops/sec. So we'd need a Redis Cluster with multiple shards? Maybe partition by city — each city gets its own Redis instance?",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["redis_geospatial", "redis_cluster", "city_partitioning"], "depth": "surface", "has_reasoning": false, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Partitioning by city is a reasonable start. But some cities — say New York or Mumbai — might have 100,000+ active drivers. That's still 25,000 writes per second for a single city partition. And the location updates aren't the only load — dispatch queries are happening concurrently. Walk me through a complete solution.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "location_write_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm... okay. For a large city, I guess we could further partition within the city by geohash prefix. Like, split New York into quadrants, each handled by a separate shard. The routing layer determines which shard based on the driver's geohash prefix. For dispatch queries, we might need to query multiple shards if the rider is near a boundary. But... I'm not sure about the details of how to handle the shard boundaries efficiently.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["geohash_partitioning", "shard_boundary"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let me push on this differently. The location update is a fire-and-forget operation — the driver doesn't need a response. Does every single update need to go to the spatial index synchronously?",
+      "annotation": { "action": "guide", "phase": "deep_dive", "target_concept": "write_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh — you mean we could buffer the updates? Like, batch them? Collect updates for a short window — maybe 1 second — and bulk-write to the index? That reduces the number of individual write operations. Or... we could write to an in-memory buffer first and flush to the index asynchronously. The index might be slightly stale — a second or two behind — but for dispatch purposes, knowing a driver's location from 2 seconds ago is close enough.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["write_buffering", "batching", "staleness_tolerance"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's better. What about using a message queue — like Kafka — to decouple the location ingestion from the index update?",
+      "annotation": { "action": "guide", "phase": "deep_dive", "target_concept": "write_decoupling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, yes. The driver app sends location updates to a Kafka topic. Kafka handles the 250K writes/sec easily. Then a consumer service reads from Kafka, batches the updates, and writes to the spatial index. This decouples ingestion from processing. If the index update is slow, the queue absorbs the burst. We can also have multiple consumers processing in parallel, partitioned by city or geohash prefix.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["kafka", "write_decoupling", "batch_processing", "parallel_consumers"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's move on. Walk me through the rider experience — from opening the app to completing a ride.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ride_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "The rider opens the app, enters their destination, sees an estimated fare and ETA. They confirm the request. The dispatch service finds the nearest available driver using the spatial index — queries the rider's geohash cell and adjacent cells, ranks candidates by ETA, sends a request to the top driver. If accepted, the rider sees the driver's info and live location. Driver arrives, starts the trip. During the trip, the app shows the route and ETA to destination. On arrival, the fare is calculated based on distance and time, payment is charged, and both parties rate each other.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["ride_flow", "fare_estimation", "dispatch", "trip_tracking", "payment", "ratings"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What database would you use for trip records?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "PostgreSQL for trip records. The trip record includes: trip ID, rider ID, driver ID, pickup and dropoff locations, timestamps for each state transition, fare breakdown, payment status. Relational makes sense because we need ACID for the payment aspects, and we have clear relationships between trips, riders, and drivers. For the query pattern — mostly lookups by trip ID and queries by rider or driver ID for trip history — PostgreSQL with appropriate indexes handles this well. At 1 million concurrent rides, if rides average 20 minutes, that's about 50,000 new trip records per minute, or roughly 800 writes per second. Well within PostgreSQL's capacity.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["postgresql", "acid", "trip_schema", "capacity_estimation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about failure scenarios? A driver's app crashes mid-trip.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "driver_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the driver's app stops sending location updates, the trip monitoring service detects it — no heartbeat for, say, 60 seconds. The service sends a push notification to the driver asking them to reconnect. If the driver doesn't respond within 5 minutes, the system tries to contact the driver via SMS. Meanwhile, the rider is notified that the driver may be experiencing connectivity issues. If the driver remains unreachable, the trip is eventually marked as interrupted and the rider is offered a new ride. The fare is calculated based on the last known position. This is a degraded experience but not a safety concern as long as the rider can still contact emergency services through the app.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["heartbeat_detection", "driver_reconnection", "trip_interruption", "graceful_degradation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let me ask about surge pricing. You mentioned it earlier. How would you implement it?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing is based on supply-demand ratio. In each geographic area — I'd use the same geohash cells — track the number of ride requests and available drivers. If requests exceed available drivers by some threshold, apply a multiplier. The multiplier could follow a formula like: surge = max(1.0, demand / supply * scaling_factor). For example, if there are 100 requests and 30 drivers in an area, the ratio is 3.3. With a scaling factor... actually, I know the general concept but I'm not confident in the specific formula or how you'd tune the parameters.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["surge_pricing", "supply_demand_ratio"], "depth": "surface", "has_reasoning": false, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's fine — the exact formula is less important than the system design. How do you compute the supply-demand ratio in real time across all your geohash cells?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "real_time_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd have a pricing service that periodically — every 30 seconds or so — aggregates the current ride requests and available drivers per geohash cell. It computes the multiplier and stores it in Redis, keyed by geohash. When a rider opens the app, we look up the surge multiplier for their geohash cell. The pricing service would read from the same spatial index that the dispatch system uses, counting available drivers per cell. Ride request counts come from the dispatch service's request queue, aggregated by cell. It's essentially a streaming aggregation problem.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["pricing_service", "periodic_aggregation", "redis_cache", "streaming_aggregation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Alright, let's wrap up. Summarize your design.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The system has several core services: a location service that ingests 250K driver updates/sec via Kafka and maintains a geospatial index in Redis. A dispatch service that matches riders to drivers using geohash-based proximity search. A trip service that manages the ride state machine in PostgreSQL. A pricing service that computes surge multipliers based on real-time supply-demand. A payment service that charges riders on trip completion. And a notification service for push notifications. The main gap in my design was handling the write load for location updates — I initially didn't appreciate the scale challenge, but the Kafka-based decoupling with batched writes to the spatial index addresses it.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["system_summary", "service_decomposition", "self_awareness"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You knew the geohashing algorithm perfectly but froze when I asked about the practical write QPS challenge. In a real system, the operational concerns — scale, throughput, failure handling — matter more than knowing the algorithm. That's the gap to work on. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 50,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 4,
+      "api_design": 5,
+      "database_design": 6,
+      "caching_strategy": 5,
+      "scalability": 4,
+      "failure_handling": 5,
+      "communication": 6
+    },
+    "strengths": [
+      "Textbook-perfect explanation of geohashing algorithm with concrete precision levels",
+      "Good end-to-end ride flow description covering the user experience",
+      "Honest self-assessment — acknowledged the location write QPS gap in the summary"
+    ],
+    "weaknesses": [
+      "Froze when confronted with a practical scale challenge — 250K writes/sec from location updates",
+      "Required significant interviewer guidance to arrive at Kafka-based write decoupling",
+      "Surge pricing implementation was vague beyond the basic concept",
+      "Did not discuss monitoring, multi-region deployment, or safety features",
+      "Demonstrated classic textbook-only pattern: deep on concepts, shallow on operational reality"
+    ]
+  }
+}

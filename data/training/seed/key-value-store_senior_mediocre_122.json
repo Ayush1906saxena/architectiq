@@ -1,0 +1,191 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "senior",
+    "candidate_profile": "mediocre",
+    "total_exchanges": 22,
+    "generation_id": "seed_122"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed key-value store. Something that stores data across multiple nodes with high availability. What would you like to clarify?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. What's the expected data volume? What are the latency requirements? Do we need strong consistency or is eventual consistency okay? And do we need to support any operations beyond simple get and put?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_volume", "latency", "consistency_model"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10 TB of data. Sub-10ms reads, sub-50ms writes. Eventual consistency is fine — prioritize availability. Simple get/put operations. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Alright. For a distributed KV store, we need to distribute data across multiple nodes. The core problem is: given a key, which node stores it? I'd use consistent hashing. We arrange nodes on a hash ring. Each key is hashed to a position on the ring and stored on the first node clockwise from that position. This way, when we add or remove nodes, only a fraction of keys need to be remapped.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing", "hash_ring", "data_distribution"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Walk me through the consistent hashing in more detail. How many nodes do we need?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "consistent_hashing" }
+    },
+    {
+      "role": "candidate",
+      "content": "With 10 TB and 3x replication, that's 30 TB of total storage. If each node has 1 TB of disk, we need 30 nodes. For consistent hashing, each node is placed at a position on the ring based on its hash — like hash(node_IP). A key gets stored on the first 3 nodes clockwise from its position — that gives us replication factor 3. Reads can go to any of the 3 replicas, writes go to all 3.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "replication", "consistent_hashing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "With 30 nodes on the ring, how evenly is data distributed?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "consistent_hashing" }
+    },
+    {
+      "role": "candidate",
+      "content": "With 30 nodes, each node is responsible for 1/30th of the ring. In theory that's even, but in practice, hashing doesn't guarantee perfectly even spacing. Some nodes might get more of the ring than others. It depends on how the hash function distributes the node IDs. With a good hash function, the distribution should be reasonably even — maybe 20-30% variance between the most loaded and least loaded nodes.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["data_distribution", "hash_variance"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "20-30% variance is significant. Some nodes would have 1.3 TB while others have 0.7 TB. How do you fix this?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "virtual_nodes" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, that is significant. We could... manually place nodes at specific positions on the ring to ensure even spacing? Like, divide the ring into 30 equal segments and assign one node to each? But that would mean we'd need to manually reconfigure when nodes are added or removed, which defeats the purpose of consistent hashing.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["manual_placement"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "There's a standard technique to solve this. Are you familiar with virtual nodes?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "virtual_nodes" }
+    },
+    {
+      "role": "candidate",
+      "content": "Virtual nodes... right. I've heard of the concept. Instead of each physical node having one position on the ring, it has multiple positions — multiple virtual nodes. So a physical node might map to, say, 100 positions on the ring. This means the load is distributed across many more points, smoothing out the distribution. With 30 physical nodes * 100 vnodes each = 3,000 points on the ring, the variance becomes much smaller. I've read about this but haven't implemented it. How do the virtual nodes know which physical node they belong to?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["virtual_nodes", "data_distribution"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "It's a simple mapping table — each virtual node ID maps to a physical node. When adding a physical node, you create new virtual nodes for it and redistribute data from the ring segments they now own. How would you handle adding a new node to the cluster?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "node_addition" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a new node joins, we add its virtual nodes to the ring. Each virtual node takes over a segment that was previously owned by another virtual node. The data in those segments needs to be transferred from the old owner to the new node. This is a background process — while the transfer is happening, reads for those keys can still go to the old node. Once the transfer is complete, the routing table is updated. The key advantage of consistent hashing is that only 1/N of the data needs to move when adding a node.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["node_addition", "data_transfer", "consistent_hashing"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about the write path. How does a put operation work?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "write_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "A put(key, value) request comes to any node — this is the coordinator for that request. The coordinator hashes the key, determines the 3 responsible nodes from the ring, and sends the write to all 3. For eventual consistency with high availability, we use quorum writes — the coordinator waits for 2 out of 3 nodes to acknowledge (W=2) before responding to the client. If one of the 3 nodes is down, the write still succeeds as long as 2 respond. The third node catches up later via an anti-entropy mechanism.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["coordinator_pattern", "quorum", "write_path", "anti_entropy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the third node catch up? What's the anti-entropy mechanism?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "anti_entropy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Anti-entropy... there are a few approaches. One is read repair — when a read queries all 3 replicas and finds one is stale, it sends the latest value to the stale replica. Another is... hinted handoff — when a node is down, another node temporarily stores the write and forwards it when the down node comes back. And there's a background Merkle tree comparison — nodes periodically compare hash trees of their data to find and fix inconsistencies. I know these concepts but I'm not sure which combination is best here.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["read_repair", "hinted_handoff", "merkle_tree", "anti_entropy"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned the right techniques. What about conflict resolution? With eventual consistency, two clients might write to the same key concurrently.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "conflict_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "Conflicts are handled by... last write wins? We use a timestamp on each write, and the most recent timestamp wins. The problem is clock skew between nodes — NTP isn't perfectly synchronized. A better approach might be vector clocks — each write carries a vector of per-node counters. If two writes are concurrent (neither's vector dominates the other), we have a true conflict and need to resolve it — either by returning both to the client or by merging. But vector clocks get complicated. I think last-write-wins with synchronized clocks is the practical choice for most use cases.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["last_write_wins", "vector_clocks", "clock_skew", "conflict_resolution"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's shift to the read path. How do reads work and what's the consistency guarantee?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "read_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "For a read, the coordinator hashes the key, queries the 3 responsible nodes, and waits for R=2 responses (quorum read). It returns the value with the highest timestamp. With W=2 and R=2, since W+R > N (2+2 > 3), we guarantee that at least one read replica has the latest write — so reads are consistent. This gives us 'read your writes' consistency. If a node returns a stale value, the coordinator can do a read repair — send the latest value to the stale node.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["quorum", "read_path", "read_repair", "consistency_guarantee"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You said W=2, R=2, N=3 gives you 'read your writes' consistency. Is that accurate?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "consistency_guarantee" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm... actually, W+R > N guarantees that a read will see the latest acknowledged write — assuming no concurrent writes. It's sometimes called 'strong consistency' for quorum systems. But it's not true linearizability — there can be edge cases during network partitions or when a replica hasn't fully synced. And it's only 'read your writes' if the same client's read reaches a node that received the write. I might be mixing up the exact consistency guarantees. It's stronger than eventual but weaker than true linearizable.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["quorum_consistency", "linearizability", "network_partitions"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss failure scenarios. What happens when a node permanently fails and needs to be replaced?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "node_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a node permanently fails, we add a replacement node. The replacement node needs to get all the data that the failed node held. Since the data is on 2 other replicas (for each partition the failed node owned), the replacement can copy from them. This is the same as adding a new node to the ring — the replacement takes over the failed node's virtual nodes and streams data from the existing replicas. During the transfer, the cluster is operating with only 2 replicas for affected data, so we temporarily have reduced fault tolerance. The transfer should be prioritized to restore the replication factor.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["node_replacement", "data_streaming", "reduced_fault_tolerance"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What storage engine would you use on each node?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "storage_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the local storage on each node, an LSM-tree based engine like RocksDB or LevelDB. LSM-trees are optimized for write-heavy workloads — writes go to an in-memory table, then flush to disk as sorted files. Reads check the memtable first, then the on-disk files. Compaction merges files in the background. For a KV store with 10TB of data, this works well. Alternatively, B-trees (like in traditional databases) would work but LSM-trees generally have better write throughput.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lsm_tree", "rocksdb", "memtable", "compaction", "b_tree"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's wrap up. What's the overall architecture look like?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "30 nodes arranged on a consistent hash ring with virtual nodes for even distribution. Each node runs RocksDB for local storage. Replication factor 3. Quorum reads and writes (W=2, R=2). Conflict resolution via last-write-wins timestamps. Anti-entropy via hinted handoff, read repair, and Merkle tree comparison. A gossip protocol for cluster membership — each node periodically shares its view of the cluster with random peers. Clients connect to any node as coordinator. Adding and removing nodes is handled by the hash ring with minimal data movement.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["consistent_hashing", "virtual_nodes", "rocksdb", "quorum", "gossip_protocol", "anti_entropy"], "depth": "applied", "has_reasoning": false, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thanks. You had good knowledge of the fundamental concepts but struggled when pushed on details like virtual nodes and consistency semantics. Appreciate the discussion.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 52,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 5,
+      "database_design": 6,
+      "caching_strategy": 4,
+      "scalability": 5,
+      "failure_handling": 5,
+      "communication": 6
+    },
+    "strengths": [
+      "Understood consistent hashing at a conceptual level and applied it correctly to the problem",
+      "Good write path design with quorum and coordinator pattern",
+      "Solid knowledge of LSM-tree storage engines"
+    ],
+    "weaknesses": [
+      "Did not know virtual nodes — the standard solution to the uneven distribution problem they identified",
+      "Consistency guarantees were confused — mixed up quorum consistency with linearizability",
+      "Anti-entropy mechanisms were listed but not explained in depth — couldn't articulate when to use which",
+      "No caching strategy discussed — no mention of read caches, bloom filters, or memtable sizing"
+    ]
+  }
+}

@@ -1,0 +1,162 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_031"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing platform like Uber. Walk me through the architecture of matching riders with drivers. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me clarify several things. What's our scale — number of concurrent rides, number of active drivers? Are we doing just point-to-point rides, or also pooling (shared rides)? What's our matching latency target — how fast should a rider see a driver assigned after requesting? And are we single-city or multi-city?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["requirements_gathering", "scale", "latency", "ride_pooling"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Multi-city, 500 cities. 1 million concurrent rides at peak. 2 million active drivers. Point-to-point only. Matching within 10 seconds. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do the math. 1 million concurrent rides implies roughly 5 million ride requests per hour (average ride is 15 minutes, so 4 turns per hour per driver). That's about 1,400 ride requests per second globally. Each request needs to query nearby drivers, compute ETAs, and make a match. On the driver location side, 2 million active drivers send GPS updates every 4 seconds — that's 500,000 location updates per second. This is a write-heavy geospatial system. The architecture needs two core capabilities: a real-time geospatial index for driver locations, and a dispatch/matching engine that pairs riders with drivers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "geospatial_index", "matching_engine"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good framing. Let's start with the geospatial index. How do you efficiently find drivers near a rider?",
+      "annotation": { "action": "transition", "phase": "deep_dive", "target_concept": "geospatial_index" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use geohashing. A geohash encodes a latitude/longitude pair into a string where the length determines the precision level. At precision 6 (6 characters), each cell is about 1.2km x 600m — good for urban areas. At precision 5, it's about 5km x 5km — better for suburban areas. The key property: geographically close locations share a common prefix. To find drivers near a rider: compute the rider's geohash at precision 6, and query for drivers in that cell plus the 8 adjacent cells (to handle edge cases where a nearby driver is just across a cell boundary). The driver location index is an in-memory data structure — a hash map of geohash → set of driver_ids. When a driver sends a location update, we compute their new geohash, remove them from the old cell, and add them to the new cell. At precision 6, drivers moving within a cell don't trigger any index update — only cell transitions do. In practice, at city driving speeds, a driver changes cells roughly every 30-60 seconds, so the actual index update rate is much lower than the raw GPS update rate.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geohashing", "precision_levels", "adjacent_cells", "in_memory_index", "index_update_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent detail on geohash precision. How is this index deployed? Is it a centralized service or distributed per city?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "geospatial_index" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd partition by city. Each city has its own supply service that maintains the driver location index. Ride matching is inherently local — a rider in NYC doesn't need to know about drivers in London. Within a large city, we might further partition into zones if the driver count is very large — say Manhattan vs. Brooklyn as separate partitions. Each city's supply service runs on a small cluster: 2-3 machines with in-memory replicas for redundancy. Even our largest city — maybe 200K concurrent drivers — generates about 50K GPS updates per second per city, which is easily handled by a single machine's memory and CPU. The global architecture: a routing layer that maps (rider_lat, rider_lng) to the correct city partition, then queries that city's supply service. City determination uses a static geofence — a polygon defining each city's service area, loaded at startup.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["city_partitioning", "geofencing", "in_memory_replication", "routing_layer"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good partitioning strategy. Now let's talk about the matching algorithm. You've found 20 nearby drivers. How do you decide which one to assign?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "matching_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "The naive approach is closest driver by straight-line distance. But that's wrong — a driver 500m away across a river might have a 15-minute ETA, while a driver 1km away on the same road has a 3-minute ETA. The core metric for matching is ETA — estimated time of arrival of the driver to the rider's pickup point. For each candidate driver, we compute ETA using a routing engine (like OSRM or Valhalla). The routing engine considers road network, current traffic conditions, and one-way streets. We pre-compute real-time travel times by feeding GPS data from our own drivers into a traffic model — this is more accurate than third-party data because our drivers cover the most common urban routes continuously. The matching algorithm considers: ETA (primary — shorter is better), driver rating (secondary — prefer higher-rated drivers), driver's heading direction (a driver heading toward the rider is better than one heading away, even at the same distance), and fairness (don't starve drivers who've been waiting longer). I'd compute a match score as a weighted sum: score = -2 * eta_minutes + 0.5 * driver_rating + 0.3 * heading_bonus + 0.2 * wait_time_minutes. Assign the highest-scoring driver.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["matching_algorithm", "eta_estimation", "routing_engine", "traffic_model", "driver_scoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong matching design. Does the matching happen greedily per-request, or do you batch requests and do global optimization?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "matching_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question. Greedy matching — assign the best driver for each request as it comes in — is simple but suboptimal. Consider: two riders request at nearly the same time. The greedy approach assigns the one nearest driver to the first request, leaving the second request with a much worse match. A batched approach could find a globally better assignment. Uber uses a batched matching system called 'marketplace dispatch'. Every 2 seconds, we collect all unmatched ride requests and available drivers in a city and solve a bipartite matching optimization. The objective function maximizes total utility — minimize total wait time across all riders while considering driver fairness. This is a variant of the assignment problem, solvable with the Hungarian algorithm for small instances, or heuristic approaches (like simulated annealing) for larger batches. The 2-second batch window is a trade-off: longer windows give better global matches but increase rider wait time. In practice, during peak hours when there are many simultaneous requests, batching significantly improves average ETA. During off-peak when requests are sparse, it behaves essentially like greedy matching.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["batch_matching", "bipartite_matching", "hungarian_algorithm", "marketplace_dispatch", "optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss surge pricing. When demand exceeds supply, how does the system handle it?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing is a supply-demand balancing mechanism. The goal is twofold: incentivize more drivers to come to high-demand areas, and reduce demand by increasing price, reaching an equilibrium. The implementation: we compute a surge multiplier per geographic zone (each zone is maybe a few square kilometers). The multiplier is based on the supply-demand ratio: surge = f(requests_per_minute / available_drivers). But it's not a raw ratio — we apply a dampening function. If we used the raw ratio, the surge would be wildly volatile. A sudden burst of 50 requests in a zone with 10 drivers would give a 5x surge. Two minutes later when some drivers arrive, it drops to 1x. This oscillation is terrible for user experience. Instead, we use a smoothed time-weighted average: surge(t) = 0.7 * surge(t-1) + 0.3 * raw_ratio(t). This dampens spikes and smooths transitions. We also cap the surge at a maximum multiplier (say 3x-5x) to prevent public relations disasters. The surge multiplier is displayed to the rider before they confirm the ride, and drivers see a surge map showing high-demand zones to guide their repositioning.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_pricing", "supply_demand_ratio", "dampening_function", "time_weighted_average", "surge_cap"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice dampening detail. Let's talk about the trip state machine. A ride goes through several states — what does that look like?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "trip_state_machine" }
+    },
+    {
+      "role": "candidate",
+      "content": "The trip has a well-defined state machine. States: REQUESTED → MATCHING → DRIVER_ASSIGNED → DRIVER_EN_ROUTE → DRIVER_ARRIVED → TRIP_IN_PROGRESS → TRIP_COMPLETED → PAYMENT_PROCESSING → COMPLETED. With several terminal states that can be reached from various points: CANCELLED_BY_RIDER (from REQUESTED, MATCHING, DRIVER_ASSIGNED, or DRIVER_EN_ROUTE — each with different cancellation fee rules), CANCELLED_BY_DRIVER (from DRIVER_ASSIGNED or DRIVER_EN_ROUTE — triggers penalty for the driver), NO_DRIVERS_AVAILABLE (from MATCHING after timeout), PAYMENT_FAILED (from PAYMENT_PROCESSING — triggers retry or alternative payment). State transitions are persisted to a trips database with the transition timestamp. Each state has: allowed next states (enforced by the service), actions triggered on entry (e.g., entering DRIVER_ASSIGNED sends push notification to both rider and driver), and timeouts (e.g., DRIVER_EN_ROUTE times out after 15 minutes if the driver doesn't arrive, auto-cancels and reassigns). The state machine is the backbone of the business logic. Every feature — cancellation fees, driver penalties, ETA updates — is expressed as state transition rules.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["state_machine", "trip_states", "state_transitions", "cancellation_policy", "timeout_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thorough state machine. What about real-time tracking? The rider watches the driver approach on a map.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "real_time_tracking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Once a driver is matched, we start streaming the driver's GPS location to the rider's device. There are two approaches: polling and push. Polling: the rider's app requests the driver's latest location every 2-3 seconds via HTTP. Simple but creates unnecessary server load. Push: we use a WebSocket or SSE (Server-Sent Events) connection. The rider's app opens a connection when the trip is assigned, and the server pushes driver location updates in real-time. I'd use SSE here because it's one-directional (server to client), simpler than WebSocket, and works well through proxies and CDNs. The flow: driver sends GPS to our location service every 4 seconds. For drivers with active trips, the location service publishes the update to the rider's SSE stream. We interpolate on the client side — the map shows smooth movement between GPS points using the known road network, not jumpy dot movements. The ETA is recalculated on each location update and displayed alongside the map.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["real_time_tracking", "sse", "websocket", "gps_streaming", "client_interpolation", "eta_recalculation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about payments? The trip ends — how does the fare get calculated and charged?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "payments" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fare calculation combines multiple components. Base fare (fixed per city), per-minute rate (time spent in the ride), per-mile rate (distance traveled), and the surge multiplier. The distance and time are computed from the actual GPS trace of the ride, not the estimated route — if the driver takes a longer route, the rider pays more (with some guardrails). Guardrails: if the actual fare exceeds the estimated fare by more than 20%, we flag it for review and may cap the charge at the estimate. This protects riders from drivers taking intentional detours. For payment processing: we pre-authorize the rider's payment method at trip start for the estimated fare plus a buffer (e.g., estimated $20, pre-auth $25). At trip end, we charge the actual fare. If the actual fare exceeds the pre-auth, we charge the difference. The payment system is decoupled from the trip service — the trip service publishes a TRIP_COMPLETED event with the fare, and the payment service processes it asynchronously. If the payment fails, we retry and eventually escalate to the rider.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fare_calculation", "pre_authorization", "gps_trace", "payment_decoupling", "fraud_prevention"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What are the major failure scenarios you'd design for?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several critical scenarios. GPS signal loss: the driver enters a tunnel and stops sending location updates. The system should not cancel the trip — we detect GPS gaps and show the rider 'location temporarily unavailable' while continuing the trip timer. When GPS returns, we interpolate the missing segment using the road network. Supply service failure: if the geospatial index for a city goes down, new ride requests in that city can't be matched. We'd fail over to the replica. During the failover window (seconds), we queue incoming requests and process them once the index is restored. But ongoing trips are unaffected — they don't depend on the supply service. Payment failure: if the payment service is down at trip end, the rider still exits the car normally. The fare is calculated and queued. The payment processes asynchronously when the service recovers. We never block the physical ride for a payment system issue. Network partition between services: if the trip service can't reach the matching service, we return an error to the rider with a retry prompt. The system is designed so that each service can operate independently for its critical path — the matching service doesn't need the payment service, the tracking service doesn't need the matching service.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gps_failure", "service_failover", "payment_failure", "network_partition", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thorough failure analysis. Let's wrap up. Anything else you'd highlight?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three things I'd add. Safety features: real-time trip sharing (rider shares trip with contacts), anomaly detection (if the car deviates significantly from the expected route, alert the rider and our safety team), and an SOS button that records audio and shares live location with emergency services. Driver repositioning: proactively suggest where drivers should go based on predicted demand — using historical patterns (concerts ending, flights landing) to pre-position supply. This reduces average pickup times across the city. And analytics: every GPS point, every match decision, every surge calculation is logged. We run offline analysis to optimize the matching algorithm, tune surge parameters, and forecast demand. The data pipeline processes billions of events per day into a data warehouse for analysis.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["safety_features", "demand_prediction", "driver_repositioning", "analytics_pipeline"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. Deep technical coverage across geospatial indexing, matching algorithms, surge pricing, and operational resilience. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 80,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 8,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 6,
+      "scalability": 8,
+      "failure_handling": 9,
+      "communication": 8,
+      "domain_knowledge": 9
+    },
+    "strengths": [
+      "Deep geohashing knowledge with correct precision levels and adjacent cell query pattern",
+      "Excellent matching algorithm with weighted scoring and batch optimization discussion",
+      "Strong surge pricing with dampening function and concrete mathematical formulation",
+      "Thorough trip state machine covering cancellation policies, timeouts, and terminal states"
+    ],
+    "weaknesses": [
+      "Caching strategy was minimal — didn't discuss caching routing results, surge multipliers, or driver profiles",
+      "Database design wasn't explicitly covered — what databases for trips, payments, driver profiles?",
+      "Didn't discuss multi-region architecture — how does the platform operate across 500 cities globally?"
+    ]
+  }
+}

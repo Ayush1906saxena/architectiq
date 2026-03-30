@@ -1,0 +1,159 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "vp",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_246"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service. But I'm curious how you'd approach this — not just as a consumer product, but as something your engineering organization uses. What's your take?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Interesting framing. Before I jump into architecture, let me reframe the problem. A URL shortener seems simple, but as an internal developer tool, the real product isn't the redirect — it's the developer experience. We're building a service that every team depends on for link tracking in emails, marketing campaigns, internal tooling, and customer communications. The value proposition is: any team can create trackable, branded short links without building their own infrastructure. My first question is: how many teams would use this, and what's the diversity of use cases?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["developer_experience", "platform_thinking", "stakeholder_analysis"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "About 15 teams. Marketing for campaign links, product teams for in-app deep links, customer success for personalized onboarding links, developer relations for documentation links. Some teams create 100 links a day, others create millions for personalized emails. What else do you need?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "use_cases" }
+    },
+    {
+      "role": "candidate",
+      "content": "That range — 100 to millions per day — tells me we need a self-service model with tiered rate limits. Let me also understand the organizational context. Is there a platform team that would own this, or is this a side project for one team? What's the company's stance on build versus buy — have teams considered Bitly Enterprise or similar? And what's the reliability bar — if the redirect service is down for 5 minutes, who gets paged and what's the business impact?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "build_vs_buy", "organizational_design", "sla_targets"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good questions. Small platform team of 3 would own it. We want to build — Bitly doesn't meet our data residency requirements. Redirect downtime directly impacts customer-facing emails, so it's high severity. Let's get into the design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "With a team of 3, operational simplicity is paramount. We can't build something that requires constant babysitting. Let me outline the architecture with that constraint. The core system has three components: a creation API for generating short URLs, a redirect service for resolving them, and an analytics pipeline for click tracking. I'd separate these into independent services because they have fundamentally different scaling profiles and failure domains. The redirect service is the most critical — it must be highly available and fast. The creation API is less critical — a few seconds of downtime is tolerable. Analytics is fully async and can lag.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["service_decomposition", "failure_domains", "operational_simplicity", "team_sizing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. You mentioned self-service and developer experience. What does the API look like for teams consuming this service?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "The API is the product, so I'd invest heavily here. RESTful API with: POST /v1/links to create a short URL — accepts destination URL, optional custom alias, expiration, tags, and metadata. GET /v1/links/{id} for link details and stats. PATCH /v1/links/{id} to update destination or metadata — important for marketing teams who need to fix a link without changing the short code. DELETE for deactivation. Batch endpoint: POST /v1/links/batch for teams creating millions of personalized links — accepts up to 10,000 links per request, returns a job ID for async processing. Each team gets an API key scoped to their namespace. We version the API and maintain backward compatibility for at least 12 months after deprecation. SDKs in Python, JavaScript, and Go — generated from an OpenAPI spec to keep them in sync. Interactive API docs powered by the same OpenAPI spec.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "batch_processing", "api_versioning", "sdk_design", "openapi"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle documentation and onboarding for new teams?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "documentation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Documentation has three layers. First, the API reference — auto-generated from OpenAPI, always up to date, with runnable examples. Second, use-case guides — 'How to create campaign tracking links,' 'How to set up deep links for mobile,' 'How to integrate with your email pipeline.' These are written by the platform team in collaboration with the consuming teams, reviewed quarterly. Third, a quickstart — 'Create your first short link in 5 minutes' — that walks through getting an API key, making the first API call, and verifying the redirect. For onboarding, we have a Slack channel for support, and we pair with new teams for their first integration. We track time-to-first-link as a key metric. If a team can't create their first link within one business day of signing up, something is broken in our onboarding.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["documentation", "developer_experience", "onboarding", "support_model"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about rate limits. You mentioned tiered rate limits — how does that work?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three tiers based on use case. Standard tier: 100 link creations per minute, 10,000 per day. Sufficient for marketing teams creating campaign links manually. High-volume tier: 1,000 per minute, 1 million per day. For product teams doing personalized links. Bulk tier: uses the batch endpoint, 10 million per day. For email personalization at scale. Each tier has different redirect rate limits too, though those are much higher — redirect is cheap. Teams self-select their tier through the portal. Upgrading from standard to high-volume is instant. Bulk tier requires a brief review — we want to ensure our capacity plan accounts for their volume. Rate limit responses include X-RateLimit-Remaining and Retry-After headers so clients can implement backoff. We also expose rate limit usage in the dashboard so teams can see if they're approaching their limits.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "tiered_service", "self_service", "capacity_planning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's go deeper on the redirect service — this is the critical path. How do you architect it for high availability?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "high_availability" }
+    },
+    {
+      "role": "candidate",
+      "content": "The redirect service is intentionally simple — it's a stateless service that does a key lookup and returns a 302. For storage, I'd use DynamoDB for the link mapping — single-digit millisecond reads at any scale, fully managed, multi-AZ by default. In front of that, a Redis cluster as a read-through cache. The hot set of links — probably 20% by the Pareto principle — fits easily in memory. The redirect service runs in multiple AZs behind an ALB. But the real availability play is a CDN layer. For the most popular short links — say the top 10,000 — we can cache the redirect at CloudFront edge locations. This means the redirect happens at the edge without hitting our infrastructure at all. The CDN also gives us DDoS protection for free.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["high_availability", "dynamodb", "redis_caching", "cdn_redirect", "stateless_service"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the trade-off of caching redirects at the CDN edge?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "cdn_redirect" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two trade-offs. First, if a team updates the destination URL of a short link, the CDN cache needs to invalidate. With a short TTL — say 5 minutes — the worst case is 5 minutes of stale redirects. For most use cases that's fine, but for a time-sensitive correction, we need an explicit invalidation API. Second, CDN-cached redirects bypass our analytics pipeline — we don't see those clicks. We can mitigate this by using edge-side includes or Lambda@Edge functions that log the click event to Kinesis before returning the redirect, but that adds latency and complexity. For the V1 with a 3-person team, I'd accept the analytics gap for CDN-cached links and note it as a known limitation. Most high-volume links are transient email links that won't be cached anyway.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_redirect", "cache_invalidation", "analytics_pipeline", "edge_computing", "operational_simplicity"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the support model. A team is having issues with the service at 2 AM. How does that get handled?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "support_model" }
+    },
+    {
+      "role": "candidate",
+      "content": "The support model reflects the team size constraint. The redirect service — our critical path — has automated alerting: if redirect error rate exceeds 0.1% or p99 latency exceeds 200ms, PagerDuty pages the on-call engineer. With 3 people, we have a weekly rotation. For non-critical issues — creation API errors, analytics lag — we have Slack-based support during business hours. The key design principle: the redirect service should almost never need human intervention at 2 AM. It's stateless, backed by managed services (DynamoDB, Redis Cluster), and has multiple layers of redundancy. If DynamoDB has an AZ issue, the service automatically routes to healthy replicas. If Redis goes down, we fall back to DynamoDB directly — higher latency but functional. The only scenario that pages someone is a full region outage or a bug in our code.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["support_model", "on_call", "automated_alerting", "graceful_degradation", "managed_services"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle link abuse — someone using your service to create phishing links?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "abuse_prevention" }
+    },
+    {
+      "role": "candidate",
+      "content": "Since this is an internal service, the attack surface is different from public Bitly. All creators are authenticated employees with API keys tied to their team. That said, abuse can still happen — a compromised account, or a team unknowingly creating links to a compromised destination. Mitigations: on link creation, we check the destination URL against Google Safe Browsing API. If it's flagged, we reject the creation. For existing links, we run a periodic scan — daily — re-checking all active destinations. If a previously clean URL becomes malicious, we deactivate the short link and notify the owning team. We also log all link creations with the creating user and API key for audit trails. Finally, the redirect service shows an interstitial warning page for any link that hasn't been safety-checked in the last 7 days.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["abuse_prevention", "url_safety", "audit_logging", "security"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You haven't mentioned the underlying data model. Can you sketch that out?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_schema" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. The core DynamoDB table: partition key is the short_code (string), attributes are destination_url, created_by (user ID), team_id, created_at, expires_at, status (active/deactivated), metadata (JSON map for tags and custom fields), and redirect_type (301 or 302). For the creation API, we need a GSI on team_id + created_at to support 'list my team's links' queries. For analytics, a separate DynamoDB table: partition key is short_code, sort key is date, with click_count, unique_visitors, and top referrers. For real-time click streaming, events flow through Kinesis to a Lambda that increments counters. I keep the data model deliberately simple — two tables, clear access patterns. DynamoDB's single-digit millisecond reads on the primary key give us the redirect performance we need without complexity.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_schema", "dynamodb", "gsi", "analytics_pipeline", "kinesis"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running out of time. How would you measure success of this platform?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Four metrics. Adoption: number of teams actively creating links, growing quarter over quarter. Developer satisfaction: time-to-first-link under one day, and quarterly NPS survey above 40. Reliability: redirect service availability above 99.99%, p99 latency under 50ms. Operational cost: total AWS cost divided by number of redirects served — should decrease as we gain scale. I'd also track a negative metric: the number of times a team builds their own URL shortening solution instead of using ours. If that number is nonzero, we've failed on either functionality or developer experience, and we need to understand why.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["platform_metrics", "developer_experience", "sla_targets", "unit_economics"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great interview. You brought a strong organizational perspective while still grounding in solid technical design. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 77,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 6,
+      "api_design": 9,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Excellent reframing of URL shortener as an internal developer tool with focus on developer experience",
+      "Thoughtful tiered rate limiting with self-service model tailored to team use cases",
+      "Pragmatic architecture decisions constrained by 3-person team — operational simplicity as a design principle"
+    ],
+    "weaknesses": [
+      "Light on capacity estimation — no concrete QPS or storage calculations",
+      "Could have explored multi-region deployment and data residency requirements more deeply given the Bitly rejection context"
+    ]
+  }
+}

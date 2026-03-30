@@ -1,0 +1,109 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "staff",
+    "candidate_profile": "deep-reconciliation",
+    "total_exchanges": 18,
+    "generation_id": "seed_398"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We've been designing a payment system. You mentioned reconciliation as a critical component. Let's go deep — what is T+1 batch reconciliation and why is it necessary?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "batch_reconciliation" }
+    },
+    {
+      "role": "candidate",
+      "content": "T+1 reconciliation means we reconcile our internal transaction records against the payment processor's settlement report one business day after the transactions occurred. Even though our system records a payment as 'successful' in real-time based on the processor's authorization response, the actual money movement happens through settlement — a batch process where the processor settles funds with the acquiring bank. Between authorization and settlement, things can go wrong: a transaction might be authorized but later declined by the issuing bank, a refund might be processed that we didn't initiate (a chargeback), or the settlement amount might differ from the authorization amount (currency conversion, partial captures). T+1 reconciliation catches all of these. The process: every morning, we download the processor's settlement file (typically a CSV or ISO 8601 XML from Stripe, Adyen, etc.), parse it, and match each settlement record against our internal transactions table by transaction ID. Any row in our system without a match in the settlement file, or vice versa, is a discrepancy that needs investigation. This isn't optional — it's required for financial reporting, PCI compliance, and SOX auditing if we're publicly traded.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["batch_reconciliation", "authorization_vs_settlement", "settlement_timing", "chargebacks", "pci_compliance", "sox_auditing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "When you find discrepancies, what categories do they fall into? Walk me through the mismatch taxonomy.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "mismatch_categories" }
+    },
+    {
+      "role": "candidate",
+      "content": "I categorize mismatches into five types. Type 1: Timing mismatches — a transaction authorized late in the day (near the settlement cutoff) might appear in our system for day T but in the processor's settlement for day T+1. These are the most common and usually self-resolve by the next reconciliation cycle. We track them as 'pending' and auto-resolve if they match within 3 business days. Type 2: Amount mismatches — our recorded amount differs from the settled amount. Causes include currency conversion (we authorized in EUR, settlement is in USD at a slightly different exchange rate), partial captures (we authorized $100 but only captured $80), or processor fees deducted from the settlement. Type 3: Missing in processor — we have a record but the processor doesn't. This is alarming: it might mean the authorization was approved but the capture request failed silently, or our system recorded a phantom transaction. Type 4: Missing in our system — the processor settled a transaction we have no record of. Could be a chargeback reversal, a processor-initiated refund, or (worst case) fraud where someone submitted a transaction that bypassed our system. Type 5: Status mismatches — we recorded the transaction as 'refunded' but the processor shows it as 'captured,' or vice versa. This often indicates a race condition between our refund API and the settlement batch. Each type has different severity, different SLAs for resolution, and different automated handling rules.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["mismatch_categories", "timing_mismatches", "amount_mismatches", "missing_transactions", "status_mismatches", "resolution_sla"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned automated resolution rules. Which discrepancies can be auto-resolved, and how?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "automated_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "Timing mismatches are the easiest to auto-resolve. Rule: if a transaction is missing from today's settlement but was authorized within 2 hours of the settlement cutoff, mark it as 'pending-timing' and check again in the next T+1 cycle. If it appears within 3 business days, auto-resolve. If not, escalate. Amount mismatches within a tolerance can be auto-resolved. Rule: if the settlement amount differs from our recorded amount by less than $0.50 or 0.1%, attribute the difference to currency conversion or rounding and auto-resolve, logging the delta for the finance team's monthly review. I'd also build a currency conversion verifier — take our authorized amount, look up the exchange rate at settlement time, and verify the converted amount matches within 0.5%. If it does, auto-resolve with reason 'FX_ADJUSTMENT.' For partial captures, if we have a capture record for a lower amount and the settlement matches the capture (not the authorization), auto-resolve with reason 'PARTIAL_CAPTURE.' Status mismatches where our system says 'refunded' and the processor says 'captured then refunded' in two separate settlement lines — auto-resolve by matching the pair (capture + refund = net zero). Critical rule: never auto-resolve 'missing in our system' discrepancies. Those always go to the fraud investigation queue. And all auto-resolutions are auditable — every resolution is logged with the rule that triggered it, the original mismatch, and the resolution timestamp.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["automated_resolution", "timing_tolerance", "amount_tolerance", "fx_adjustment", "partial_capture_matching", "audit_trail", "fraud_escalation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about discrepancies that can't be auto-resolved? How does the manual review queue work?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "manual_review_queue" }
+    },
+    {
+      "role": "candidate",
+      "content": "The manual review queue is a prioritized work queue for the finance operations team. Each item in the queue contains: the discrepancy type and severity, the transaction details from both our system and the processor, the auto-resolution rules that were attempted and why they failed, and a suggested action. Priority is based on severity and amount. P1 (respond within 4 hours): missing in our system (potential fraud), any mismatch over $10,000, or any mismatch involving a regulated market. P2 (respond within 24 hours): amount mismatches exceeding tolerance, unresolved timing mismatches after 3 days. P3 (respond within 1 week): small amount discrepancies, status mismatches on completed transactions. The workflow: an analyst claims an item, investigates by pulling processor API records, merchant logs, and customer communication history. They choose a resolution: adjust our records to match the processor (for legitimate differences), initiate a correction with the processor (for processor errors), escalate to the fraud team, or flag for engineering investigation (potential system bug). Every resolution requires a reason code and a free-text explanation, which feeds back into our automated rule engine — if analysts consistently resolve a particular pattern the same way, we propose a new auto-resolution rule. I'd build this as a lightweight internal tool with a React frontend, backed by a PostgreSQL table for the queue and a state machine for item lifecycle (open → claimed → investigating → resolved/escalated).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["manual_review_queue", "priority_tiers", "analyst_workflow", "resolution_types", "feedback_loop", "state_machine"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you alert on discrepancies? What thresholds indicate a systemic problem versus normal noise?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "discrepancy_alerting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Normal operations have a baseline discrepancy rate — typically 0.5-2% of transactions have some initial mismatch, and 90% of those auto-resolve. I'd alert on deviations from this baseline. Alert 1: Discrepancy rate spike. If the raw mismatch rate exceeds 5% of transactions in a single settlement file, that's a P1 alert to engineering. Something systemic is wrong — possibly a deployment that broke capture requests, a processor API change, or a timezone misconfiguration that shifted the settlement window. Alert 2: Auto-resolution failure rate. If auto-resolution drops below 80% (normally 90%+), a new type of discrepancy has emerged that our rules don't cover. P2 alert to the reconciliation team lead. Alert 3: Monetary exposure. Sum of unresolved discrepancy amounts. If the total unresolved exposure exceeds $100K, that's a P1 to the finance director regardless of discrepancy count — even a few large mismatches are material. Alert 4: Queue aging. If any P1 item sits unresolved for more than 4 hours, or the total queue exceeds 500 items, we're understaffed or a process is broken. Alert 5: Settlement file missing or late. If we don't receive the processor's settlement file by 10am on T+1, alert immediately — we're flying blind. Each alert goes to a specific Slack channel and PagerDuty rotation: engineering for systemic issues, finance ops for queue management, and the CFO's dashboard for monetary exposure.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["discrepancy_alerting", "baseline_rate", "exposure_tracking", "queue_aging", "settlement_file_monitoring", "escalation_routing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "When you identify a root cause for a systemic mismatch, how do you perform root cause analysis and prevent recurrence?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "root_cause_analysis" }
+    },
+    {
+      "role": "candidate",
+      "content": "Root cause analysis for payment discrepancies follows a structured process. Step 1: Triage — classify the discrepancy pattern. Are all mismatches from one processor? One merchant? One payment method? One time window? This segmentation usually points to the root cause area. Step 2: Timeline reconstruction. Pull the full event log for affected transactions: our API request/response logs, the processor's webhook events, settlement file entries, and any asynchronous job logs (capture jobs, refund jobs). Align them on a timeline. In my experience, 70% of systemic issues come from three categories: (a) a deployment that changed the capture flow but had a subtle bug — the authorization succeeded but the capture payload was malformed, causing a silent 4xx from the processor that we didn't properly handle; (b) a processor API version change or settlement format change that our parser didn't handle; (c) a timezone or clock skew issue that shifted which settlement batch a transaction fell into. Step 3: Fix and verify. Apply the fix, then re-run reconciliation on the affected date range to confirm the fix resolves the discrepancies. Step 4: Preventive measures. For (a): add integration tests that verify the full authorize-capture-settle cycle against processor sandbox, and run them in CI. For (b): add schema validation on incoming settlement files — if a field is missing or a new field appears, alert before parsing. For (c): use the processor's transaction timestamp, not ours, for settlement cutoff calculations. Step 5: Blameless post-mortem with the engineering and finance teams. Document the incident, impact (in dollars), detection time, resolution time, and preventive actions. Track the preventive actions to completion.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["root_cause_analysis", "pattern_segmentation", "timeline_reconstruction", "common_root_causes", "integration_testing", "schema_validation", "blameless_postmortem"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last question: beyond T+1 reconciliation, what proactive measures prevent mismatches from occurring in the first place?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "preventing_mismatches" }
+    },
+    {
+      "role": "candidate",
+      "content": "Prevention is far cheaper than reconciliation. Several layers. First, synchronous validation at transaction time: after every authorization, verify the processor's response contains an amount matching our request. After every capture, verify the capture response amount and currency match. If there's a mismatch, fail the operation immediately rather than discovering it 24 hours later. Second, webhook reconciliation: don't just rely on T+1 settlement files. Subscribe to the processor's real-time webhooks for authorization, capture, refund, and chargeback events. Cross-reference each webhook against our records as it arrives. This gives us near-real-time discrepancy detection — a 5-minute lag instead of 24 hours. Third, idempotency enforcement. Every transaction has a unique idempotency key. If a network timeout causes a retry, the processor returns the same result rather than creating a duplicate transaction. Without this, 'missing in our system' discrepancies proliferate from duplicate charges. Fourth, end-of-day pre-reconciliation: before the settlement cutoff, run a 'pre-recon' that compares our day's transaction totals (count and sum per currency) against the processor's real-time reporting API. If the totals diverge by more than 0.5%, investigate before settlement happens. Fifth, circuit breaker on the capture path: if the capture failure rate exceeds 1% in a 5-minute window, halt captures and alert. It's better to delay captures than to create a backlog of mismatches that takes the finance team days to unwind. Each of these layers catches problems earlier, reducing the reconciliation team's workload from 'detective work on stale data' to 'confirmation of already-resolved items.'",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["preventing_mismatches", "synchronous_validation", "webhook_reconciliation", "idempotency_enforcement", "pre_reconciliation", "circuit_breaker", "shift_left_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Outstanding depth on payment reconciliation. You clearly understand both the technical and operational aspects. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 79,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 6,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 5,
+      "scalability": 7,
+      "failure_handling": 10,
+      "communication": 9
+    },
+    "strengths": [
+      "Comprehensive mismatch taxonomy with concrete auto-resolution rules and dollar thresholds",
+      "Strong operational process design — manual review queue, alerting tiers, and feedback loop for rule improvement",
+      "Excellent prevention-over-detection mindset with five layers of proactive measures"
+    ],
+    "weaknesses": [
+      "Did not discuss system architecture for the reconciliation pipeline itself — batch job design, scheduling, idempotency of the reconciliation run",
+      "Capacity estimation and caching were not relevant but also not discussed for the payment system overall"
+    ]
+  }
+}

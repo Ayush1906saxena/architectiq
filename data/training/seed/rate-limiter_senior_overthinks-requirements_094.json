@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "senior",
+    "candidate_profile": "overthinks-requirements",
+    "total_exchanges": 22,
+    "generation_id": "seed_094"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter — something that could protect APIs from abuse at scale. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great problem. Let me make sure I understand the scope. When you say rate limiter, are we talking about request-level rate limiting per user, per IP, per API key, or per endpoint? Because each one has very different implications for the design.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting_granularity"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good question. Primarily per API key, but we should support per-IP as well for unauthenticated endpoints.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "rate_limiting_granularity" }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. And what about the rate limiting algorithm? Are we expecting fixed window, sliding window, token bucket, or leaky bucket? Because the accuracy vs. memory trade-off differs significantly. Fixed window has boundary bursting issues. Sliding window log is accurate but memory-heavy. Token bucket allows configurable burst. Should I design for a specific one or make it pluggable?",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["token_bucket", "sliding_window", "fixed_window"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's make it pluggable, but focus on token bucket for the detailed design. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "What about the response when rate limited? Do we return 429 with a Retry-After header? Do we include X-RateLimit-Remaining and X-RateLimit-Reset headers? Some APIs also distinguish between soft limits that return warnings and hard limits that block. And what about rate limit tiers — do different pricing plans get different limits?",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["api_design", "rate_limit_headers"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "429 with standard rate limit headers. Different tiers yes, but we can keep it simple — just a configurable limit per API key. Anything else before we design?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "A few more. Is this a centralized service that other services call, or a library/sidecar? Because a centralized service adds network latency to every request, but a sidecar might have stale state. Also, what about multi-region? If a user sends requests to us-east and eu-west, do they share the same rate limit counter? That's eventually consistent by nature. And what's our SLA for the rate limiter itself? If it goes down, do we fail open or fail closed?",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["centralized_vs_distributed", "multi_region", "fail_open_closed"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Centralized service. Single region for now. Fail open. Now, one more thing — what about burst handling? Should we allow short bursts above the sustained rate?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's exactly why token bucket is a good choice — we can set the bucket capacity higher than the refill rate to allow bursts. But I want to clarify the burst parameters. What's the ratio? Like if the sustained rate is 100 req/min, should the burst allow 200 in a short window? Also, do we need to differentiate between read and write operations? Because many systems rate limit writes more aggressively. And what about batch endpoints that internally fan out to multiple operations — do they count as one request or proportional to the batch size?",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["token_bucket", "burst_handling"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running low on time for requirements. Let's say 2x burst, all requests counted equally, no read/write differentiation. Let's start designing — I'd like to see the architecture.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, sorry about that. Let me sketch the high-level architecture. We have a rate limiter service sitting behind the API gateway. Every incoming request, the gateway makes a lightweight check to the rate limiter before forwarding to the backend. The rate limiter uses Redis as the backing store for counters since we need sub-millisecond reads and atomic operations. Each API key maps to a token bucket stored in Redis.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_gateway", "redis_caching", "token_bucket"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the token bucket work in Redis specifically?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each API key has a Redis hash with three fields: tokens_remaining, last_refill_timestamp, and bucket_capacity. When a request arrives, we run a Lua script atomically in Redis. The script calculates how many tokens to add based on elapsed time since last refill — tokens_to_add = (now - last_refill) * refill_rate. It caps at bucket_capacity, then tries to consume one token. If tokens_remaining > 0, it decrements and returns allowed. Otherwise, it returns denied with the time until next token. All in a single atomic Lua call — no race conditions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "redis_lua_scripting", "atomicity"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What happens if Redis goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "We agreed on fail-open, so if Redis is unreachable, the rate limiter returns 'allowed' for all requests. The API gateway has a circuit breaker — if the rate limiter fails 3 consecutive health checks, it bypasses the rate limiter entirely until Redis recovers. To reduce the blast radius, we run Redis Sentinel or Redis Cluster with automatic failover. We can also keep a small local token bucket in each gateway instance as a fallback — it won't be globally coordinated, but it provides rough protection per server.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fail_open_closed", "circuit_breaker", "redis_cluster"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How much latency does this add to each request?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "latency" }
+    },
+    {
+      "role": "candidate",
+      "content": "The Redis Lua script execution is under 0.1ms. Network round trip from the gateway to Redis in the same datacenter is around 0.2-0.5ms. Total overhead is about 0.5-1ms per request. To reduce this further, we could co-locate Redis on the same machine as the gateway, or use a local cache with periodic sync — but that sacrifices accuracy for latency. At p99, we should target under 2ms for the rate limit check.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["latency", "performance_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle configuration changes — say a customer upgrades their plan and gets a higher rate limit?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "configuration_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rate limit configurations stored in a config database — PostgreSQL or DynamoDB. When a plan changes, we update the config DB and publish an event to a Kafka topic. The rate limiter services subscribe and update their local config cache. For Redis, we update the bucket_capacity on the next request from that API key — the Lua script reads the latest config and adjusts. Changes propagate within seconds. We could also have an admin API to force-update specific keys immediately.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["configuration_management", "kafka", "event_driven"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about monitoring and observability for the rate limiter itself?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Key metrics: total requests checked per second, percentage of requests rate-limited, latency histogram of the rate limit check, Redis hit rate and connection pool usage. Also per-API-key dashboards showing how close each key is to their limit — helps customer support. Alerts on: rate limiter latency exceeding 5ms p99, Redis failover events, and sudden spikes in rate-limited requests which might indicate an attack or a broken client.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "alerting", "observability"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about scaling. What if we need to handle 1 million rate limit checks per second?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "scalability" }
+    },
+    {
+      "role": "candidate",
+      "content": "A single Redis instance handles about 100K-200K operations per second. For 1M, we need Redis Cluster with at least 8-10 shards. We shard by API key hash so each key's bucket lives on one shard. The rate limiter service itself is stateless, so we just scale horizontally — maybe 20 instances behind the load balancer. Each instance maintains a connection pool to all Redis shards. The bottleneck shifts to Redis, so we'd also consider the local rate limiting fallback I mentioned — each gateway instance keeps an approximate local counter and only syncs with Redis periodically, trading some accuracy for throughput.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scalability", "redis_cluster", "sharding_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final thoughts on the design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add: DDoS protection at the network layer before requests even reach the rate limiter — this system protects against application-level abuse, not volumetric attacks. Also, a backpressure mechanism where if the rate limiter is overloaded, the gateway can fall back to local approximate limiting rather than queuing requests. And for the pluggable algorithm design I mentioned early on, we could use a strategy pattern where the Lua script is swappable — different API keys could use different algorithms based on their use case.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ddos_protection", "backpressure", "design_patterns"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thanks for the interview. Your design phase was solid — just be mindful of time spent in requirements next time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 55,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 4,
+      "api_design": 6,
+      "database_design": 6,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 4
+    },
+    "strengths": [
+      "Deep understanding of token bucket algorithm and Redis Lua scripting",
+      "Thorough failure handling with fail-open strategy and local fallback",
+      "Good scaling analysis with concrete numbers for Redis capacity"
+    ],
+    "weaknesses": [
+      "Spent 12+ minutes on requirements gathering — nearly half the interview",
+      "No capacity estimation or back-of-envelope math",
+      "Interviewer had to forcefully transition to design phase, showing poor time management"
+    ]
+  }
+}

@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "staff",
+    "candidate_profile": "redis-outage",
+    "total_exchanges": 20,
+    "generation_id": "seed_364"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter. But I want to focus on a specific failure scenario: your Redis cluster partitions. Before we get there, give me a quick overview of the architecture you'd build.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd build a token bucket rate limiter backed by Redis. Each API key gets a bucket stored as a Redis key with the current token count and last refill timestamp. On each request, we atomically decrement the token count using a Lua script — this ensures correctness even with concurrent requests. The API gateway checks the rate limit before forwarding requests to backend services. I'd use Redis Cluster with 6 nodes across 3 availability zones for high availability.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "redis_caching", "lua_scripting", "redis_cluster"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good foundation. Now here's the scenario: your Redis Cluster experiences a network partition. Nodes in AZ-1 and AZ-2 can talk to each other but can't reach AZ-3. You have 30 API servers — 10 in each AZ. What happens?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "network_partition" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a nasty situation. Redis Cluster uses hash slots — 16,384 of them distributed across master nodes. Let's say the master in AZ-3 owns about a third of the hash slots. After the partition, the nodes in AZ-1 and AZ-2 will detect the AZ-3 master as unreachable. If the AZ-3 master has a replica in AZ-1 or AZ-2, that replica can promote after the node timeout — typically 15 seconds. But during that 15-second window, any rate limit keys that hash to the AZ-3 master's slots are unreachable from AZ-1 and AZ-2.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_cluster", "hash_slots", "failover_timing", "network_partition"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the 10 API servers in AZ-3? They can still reach their local Redis master. So some servers can enforce rate limits for those keys and some can't. What do users experience?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "split_brain_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Users experience inconsistent rate limiting. If a user's API key hashes to a slot owned by the AZ-3 master, users whose requests land on AZ-3 API servers get properly rate-limited. Users whose requests land on AZ-1 or AZ-2 servers get... well, it depends on how we handle the Redis error. This is where fail-open vs fail-closed becomes critical. If we fail-open — meaning Redis unreachable equals allow the request — then 20 out of 30 servers are not enforcing rate limits for roughly a third of API keys. An attacker who notices this could hammer the system.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fail_open", "fail_closed", "split_brain_rate_limiting", "security_implications"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "And if you fail-closed — Redis unreachable means reject the request?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "fail_closed" }
+    },
+    {
+      "role": "candidate",
+      "content": "Then you're rejecting legitimate traffic. A third of your API keys suddenly get 429 Too Many Requests on 20 out of 30 servers even though they haven't exceeded their limits. For paying enterprise customers, this is potentially a breach of SLA. You're creating a self-inflicted outage for customers who did nothing wrong. The AZ-3 servers still work fine for those keys, so you'd see bizarre behavior where retrying sometimes works — it depends which server the load balancer routes to.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fail_closed", "sla_impact", "user_experience"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "So neither option is great. What's your actual recommendation?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "hybrid_approach" }
+    },
+    {
+      "role": "candidate",
+      "content": "A hybrid approach with tiered behavior. For most API keys — standard tier customers — fail-open with a local fallback. Each API server maintains an in-process sliding window counter. If Redis is unreachable, fall back to local rate limiting. It's not globally accurate — each server enforces independently — but it provides rough protection. For the top tier — enterprise and internal critical services — fail-closed with a very generous local buffer. If Redis is unreachable, allow a burst of, say, 2x the normal limit from a local counter before hard-blocking. This prevents abuse while giving some grace period.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hybrid_approach", "local_rate_limiting", "tiered_behavior", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting. But with local rate limiting, if I have 30 servers each allowing 100 requests per minute locally, the effective global limit is 3,000 requests per minute. That's way over the intended limit.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "local_rate_limit_accuracy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Exactly right. The local limit needs to be divided by the number of servers. If the global limit is 3,000 requests per minute and there are 30 servers, each server allows 100 per minute locally. But this has its own problem — if traffic isn't evenly distributed across servers, a user could hit the local limit on one server while having unused capacity on others. A better approach: set the local limit to the global limit divided by expected active servers, but with a small multiplier like 1.5x to account for uneven distribution. We accept some over-allowance during the partition as the lesser evil compared to a total outage.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["local_rate_limit_accuracy", "traffic_distribution", "capacity_planning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now let's talk about the AZ-3 side. Those 10 servers are still talking to their Redis master. But that master is now isolated. What happens when the partition heals?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "partition_healing" }
+    },
+    {
+      "role": "candidate",
+      "content": "If a replica in AZ-1/AZ-2 was promoted as the new master for those slots, we now have a split-brain: two nodes think they own the same hash slots. When the partition heals, Redis Cluster will detect this. The old master in AZ-3 sees that a new master exists for its slots and demotes itself to a replica. But here's the data loss: any writes the AZ-3 master accepted during the partition that weren't replicated before the split are lost. For rate limiting specifically, this means token counts reset — some users might get a fresh burst of requests they shouldn't have. It's a temporary inconsistency but not catastrophic for rate limiting.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["split_brain", "partition_healing", "data_loss", "eventual_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Can you design a rate limiter that doesn't depend on Redis at all for the critical path?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "redis_free_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes — a gossip-based distributed rate limiter. Each API server maintains local counters for each API key it sees. Periodically — every 1-2 seconds — servers broadcast their local counts to peers via a gossip protocol like SWIM. Each server aggregates the counts it hears from others to estimate the global count. The advantage: no central dependency. The system degrades gracefully under partition — you lose global accuracy proportional to the number of unreachable peers, but you never have a total failure. The downside: accuracy is eventually consistent. You might allow 10-20% over the limit due to propagation delay.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gossip_protocol", "distributed_counters", "eventual_consistency", "swim_protocol"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the memory overhead? If you have a million API keys, every server needs counters for all of them?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "memory_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good point. A few mitigations. First, each server only tracks keys it has actually seen requests for — not all keys. Most servers will only see a subset due to load balancer routing. Second, counters expire after the rate limit window plus a small buffer. For a 1-minute window, counters live for maybe 90 seconds. Third, for extremely high-cardinality scenarios, we could use approximate data structures like a Count-Min Sketch — it overestimates counts slightly, which is the safe direction for rate limiting since it would reject slightly more than necessary rather than allow too much.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["memory_optimization", "count_min_sketch", "ttl_expiration", "approximate_counting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's come back to the Redis-based design. How would you detect that a partition is happening, before users start complaining?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "partition_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multiple signals. First, monitor Redis Cluster's own CLUSTER INFO output — it reports cluster_state as 'ok' or 'fail' and shows how many slots are unassigned. If a master goes unreachable, its slots transition to a failed state. Second, track the rate of Redis connection errors per AZ in our API servers — a spike in errors from one AZ but not others strongly suggests a partition. Third, instrument the rate limiter's fallback path — if the local-fallback rate spikes, that's a clear signal. I'd set up PagerDuty alerts on all three and cross-correlate them.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["partition_detection", "monitoring", "alerting", "cross_correlation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about testing? How do you verify your partition-handling logic actually works before it happens in production?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "chaos_engineering" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use iptables rules or tc (traffic control) in a staging environment to simulate network partitions between AZs. Block traffic from AZ-1/AZ-2 to AZ-3 Redis nodes and verify: the failover happens within expected time, the local fallback activates, and rate limiting still roughly works. I'd also test the healing path — remove the iptables rules and verify that the cluster reconverges without manual intervention and that rate limits are globally accurate again within a bounded time. In production, I'd do controlled single-node isolation tests during low-traffic periods.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["chaos_engineering", "network_simulation", "partition_testing"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "One last question. If you had to pick one architectural change to make this system most resilient to Redis failures, what would it be?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "architectural_decision" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd make the local in-process rate limiter a first-class citizen, not just a fallback. Every request always checks the local limiter first. If the local limit is exceeded, reject immediately without even talking to Redis. Redis is only consulted for global coordination — syncing counters across servers periodically, not on every request. This inverts the architecture: Redis becomes a coordination layer that improves accuracy, rather than a critical dependency that causes outages when it fails. The system works without Redis, just less accurately.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["architectural_inversion", "local_first", "decentralized_design"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a strong architectural insight — making the centralized store an enhancer rather than a dependency. Good interview. You showed strong distributed systems thinking, especially around the fail-open vs fail-closed trade-offs and the gossip-based alternative. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 6,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Deep understanding of Redis Cluster partition behavior including hash slots and failover timing",
+      "Excellent trade-off analysis between fail-open and fail-closed approaches",
+      "Strong architectural insight about inverting the Redis dependency"
+    ],
+    "weaknesses": [
+      "Capacity estimation was thin — didn't size the Redis cluster or estimate memory needs",
+      "Didn't discuss rate limit consistency guarantees from a customer-facing SLA perspective",
+      "Gossip-based alternative was introduced but not fully explored for production viability"
+    ]
+  }
+}

@@ -1,0 +1,172 @@
+{
+  "metadata": {
+    "problem_id": "message-queue",
+    "level": "principal",
+    "candidate_profile": "strong",
+    "total_exchanges": 25,
+    "generation_id": "seed_017"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed message queue system like Apache Kafka. At the principal level, I'm expecting deep distributed systems reasoning, production operational thinking, and the ability to discuss organizational ownership. Where would you like to start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd like to start by clarifying the design goals, because the trade-offs in a message queue are shaped entirely by the guarantees we want to provide. What delivery semantics — at-most-once, at-least-once, exactly-once? What's the throughput target? What's the retention period? And is this an internal platform serving many teams, or a single-use-case system?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["delivery_semantics", "throughput", "retention", "platform_vs_product"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Internal platform — dozens of teams will use it. At-least-once by default, with exactly-once as an option. 10 million messages per second at peak. 7-day retention. Ordered delivery within a partition. Go.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me frame the architecture around Kafka's core abstraction, since it's proven at this scale. The fundamental unit is the topic, partitioned into ordered, append-only logs. Each partition is an immutable sequence of records, each identified by a monotonically increasing offset. Producers append to partitions, consumers read sequentially by offset. Partitions are the unit of parallelism — more partitions means more consumer throughput. Each partition is replicated across multiple brokers for durability. Let me size this: 10M messages/sec, average message 1KB, is 10GB/sec of write throughput. With replication factor 3, that's 30GB/sec of disk writes across the cluster. 7-day retention: 10GB/sec * 86,400 * 7 = about 6 PB of storage. With NVMe SSDs doing 2GB/sec sequential writes per disk, we need at least 15 disks for write throughput, but storage at 6PB with 3x replication means 18PB raw storage. At 10TB per server, that's about 1,800 brokers. That's a significant fleet.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["topic_partitioning", "append_only_log", "offset", "replication", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. Let's dig into replication. How does partition replication work?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each partition has one leader and N-1 followers (with replication factor N). All reads and writes go through the leader. Followers pull from the leader to stay in sync. The critical concept is the In-Sync Replica set — the ISR. A follower is in the ISR if it's caught up to within a configurable lag threshold of the leader (in Kafka, this is replica.lag.time.max.ms, default 10 seconds). When a producer sends a message with acks=all, the leader waits until all ISR members have replicated the message before acknowledging. If a follower falls behind — say it's on a slow disk — it drops out of the ISR. The leader continues acknowledging writes with the reduced ISR. This is the key insight: the ISR is dynamic. We don't wait for the slowest replica if it's having problems. We maintain availability by shrinking the ISR.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leader_follower", "isr", "acks_all", "replica_lag", "dynamic_isr"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when the ISR shrinks to just the leader? The leader is the only copy of the data.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "min_isr" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where min.insync.replicas comes in. It's a topic-level configuration that sets the minimum ISR size for a write to be accepted. If min.insync.replicas=2 and the ISR shrinks to 1 (just the leader), the partition becomes read-only — writes are rejected with a NotEnoughReplicasException. This prevents the scenario where we acknowledge a write that exists on only one broker. It's a trade-off between availability and durability. With min.insync.replicas=2 and replication.factor=3, we can tolerate 1 broker failure without losing acknowledged data and without losing write availability. With 2 failures, we lose write availability but acknowledged data is still safe (on the remaining ISR member). As a platform team, I'd set the default to min.insync.replicas=2 and let teams adjust if they have different trade-off preferences.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["min_isr", "durability_vs_availability", "configuration_defaults", "platform_policy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The leader broker for a partition crashes. Walk me through the leader election process.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "leader_election" }
+    },
+    {
+      "role": "candidate",
+      "content": "When the leader crashes, the controller broker detects it — in Kafka, the controller uses ZooKeeper (or in newer versions, KRaft) for broker liveness. The controller selects a new leader from the ISR — specifically, the first replica in the ISR list that is alive. The new leader's log is guaranteed to have all committed messages because it was in the ISR. The controller updates the metadata to point to the new leader and propagates this to all brokers. Producers and consumers discover the new leader through metadata refresh. The entire failover typically takes 1-5 seconds. During this window, the partition is unavailable for both reads and writes. An important subtlety: unclean leader election. If ALL ISR replicas are dead and we have followers that were NOT in the ISR (they were lagging), should we promote one of them? It would have data loss — some committed messages might be missing. Kafka's unclean.leader.election.enable flag controls this. I'd default it to false for our platform — data loss is worse than temporary unavailability for most use cases.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leader_election", "controller", "kraft", "zookeeper", "unclean_election", "data_loss_prevention"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned exactly-once semantics as an option. How does that work?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "exactly_once" }
+    },
+    {
+      "role": "candidate",
+      "content": "Exactly-once has two sides: idempotent producers and transactional consumers. For idempotent producers: each producer is assigned a producer ID (PID) and maintains a sequence number per partition. The broker deduplicates by tracking the last sequence number per PID per partition. If a producer retries a send (due to network timeout), the broker sees the same (PID, sequence) and discards the duplicate. No duplicate writes. For transactional semantics across multiple partitions: the producer wraps a set of writes in a transaction. It writes to multiple partitions atomically — either all are committed or none are. This uses a transaction coordinator and a special __transaction_state topic to track transaction status. Consumers read with isolation.level=read_committed, which means they only see messages from committed transactions. The combination gives us exactly-once: the producer doesn't duplicate, and cross-partition writes are atomic. The overhead is modest — maybe 5-10% throughput reduction.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotent_producer", "producer_id", "sequence_number", "transactions", "transaction_coordinator", "read_committed"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Consumer rebalancing is one of the most operationally painful parts of Kafka. Walk me through it and the problems it causes.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "consumer_rebalancing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Consumer rebalancing happens when the set of consumers in a consumer group changes — a consumer joins, leaves, or crashes. The group coordinator (a designated broker) detects the change and triggers a rebalance. In the eager rebalancing protocol (pre-2.4), ALL consumers stop consuming, revoke ALL partition assignments, and the group coordinator reassigns partitions using the assignor strategy (range or round-robin). Then all consumers resume. The problem: during rebalance, processing stops for the entire group. For a group consuming 100 partitions, even if one consumer crashes, all 99 remaining consumers stop. Rebalances can take 10-30 seconds, causing a processing gap and backlog. It gets worse with large groups. Cooperative rebalancing (incremental, introduced in 2.4+) improves this: only the affected partitions are revoked. If consumer 5 crashes and it was consuming partitions 20-24, only those 5 partitions are reassigned. The other consumers continue processing. This dramatically reduces the stop-the-world impact.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consumer_rebalancing", "eager_rebalancing", "cooperative_rebalancing", "stop_the_world", "group_coordinator"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "As a principal engineer, you'd own this platform. What's the operational model? How do you run this for dozens of teams?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "platform_operations" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where the principal role really matters — the technology is half the job. The platform team owns the infrastructure: the broker fleet, the monitoring stack, capacity planning, and upgrades. Client teams own their topics, schemas, and consumer applications. The boundaries are critical. What the platform team provides: self-service topic creation with guardrails (max partitions, required replication factor, mandatory schema registry), a multi-tenant cluster with resource quotas per team (bytes/sec produce and consume limits), monitoring dashboards per topic (lag, throughput, error rates), and an on-call rotation for broker-level issues. What client teams are responsible for: their consumer lag (if they fall behind, it's their problem), their schema evolution (we provide Schema Registry but they own compatibility), and their dead letter topics for poison messages. The biggest operational challenge is broker upgrades. With 1,800 brokers, we need rolling upgrades that don't cause service disruption. Kafka supports this through its controlled shutdown and partition reassignment, but at this scale, an upgrade takes days and needs careful automation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["platform_operations", "team_ownership", "self_service", "multi_tenancy", "resource_quotas", "schema_registry", "rolling_upgrades"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "A team comes to you saying their consumer is 2 hours behind and growing. How do you help them triage?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "consumer_lag" }
+    },
+    {
+      "role": "candidate",
+      "content": "Structured triage. First, look at the metrics: is the produce rate to the topic spiking (upstream is producing more than usual), or is the consumer throughput dropping (consumer got slower)? Check the consumer's processing time per message — did they deploy a change that made processing heavier? Second, check the consumer group: are all consumers alive and consuming? Maybe one consumer crashed and the rebalance left its partitions unassigned or overloaded the remaining consumers. Look for uneven partition distribution. Third, check the infrastructure: are the brokers serving that topic healthy? Disk latency, network saturation, CPU on those brokers. If one broker hosting several partitions of that topic is degraded, all those partitions slow down. Fourth, short-term mitigation: can they scale up consumers? If the topic has 50 partitions and they're running 10 consumers, they can go to 50 and process one partition per consumer. If they're already at partition count, they need more partitions — which requires topic reconfiguration. Long-term: this often reveals that the team needs to separate their processing into a fast path and a slow path, or they need to move heavy processing out of the consumer and into an async job triggered by the message.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consumer_lag_triage", "metrics_analysis", "consumer_scaling", "partition_rebalancing", "architecture_guidance"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle multi-tenancy? One team's burst shouldn't impact another team's latency.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "multi_tenancy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multi-tenancy at the broker level is the hardest operational challenge. Kafka has quotas: you can set produce and fetch byte rate limits per client ID. If team A's producer exceeds its quota, the broker throttles it without affecting team B. But the isolation isn't perfect — disk I/O is shared. Team A writing aggressively can cause disk contention that slows team B's reads even with network quotas in place. Options for stronger isolation: dedicated broker pools per tier. Critical topics (payments, user events) get their own brokers. Non-critical topics share a general pool. This wastes some capacity but provides hard isolation. Alternatively, use tiered storage: older data moves to cheaper, slower storage (S3), keeping the broker's local disks focused on the hot tail. This reduces disk pressure significantly. For our 6PB storage requirement, tiered storage to S3 could reduce local broker storage to maybe 24 hours of data — about 860TB — cutting our broker fleet from 1,800 to maybe 200-300 nodes. That's a massive operational and cost win.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_tenancy", "quotas", "disk_contention", "broker_isolation", "tiered_storage", "cost_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tiered storage is a great insight. What about the ZooKeeper dependency? That's been a long-standing concern.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "kraft" }
+    },
+    {
+      "role": "candidate",
+      "content": "ZooKeeper has been the biggest operational pain point for Kafka at scale. It stores broker metadata, topic configurations, partition leadership, and consumer group offsets (in older versions). It's a separate distributed system with its own failure modes, its own scaling limits, and its own operational burden. The KRaft mode (Kafka Raft) removes ZooKeeper entirely. The Kafka controller uses a Raft-based consensus protocol among a set of controller nodes (typically 3-5). The metadata is stored in a special internal Kafka topic (__cluster_metadata). This simplifies operations enormously: one less system to manage, monitor, and upgrade. It also improves scaling — ZooKeeper became a bottleneck around 200K partitions; KRaft can handle millions. For our platform with 1,800 brokers and potentially millions of partitions, KRaft is a requirement. I'd build on KRaft from the start and not introduce ZooKeeper at all.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["zookeeper_removal", "kraft", "raft_consensus", "metadata_management", "partition_scaling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last topic. How do you think about the team that builds and operates this platform? Sizing, skills, and organizational placement.",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "team_structure" }
+    },
+    {
+      "role": "candidate",
+      "content": "For a platform of this scale, I'd structure the team in three sub-groups. Core platform team (8-10 engineers): owns the broker fleet, KRaft controllers, capacity planning, performance tuning, and broker upgrades. These are deep Kafka/distributed systems experts. Probably 2-3 of them are senior/staff level who can debug deep JVM and kernel-level issues. Client platform team (4-5 engineers): owns the self-service portal, Schema Registry, monitoring dashboards, client libraries (custom wrappers around the Kafka client with sensible defaults), and documentation. They're the interface between the platform and the 30+ client teams. SRE/Ops (3-4 engineers): owns alerting, incident response, automation (broker replacement, disk replacement, rolling upgrades). Separate from the core team so the core team can focus on improvements rather than being pulled into operations constantly. Total: about 18-20 people. Organizationally, this sits in the infrastructure org, not embedded in any product team. The principal engineer (my role) is the technical lead across all three sub-groups, sets the technical direction, makes the cross-cutting decisions (like KRaft vs ZooKeeper, tiered storage adoption), and is the escalation point for both the team and client teams.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["team_structure", "organizational_design", "skill_requirements", "principal_role", "platform_org"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you measure success for this platform?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "success_metrics" }
+    },
+    {
+      "role": "candidate",
+      "content": "Four dimensions. Reliability: target 99.99% availability per topic, measured by the fraction of time partitions have a healthy leader. Measured monthly, with an error budget model — teams can spend their error budget on risky deploys or migrations. Performance: p99 produce latency under 10ms, p99 end-to-end latency (produce to consume) under 100ms for the fast path. Self-service velocity: time from topic creation request to operational topic under 5 minutes. Number of support tickets per client team per month trending down. Cost efficiency: cost per GB/sec of throughput, tracked quarterly. This is where tiered storage and right-sizing broker instances make a material difference. The meta-metric is adoption: how many teams choose to use our platform versus standing up their own messaging solution. If teams are going around us, we have a product-market fit problem.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["success_metrics", "error_budget", "sla", "self_service_velocity", "cost_efficiency", "platform_adoption"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Outstanding interview. Your depth on ISR replication, exactly-once semantics, consumer rebalancing, and the operational model were all principal-caliber. The tiered storage insight for cost optimization was particularly sharp. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 83,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Deep Kafka internals: ISR replication, min.insync.replicas, unclean leader election — all with concrete reasoning",
+      "Exactly-once semantics explained end-to-end with idempotent producers and transactional consumers",
+      "Strong operational thinking: consumer lag triage, multi-tenancy isolation, rolling upgrades at scale",
+      "Tiered storage insight reduced fleet from 1,800 to 300 brokers — concrete cost impact",
+      "Principal-caliber organizational thinking: team structure, success metrics, platform adoption as meta-metric"
+    ],
+    "weaknesses": [
+      "Could have discussed message compression (Snappy, LZ4) for throughput optimization",
+      "Did not discuss cross-datacenter replication (MirrorMaker) for disaster recovery",
+      "Schema evolution with Schema Registry was mentioned but not elaborated on"
+    ]
+  }
+}

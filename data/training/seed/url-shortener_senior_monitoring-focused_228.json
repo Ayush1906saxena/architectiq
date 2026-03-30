@@ -1,0 +1,180 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "senior",
+    "candidate_profile": "monitoring-focused",
+    "total_exchanges": 22,
+    "generation_id": "seed_228"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service, similar to bit.ly. It should handle significant scale. What questions do you have before we begin?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Before I build anything, let me define the SLIs we care about. For a URL shortener, the critical ones are: redirect latency at p99, overall availability as a percentage, and error rate on both creation and redirect paths. Can you tell me what our SLO targets are for these? That will shape every architectural decision.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sli", "slo", "latency", "availability", "error_rate"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting starting point. Let's say p99 redirect latency under 50ms, 99.99% availability, and error rate below 0.01%. What about functional requirements?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. So 99.99% availability means about 52 minutes of downtime per year — that's tight. For functional requirements: how many URLs created per day, what's the read-to-write ratio, do we need custom aliases, and what's the expected URL lifetime?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["availability_calculation", "qps", "read_write_ratio"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "50 million new URLs daily, 200:1 read-to-write ratio, support both custom and auto-generated aliases, default TTL of 3 years. Let's move to design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the monitoring architecture because it informs what we instrument. I want three layers: infrastructure metrics via Prometheus — CPU, memory, disk I/O, network on every host. Application metrics also via Prometheus — request count, latency histograms (not averages!), cache hit rate, error counts by type. And business metrics in a separate pipeline — URLs created per minute, redirects per minute, unique users. All feeding into Grafana dashboards with PagerDuty alerts.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["prometheus", "grafana", "monitoring", "alerting", "metrics_layers"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a thorough monitoring plan. But we should also design the actual system. Can you walk me through the high-level architecture?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Of course. The core is straightforward: a load balancer fronting stateless API servers. Two endpoints — POST /api/urls for creation and GET /:code for redirect. Behind the API servers, a Redis cache for hot URL lookups and a sharded PostgreSQL cluster for durable storage. But here's the key — every component emits structured metrics. The load balancer reports connection counts and 5xx rates. Each API server exposes a /metrics endpoint. Redis exports via redis_exporter. Postgres via pg_stat_statements. I want to see the full request lifecycle.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["load_balancing", "api_design", "redis_caching", "database_choice", "observability"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's do some capacity math. 50M URLs per day — what does that translate to in terms of QPS and storage?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "50M URLs per day is about 580 writes per second. With a 200:1 ratio, that's 116,000 reads per second. For storage: each URL record is roughly 500 bytes — short code, long URL, creation timestamp, expiry, user ID. That's 25GB per day, about 27TB over 3 years. For the monitoring data itself, Prometheus with 30-day retention at ~1M active time series will need about 50GB. Long-term metrics go to Thanos or Cortex for historical analysis.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation", "prometheus_retention"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned latency histograms earlier rather than averages. Why does that matter?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Averages lie. If 99% of requests take 5ms and 1% take 5 seconds, the average looks like 55ms — seems fine. But that 1% is horrible user experience. Histograms let us compute arbitrary percentiles — p50, p95, p99, p99.9. For our SLO of p99 under 50ms, I need the actual distribution. Prometheus histograms use predefined buckets — I'd set buckets at 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s. This gives us precise percentile calculations and we can alert when the p99 starts creeping toward our SLO boundary.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["latency_percentiles", "histogram_buckets", "slo_alerting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you set up alerting so the on-call engineer knows something is wrong before users are impacted?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "alerting" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use multi-window burn rate alerts from the Google SRE book. Instead of alerting on a static threshold, we calculate how fast we're burning through our error budget. For 99.99% availability, our monthly error budget is about 4.3 minutes. If the current burn rate would exhaust the budget in 1 hour, that's a page. If it would exhaust in 6 hours, that's a ticket. This avoids alert fatigue from transient spikes while catching real incidents fast. Concretely: a 5-minute window with 14.4x burn rate for pages, and a 30-minute window with 6x burn rate for tickets.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["burn_rate_alerting", "error_budget", "alert_fatigue", "sre_practices"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid. Let's talk about the URL shortening itself. How do you generate the short codes?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "base62_encoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a counter-based approach with base62 encoding. Each API server pre-allocates a range of IDs from a central Zookeeper or etcd coordinator — say 100K IDs at a time. Locally, it increments and base62-encodes. A 7-character base62 code gives us 62^7 = 3.5 trillion unique URLs, which is plenty. To prevent enumeration attacks, I'd apply a lightweight permutation — a Knuth multiplicative hash — before encoding. And critically, I'd instrument the ID range allocation: how often servers request new ranges, how many IDs are wasted on server restarts. That tells me if my batch size is right.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["base62_encoding", "id_generation", "zookeeper", "enumeration_prevention"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the database layer? How do you handle 116K reads per second?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "Redis handles most of the read load. With 20% of URLs generating 80% of traffic, I need to cache about 10M hot URLs. At 500 bytes each, that's 5GB — fits easily in a Redis cluster. Cache-aside pattern: check Redis first, on miss go to Postgres, backfill the cache. For Postgres, I'd shard by hash of short_code into 16 shards initially. Each shard has a primary and two replicas. The metric I watch most closely here is cache hit ratio — if it drops below 95%, something is wrong. Either our cache is too small, our eviction policy is wrong, or traffic patterns shifted.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "cache_aside", "sharding_strategy", "cache_hit_ratio"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you detect and diagnose a slow redirect before it becomes an outage?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "distributed_tracing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Distributed tracing with OpenTelemetry. Every redirect request gets a trace ID. The trace shows each span: load balancer routing (should be <1ms), application processing (should be <2ms), Redis lookup (should be <5ms), and if it's a cache miss, the database query (should be <20ms). When p99 latency increases, I can filter traces by duration > 50ms and see exactly where the time is spent. Is it Redis being slow? Network latency? A specific shard being hot? I'd also set up trace-based sampling — 100% of slow requests, 1% of normal requests — to keep costs manageable while capturing all anomalies.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_tracing", "opentelemetry", "trace_sampling", "latency_debugging"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when Redis goes down? How does your monitoring help you respond?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The first signal is the cache hit ratio dropping to zero — that alert fires within seconds. Simultaneously, database connection count and query latency spike. My runbook for this scenario: step 1, confirm Redis is actually down via the health check endpoint. Step 2, enable the local in-process LRU cache on each API server — it's always running but normally bypassed. This handles the hottest URLs. Step 3, activate read replicas for overflow. Step 4, if recovery takes more than 5 minutes, scale up Postgres read replicas. The key metric during recovery is the database connection pool utilization — if it hits 90%, we're close to cascading failure and need to start shedding load.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_failure", "runbook", "circuit_breaker", "cascading_failure", "load_shedding"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned load shedding. How would you implement that for this service?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "load_shedding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Adaptive load shedding based on request queue depth and response latency. Each API server tracks its in-flight request count. When it exceeds a threshold — say 80% of max concurrent connections — new requests get a 503 with a Retry-After header. Priority matters too: redirect requests (GET) are more important than analytics or creation requests (POST). So during overload, I'd shed creation requests first while keeping redirects flowing. The load balancer also helps — if a server's health check starts returning degraded status, the LB reduces its weight. I'd monitor the shed rate as a percentage — any shedding above 0.1% triggers investigation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["load_shedding", "request_priority", "graceful_degradation", "health_checks"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle monitoring in a multi-region setup?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "multi_region" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each region runs its own Prometheus stack for low-latency local alerting — you don't want a network partition to also knock out your monitoring. Region-level dashboards show local health. Then I'd use Thanos to aggregate metrics across regions into a global view. For cross-region SLO tracking, I calculate availability per region and weighted globally by traffic. Synthetic monitoring is critical here too — I'd run canary probes from each region that create a URL and immediately try to redirect through it, measuring end-to-end latency. If the canary fails in US-East but works in EU-West, I know exactly where the problem is.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_region", "thanos", "synthetic_monitoring", "canary_probes"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last question: what dashboards would you build for the on-call engineer?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "dashboards" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three main dashboards. First, the SLO dashboard: error budget remaining for the month, burn rate trend, SLI values over the last 24 hours. This is what on-call checks first thing in the morning. Second, the service health dashboard: request rate, latency percentiles, error rate, cache hit ratio, database connection pool usage, all broken down by region. This is what you look at during an incident. Third, the capacity dashboard: CPU and memory trends, disk usage growth rate, projected time until we need to scale. This is for weekly capacity reviews. Each dashboard has drill-down links — click on a latency spike and it takes you to the relevant traces in Jaeger.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dashboards", "slo_tracking", "capacity_planning", "incident_response"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You brought a strong observability-first perspective. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 73,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional monitoring and observability design — SLIs, burn rate alerts, distributed tracing all well-articulated",
+      "Strong incident response thinking with concrete runbooks and load shedding strategies",
+      "Good integration of monitoring concerns into every architectural decision"
+    ],
+    "weaknesses": [
+      "Core system design was somewhat rushed in favor of monitoring details",
+      "Database sharding strategy could have been explored more deeply",
+      "Didn't discuss URL expiration cleanup mechanism or analytics pipeline"
+    ]
+  }
+}

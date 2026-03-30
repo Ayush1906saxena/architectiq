@@ -1,0 +1,171 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "runs-out-of-time",
+    "total_exchanges": 22,
+    "generation_id": "seed_125"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed system. Users can post tweets, follow others, and see a home timeline. What clarifying questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several questions. First, what's the DAU count and how many tweets per day? Second, what's the average number of followers per user — and are there celebrity users with millions of followers? Third, should the feed be purely chronological or ranked by relevance? Fourth, do we need to support media (images/videos) or text only? Fifth, what's the expected feed latency — how fast should the home timeline load?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "fan_out", "feed_ranking", "latency"], "depth": "deep", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "300 million DAU, 500 million tweets per day. Average user follows 200 people. Yes, celebrities with up to 50 million followers. Chronological feed for now. Text and images. Feed load time under 500ms at p99.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay. And a few more — do we need real-time push or is pull-on-refresh acceptable? What about retweets and likes in the feed? And do we need to support hashtag search or trending topics?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["push_vs_pull", "real_time"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Pull-on-refresh is fine. Include retweets in the feed. No trending topics for now. Let's move to design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Before the architecture, let me do capacity estimation. 500M tweets per day is about 5,800 tweets per second. If each user refreshes their feed 5 times a day, that's 1.5 billion feed requests per day, or about 17,400 per second. For storage: if a tweet is about 300 bytes of text plus metadata, that's 150 GB per day for text alone. Images are much larger — if 20% of tweets have images averaging 200 KB, that's 20 TB per day in images.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good estimates. What about the fan-out numbers? When a user with 200 followers posts a tweet, how does that affect the system?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great point. This is the core challenge. If we use fan-out-on-write, when a user posts a tweet, we write it into the home timeline of all 200 followers. With 5,800 tweets per second and average 200 followers, that's 1.16 million timeline writes per second. That's heavy but manageable with a distributed system. The real problem is celebrities — if someone with 50 million followers tweets, that's 50 million writes for a single tweet. That could take minutes and create massive write spikes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "fan_out_on_write", "celebrity_problem"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "So how do you handle the celebrity problem?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "celebrity_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hybrid approach. For normal users — those with fewer than, say, 10,000 followers — we use fan-out-on-write. Their tweets are pre-materialized into followers' timelines. For celebrities, we use fan-out-on-read. Their tweets are NOT pre-written to timelines. When a user loads their feed, the system fetches the pre-computed timeline AND separately fetches recent tweets from any celebrities they follow, then merges them in memory, sorted by timestamp. This way, a celebrity tweet is one write to their own tweet store, not 50 million timeline writes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_on_write", "fan_out_on_read", "celebrity_problem", "hybrid_fanout"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. How do you determine which users are celebrities? Is 10K the right threshold?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "celebrity_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "The threshold should be tunable and data-driven. 10K is a starting point. The real metric is fan-out cost — we'd look at the 99th percentile of fan-out write time and set the threshold where a single tweet's fan-out would exceed some SLA, maybe 100ms. We could also make it dynamic — if a user suddenly goes viral, temporarily switch them to the celebrity path. A background job periodically recalculates the celebrity list based on follower count and posting frequency.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["celebrity_problem", "hybrid_fanout"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thorough analysis. Let's move to the data model and storage. What databases would you use?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use different stores for different data. For the tweet store — the actual tweets and metadata — I'd use a distributed key-value store or wide-column store like Cassandra. It handles high write throughput and scales horizontally. Tweets are immutable and access is primarily by ID, which is perfect for Cassandra. For the social graph — who follows whom — I'd use a graph database like TAO (Facebook's approach) or a sharded MySQL setup since follow relationships are relational. For pre-computed timelines, Redis sorted sets — each user's timeline is a sorted set with tweet IDs scored by timestamp. Redis gives us the sub-millisecond reads we need.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "cassandra", "redis_caching", "social_graph"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How much memory do you need for all those Redis sorted sets? Can that fit in memory?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "redis_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me calculate. If each timeline stores the last 800 tweet IDs (8 bytes each plus timestamp 8 bytes), that's about 12.8 KB per user. With 300 million active users, that's 3.84 TB of timeline data. A Redis cluster can handle this, but it's significant. We could optimize by only keeping timelines for recently active users — if someone hasn't logged in for 30 days, evict their timeline. On their next login, regenerate it from the tweet store. This could reduce our working set to maybe 100 million active timelines, bringing it down to about 1.28 TB.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "capacity_estimation", "cache_eviction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the image storage and delivery work at 20 TB per day?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "blob_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Images go to object storage — S3 or equivalent. When a user uploads a tweet with an image, the app server uploads the image to S3, generates multiple resized versions (thumbnail, medium, full) for different clients, and stores the S3 URLs in the tweet metadata. For delivery, we put a CDN in front of S3. CloudFront or Akamai would cache popular images at edge locations globally. With proper cache headers, the CDN hit rate should be 90%+ for recent images. We'd also need an image processing pipeline — probably an async job queue that handles resizing, format conversion to WebP, and content moderation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["blob_storage", "cdn_redirect", "image_processing", "async"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Walk me through the complete request flow for loading a home timeline.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "feed_generation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Step 1: User requests GET /home/timeline with pagination cursor. Step 2: Load balancer routes to an app server. Step 3: App server fetches the pre-computed timeline from Redis — the sorted set gives us the next 20 tweet IDs ordered by timestamp. Step 4: In parallel, fetch recent tweets from any celebrities this user follows — query the celebrity tweet store with a time range. Step 5: Merge both lists by timestamp, take top 20. Step 6: Multi-get the full tweet objects from Cassandra by ID. Step 7: Multi-get user profiles for the tweet authors from a user cache. Step 8: Assemble the response with tweet content, author info, and image CDN URLs. Step 9: Return to client. Steps 3-4 are parallel, and steps 6-7 are parallel, so total latency is roughly: Redis lookup (1ms) + max(celebrity fetch 5ms, skip) + Cassandra multi-get (10ms) + user cache (5ms) ≈ 20ms. Well under our 500ms p99 target.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_generation", "fan_out_on_read", "redis_caching", "cassandra", "latency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent detail. We're actually running low on time — we have about 5 minutes left. I'd wanted to do a deep-dive on failure scenarios and scaling. Let's try to cover those quickly. What happens when your Redis timeline cache fails?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right — if Redis goes down, we lose all pre-computed timelines. Fallback: switch to full fan-out-on-read. For each user, query the follower list, fetch recent tweets from each followed user in Cassandra, merge and sort. This is much slower — probably 200-500ms depending on how many users they follow. To mitigate: Redis cluster with replicas so a single node failure doesn't kill everything. Also persist timelines to disk periodically so we can warm up a new Redis instance faster.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["cache_failure", "fan_out_on_read", "graceful_degradation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Quick — how would you shard Cassandra and handle cross-datacenter replication?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Cassandra handles this natively — partition key is the tweet ID, it uses consistent hashing across nodes. For cross-DC, Cassandra supports multi-datacenter replication with configurable consistency. I'd use LOCAL_QUORUM for reads and writes in normal operation — you get strong consistency within a datacenter and eventual consistency across DCs. For the social graph in MySQL, that's harder — probably shard by user ID and use async replication to a secondary datacenter.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["sharding_strategy", "consistent_hashing", "multi_region", "replication"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last minute — anything you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Quickly — rate limiting on the tweet creation endpoint, a notification service for mentions and follows, monitoring on fan-out latency and Redis memory usage, and eventually a ranking algorithm to replace pure chronological ordering. I wish we had more time to deep-dive on the failure scenarios — there's a lot more I'd cover around network partitions and data consistency.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["rate_limiting", "monitoring", "feed_ranking"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You had an excellent design with strong depth on the fan-out strategy and data model. The time management was the main issue — we didn't get to fully explore failure handling and scaling. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 60,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 5,
+      "failure_handling": 4,
+      "communication": 6
+    },
+    "strengths": [
+      "Outstanding fan-out analysis — hybrid approach with celebrity threshold was well-reasoned",
+      "Detailed capacity estimation including Redis memory calculation",
+      "Comprehensive request flow walkthrough with latency breakdown"
+    ],
+    "weaknesses": [
+      "Poor time management — spent too long on high-level design, rushed the deep-dive",
+      "Failure handling was superficial due to time pressure",
+      "Never discussed network partitions or data consistency in depth",
+      "Scaling discussion was abbreviated — multi-region was barely touched"
+    ]
+  }
+}

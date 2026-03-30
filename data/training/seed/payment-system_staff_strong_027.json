@@ -1,0 +1,162 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_027"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a payment system — think Stripe's core payment processing infrastructure. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several important ones. What's the scope — are we building the payment gateway that processes card transactions, or the full platform including merchant onboarding, invoicing, and payouts? What payment methods — credit cards only, or also ACH, wire transfers, digital wallets? What's our transaction volume and latency target? And critically, are we a PCI Level 1 service provider — how much card data do we handle directly?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["requirements_gathering", "pci_compliance", "payment_methods", "scope"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Full payment platform. Credit cards and ACH. 10,000 transactions per second at peak. Authorization latency under 500ms. We are PCI Level 1. Let's design it.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "At 10K TPS, this is a serious payment platform — about $300B annual GMV at $100 average transaction. Let me outline the core components. The payment flow has four stages: authorization (does the cardholder have funds?), capture (actually move the money), settlement (net out the transactions with the issuing banks), and payout (send money to the merchant). I'll focus on authorization first since that's the latency-sensitive path, then discuss the downstream stages.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payment_flow", "authorization", "capture", "settlement", "gmv_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good framing. Walk me through the authorization flow.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": "authorization" }
+    },
+    {
+      "role": "candidate",
+      "content": "The merchant's server sends a POST /v1/charges request with the payment method token, amount, currency, and an idempotency key. Our API gateway validates the request, authenticates the merchant via API key, and routes to the payment service. The payment service creates a payment intent record in the database with status 'pending'. It then routes the transaction to the appropriate payment processor based on the card network (Visa, Mastercard, Amex) — we maintain connections to multiple processor endpoints. The processor communicates with the issuing bank, which checks the cardholder's available credit and responds with approved or declined. We receive the response, update the payment intent to 'authorized' or 'declined', and return the result to the merchant. Total round trip: 200-400ms, mostly spent waiting for the card network.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "authorization", "payment_routing", "card_network", "idempotency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned idempotency keys. This is critical for payments. Explain exactly how idempotency keys work with database transactions.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "idempotency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Idempotency is the most important correctness property in a payment system — a network retry must never charge a customer twice. Here's how it works precisely. The merchant includes an Idempotency-Key header — a UUID they generate. When our API receives the request, within a single database transaction, we: 1) Try to INSERT into an idempotency_keys table with (key, merchant_id, request_hash, status, response_body). The key column has a unique constraint. 2) If the INSERT succeeds, this is a new request — we proceed with payment processing. 3) If the INSERT fails with a unique constraint violation, this is a retry — we SELECT the existing row, verify the request_hash matches (to prevent key reuse for different operations), and return the stored response_body. The critical detail: the idempotency key insertion and the payment intent creation must be in the same database transaction. If they're separate, there's a window where the idempotency key is saved but the payment intent isn't (or vice versa). The transaction is: BEGIN → INSERT idempotency_key → INSERT payment_intent → COMMIT. If the commit fails, both are rolled back, and the retry will start fresh. After we get the processor response, we update both the payment intent status and the idempotency key's response_body in another transaction.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency", "database_transactions", "unique_constraint", "atomicity"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if our service crashes after sending the authorization request to the processor but before receiving the response? The card might be charged but we don't know.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "crash_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the in-flight transaction problem — the most dangerous state in payment processing. The payment intent is in 'pending' status in our database, and we don't know if the processor authorized it or not. My approach: a reconciliation worker runs every 30 seconds, scanning for payment intents that have been in 'pending' status for longer than the expected processing time — say, over 60 seconds. For each stale pending transaction, the worker calls the processor's status inquiry API using the transaction reference ID to determine the actual outcome. If the processor says authorized, we update to 'authorized'. If declined, we update to 'declined'. If the processor has no record (meaning our request never arrived), we update to 'failed' and the merchant can retry. The key design principle: the payment processor is the source of truth for transaction status, not our database. Our database is a cache of that truth. We also send the reconciliation as a daily batch — we download the full settlement file from each processor and compare every transaction against our records. Any mismatches trigger alerts for manual review.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["crash_recovery", "reconciliation", "settlement_file", "source_of_truth"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. Let's talk about the ledger. How do you track money flowing through the system?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "double_entry_ledger" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd implement a double-entry accounting ledger. The fundamental rule: every financial event creates two entries that balance to zero — a debit and a credit. The schema: ledger_entries table with entry_id, transaction_id, account_id, entry_type (debit/credit), amount (always positive — the entry_type determines direction), currency, created_at. The accounts table: account_id, account_type (merchant, platform_fees, reserves, processing_costs), merchant_id (nullable). For a $100 charge with a 2.9% + $0.30 fee: Entry 1: DEBIT customer_funds $100 (money comes in). Entry 2: CREDIT merchant_balance $96.80 (merchant's share). Entry 3: CREDIT platform_fees $2.90 (percentage fee). Entry 4: CREDIT processing_costs $0.30 (fixed fee). The sum of debits equals the sum of credits: $100 = $96.80 + $2.90 + $0.30. For refunds, we reverse the entries — debit the merchant balance and credit the customer. This is append-only — we never update or delete ledger entries, only add new ones. The current balance of any account is the sum of all its entries.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["double_entry_ledger", "database_schema", "accounting", "append_only"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you ensure the ledger entries always balance? What prevents a bug from creating an unbalanced entry?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "double_entry_ledger" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multiple layers of defense. First, the ledger write API requires all entries for a transaction to be submitted as a batch. The API validates that debits equal credits before persisting — if they don't balance, the entire batch is rejected. Second, all entries for a transaction are written in a single database transaction, so they're atomic — either all entries are written or none are. Third, a background auditor runs periodically and verifies the invariant: for every transaction, the sum of debits equals the sum of credits. Any violations trigger an immediate P0 alert. Fourth, we maintain running balances as materialized views, and a separate job verifies that the running balance matches the sum of individual entries. Discrepancies mean either the running balance update has a bug or entries were corrupted. This defense-in-depth approach means a single bug can't silently corrupt financial data — it would be caught by at least one of the validation layers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["double_entry_ledger", "validation", "audit", "defense_in_depth", "materialized_views"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid ledger design. Now let's talk about fraud detection. How does that fit into the payment flow?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "fraud_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fraud detection sits in the authorization path, between receiving the merchant's request and sending it to the processor. It needs to be fast — we have maybe 50-100ms of our 500ms budget for fraud scoring. I'd build a two-tier system. Tier 1: Rules engine. Synchronous, deterministic rules that run on every transaction in under 10ms. Examples: velocity checks (more than 5 transactions in 1 minute from the same card → flag), amount thresholds (transaction over $5,000 → flag), geographic anomalies (card used in NYC and Tokyo within 1 hour → block). The rules are stored in a configuration system and can be updated without code deployment. Data for velocity checks comes from Redis — we maintain counters per card hash with TTLs. Tier 2: ML model. A gradient-boosted tree model that scores transaction risk from 0 to 1. Features include: transaction amount, merchant category, time of day, card's historical patterns, device fingerprint, billing/shipping address match. The model runs in a feature store that pre-computes features asynchronously from the event stream. The model inference takes 20-30ms. Transactions with a risk score above a threshold are either blocked or sent to 3D Secure for additional authentication.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fraud_detection", "rules_engine", "ml_model", "velocity_checks", "feature_store", "3d_secure"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good depth on fraud. How does the ML model get trained and updated? You can't let it go stale.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "fraud_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "The model training pipeline is a separate offline system. We collect labeled data from two sources: chargebacks (confirmed fraud, reported by card networks weeks after the transaction) and manual reviews (our fraud operations team labels suspicious transactions daily). The training dataset is historical transactions with their labels — fraudulent or legitimate. We retrain the model weekly using the latest data. Before deployment, the new model runs in shadow mode — it scores live transactions but doesn't affect decisions. We compare its performance against the production model on precision (what % of blocks are actually fraud) and recall (what % of fraud are we catching). If the new model improves both metrics, or improves one without degrading the other, we promote it. The deployment uses an A/B framework — 5% of traffic goes to the new model initially, ramping to 100% over a few days. We never hard-switch models because a bad model could either block legitimate transactions (lost revenue) or miss fraud (lost money). Both are expensive mistakes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ml_training_pipeline", "shadow_mode", "ab_testing", "model_deployment", "precision_recall"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss the database layer. At 10K TPS, how do you design the database for the payment and ledger data?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Payments require strong consistency and ACID transactions — this isn't a use case for eventual consistency. I'd use PostgreSQL as the primary database, sharded by merchant_id. This means all operations for a single merchant — payment intents, ledger entries, refunds — are on the same shard and can be in the same transaction. With 10K TPS across, say, 32 shards, each shard handles about 312 TPS — well within a single PostgreSQL instance's capacity. The idempotency_keys table is co-located on the same shard as the payment data (since it's keyed by merchant_id + idempotency_key). For the ledger, it's append-only with high insert throughput. I'd use partitioning by month within each shard for efficient archival — we need to keep ledger data for 7 years for regulatory compliance, but we can move old partitions to cold storage. Read replicas serve analytical queries — balance calculations, reporting — without impacting the write path.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["postgresql", "sharding_strategy", "acid", "partitioning", "read_replicas", "data_archival"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the failure scenario where a database shard goes down? You can't just return errors for payments.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "database_failover" }
+    },
+    {
+      "role": "candidate",
+      "content": "For a payment database, we need zero data loss and minimal downtime. Each shard has a synchronous standby replica — writes are committed to both the primary and standby before acknowledging. If the primary fails, we promote the standby. This gives us RPO of zero (no data loss) and RTO of 10-30 seconds (time to detect failure and promote). During the failover window, we return 503 to the merchant with a Retry-After header. The merchant's integration should be built to handle transient failures and retry with their idempotency key. For planned maintenance, we do rolling failovers — promoting the standby, then rebuilding a new standby from the promoted primary. There's no downtime for planned operations. The nuclear scenario — both primary and standby fail simultaneously — is mitigated by having an async replica in a different availability zone as a third copy. We'd lose a few seconds of transactions in this scenario, which triggers the reconciliation process I described earlier to determine the true state from the processor.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["synchronous_replication", "failover", "rpo", "rto", "rolling_maintenance", "disaster_recovery"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's wrap up. What monitoring and alerting would you set up for this system?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Payment systems need aggressive monitoring. Business metrics: authorization success rate (should be 85-95% — drops indicate processor issues or fraud model being too aggressive), average transaction amount (sudden changes indicate data issues), chargeback rate (must stay under 1% to maintain card network privileges — this is existential). Technical metrics: end-to-end authorization latency at p50/p95/p99, processor response times broken down by network, database replication lag, queue depth for the settlement pipeline. Fraud-specific: model inference latency, false positive rate (legitimate transactions blocked), fraud detection rate by category. Alerting tiers: P0 — authorization success rate drops below 80% or any ledger imbalance detected — all hands on deck. P1 — processor latency exceeds 1 second or chargeback rate approaches 0.8%. P2 — replication lag exceeds 5 seconds or fraud model precision drops below threshold. I'd also have a real-time financial dashboard visible to the finance team showing money in, money out, and reserves — if these numbers diverge from expected, something is wrong.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "alerting", "chargeback_rate", "authorization_rate", "financial_dashboard"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent depth across the board — idempotency, double-entry accounting, fraud detection, and failure handling. Strong interview. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 79,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 7,
+      "api_design": 8,
+      "database_design": 9,
+      "caching_strategy": 6,
+      "scalability": 8,
+      "failure_handling": 9,
+      "communication": 8,
+      "domain_knowledge": 9
+    },
+    "strengths": [
+      "Exceptional depth on idempotency — explained the exact database transaction sequence and edge cases",
+      "Strong double-entry ledger design with concrete schema, fee calculation example, and multi-layer validation",
+      "Well-structured fraud detection pipeline with both rules engine and ML model, including deployment safety",
+      "Thorough crash recovery approach using processor as source of truth with reconciliation"
+    ],
+    "weaknesses": [
+      "Didn't discuss PCI compliance scope minimization or tokenization in depth",
+      "Limited discussion of multi-currency or cross-border payment considerations",
+      "Caching strategy was minimal — could have discussed caching merchant configurations, rate tables, or BIN lookups"
+    ]
+  }
+}

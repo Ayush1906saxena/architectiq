@@ -1,0 +1,190 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "principal",
+    "candidate_profile": "discusses-observability",
+    "total_exchanges": 24,
+    "generation_id": "seed_217"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed key-value store, something like DynamoDB or etcd. What are your initial questions?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me clarify the positioning. Are we building a CP system like etcd for configuration and coordination, or an AP system like DynamoDB for high-throughput data? What consistency model — strong, eventual, or tunable? What's the value size range — small metadata or large blobs? And what's the target scale — how many keys and what QPS?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cap_theorem", "consistency_models", "system_positioning"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "AP system, tunable consistency. Values up to 1MB. 1 billion keys, 500K reads per second, 100K writes per second. Go ahead and design it — but I'm particularly interested in how you'd make this system observable and operable at scale.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "observability" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great. Let me sketch the core architecture first, then I'll layer on the observability stack — because in my experience, observability isn't a bolt-on; it's part of the design. Core architecture: data is hash-partitioned across N nodes using consistent hashing with virtual nodes. Each partition is replicated to 3 nodes. Reads and writes use quorum — W + R > N for strong consistency, or W=1, R=1 for eventual. Each node runs an LSM-tree storage engine — a write-ahead log for durability, memtable for recent writes, and SSTables on disk. Now let me go deep on making this observable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing", "virtual_nodes", "quorum_reads_writes", "lsm_tree", "write_ahead_log"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes, let's focus on observability. What metrics are essential for a distributed KV store?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "metrics_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd organize metrics into four pillars. First, request metrics per node: read/write latency histograms (p50, p95, p99, p999), broken down by consistency level. Not just averages — histograms are critical because a p99 of 50ms and a p999 of 2s tells a very different story than an average of 10ms. Second, replication metrics: replication lag per replica pair measured in both time (seconds behind) and bytes (WAL position delta). Third, storage metrics: disk usage per node, memtable size, SSTable count, compaction queue depth, and write amplification ratio. Fourth, cluster health: number of nodes up/down, partition ownership balance, and ongoing data movements.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["latency_histograms", "replication_lag", "storage_metrics", "write_amplification", "cluster_health"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you implement latency histograms per node without adding overhead to the hot path?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "metrics_implementation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each node maintains thread-local HDR histograms — High Dynamic Range histograms that pre-allocate fixed memory (about 10KB per histogram) and support O(1) recording. No locks, no allocations on the hot path. The overhead is a single clock read and an array index increment per request — nanoseconds. Every 10 seconds, a background thread snapshots the histograms, computes percentiles, and publishes to our metrics pipeline. I'd use something like Prometheus with a pull model — each node exposes a /metrics endpoint. For 1000 nodes, Prometheus federation or a remote-write architecture like Thanos aggregates everything into a central store.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hdr_histogram", "thread_local", "prometheus", "thanos", "metrics_pipeline"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Tell me about replication lag monitoring. How do you detect and alert on lag?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "replication_lag" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each replica tracks two things: the primary's latest WAL sequence number (obtained via a lightweight gossip protocol) and its own applied sequence number. The delta is replication lag in operations. We also track it in wall-clock time: the primary timestamps each WAL entry, and the replica reports the timestamp of the last applied entry. Time-based lag is more meaningful for operators — 'replica is 3 seconds behind' is actionable, '50,000 operations behind' isn't as clear. Alerting tiers: warning at 5 seconds lag, critical at 30 seconds, and emergency at 120 seconds (which triggers automatic traffic rerouting away from the lagging replica).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["replication_lag", "wal_sequence_tracking", "gossip_protocol", "tiered_alerting", "automatic_remediation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about that automatic traffic rerouting? How does that work?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "automatic_remediation" }
+    },
+    {
+      "role": "candidate",
+      "content": "The routing layer maintains a health score per node, from 0 to 100. A healthy node scores 100. Replication lag reduces the score: 5s lag → score 80, 30s lag → score 40, 120s lag → score 0. High disk usage reduces it too: 80% disk → score 70, 95% disk → score 20. The client-side routing library (or a proxy layer) uses weighted random selection based on health scores. A node at score 40 gets 40% of the traffic a healthy node gets. At score 0, it gets no traffic. This is smoother than a binary healthy/unhealthy — it gradually sheds load rather than causing a sudden traffic shift that might overwhelm other nodes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["health_scoring", "weighted_routing", "graceful_degradation", "load_shedding"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about disk usage prediction. How do you prevent a node from running out of disk?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "disk_prediction" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd implement a predictive model. Each node tracks disk usage over a 7-day sliding window. A simple linear regression on the daily growth rate predicts when the disk will hit 90% and 100%. We alert at the predicted 90%-in-7-days mark, giving ops time to act. But linear prediction isn't always accurate — compaction can temporarily spike disk usage, and tombstone expiration can free large chunks. So I'd add a compaction-aware model: track disk usage before and after compactions, model the compaction schedule, and predict peak disk usage including in-flight compactions. The prediction also feeds into an automatic rebalancing trigger — if a node is predicted to run out within 48 hours, start migrating partitions away proactively.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["disk_prediction", "linear_regression", "compaction_awareness", "proactive_rebalancing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me more about the automatic rebalancing. How do you decide what to move and where?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "automatic_rebalancing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rebalancing decisions consider multiple signals. Which partitions to move: pick the largest partitions on the overloaded node first — moving one large partition is cheaper than many small ones in terms of coordination overhead. Where to move them: find nodes that are under their target utilization for both disk and CPU. Constraint: never move a partition to a node that already holds another replica of the same partition — that would reduce durability. The rebalancing controller runs as a single leader (elected via Raft) to prevent conflicting moves. It moves one partition at a time, waits for the new replica to catch up, then decommissions the old one. Rate limiting: max 2 rebalances per hour cluster-wide to prevent cascading moves.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rebalancing_strategy", "placement_constraints", "leader_election", "rate_limiting_operations"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you observe the rebalancing itself? It's a complex operation that could go wrong.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "rebalancing_observability" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each rebalance operation gets a unique trace ID and goes through well-defined states: PLANNED → STREAMING → CATCHING_UP → VERIFYING → COMPLETE or FAILED. We track: bytes transferred and transfer rate, estimated time remaining, replication lag on the new replica as it catches up, and checksum validation at the end. A dashboard shows all in-flight rebalances with their state and progress. If a rebalance stalls — say, transfer rate drops to zero for 5 minutes — we alert and auto-cancel it to prevent a half-migrated partition from causing confusion. Post-mortem: we log every rebalance with before/after cluster balance scores to verify the rebalance actually improved things.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["state_machine", "distributed_tracing", "checksum_validation", "stall_detection", "balance_scoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss distributed tracing for individual requests. A read might touch multiple nodes.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "distributed_tracing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Every client request gets a trace ID. For a quorum read with R=2, the coordinator sends the request to 3 replicas and waits for 2. The trace captures: time spent in the coordinator's routing logic, network time to each replica, time each replica spent reading from memtable vs SSTable vs disk, and time waiting for the quorum. This is invaluable for diagnosing tail latency — is the p99 from slow disks, from one consistently slow replica, or from quorum waiting? I'd use OpenTelemetry for instrumentation with a sampling rate of 1% in production — that's still 5,000 traced reads per second at our scale, plenty for analysis without significant overhead.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_tracing", "opentelemetry", "tail_latency_diagnosis", "sampling_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you build dashboards that operators actually use? I've seen monitoring systems with 500 metrics that nobody looks at.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "dashboard_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd build three tiers of dashboards. Tier 1 — the Overview: a single screen with four numbers: cluster read latency p99, write latency p99, availability (% of requests succeeding), and a cluster health score (composite of all node health scores). If these are green, the operator doesn't need to look further. Tier 2 — Investigation: drill-down by node, by partition, by consistency level. Accessible from the overview by clicking the metric that's red. Shows time-series graphs with anomaly highlighting. Tier 3 — Debug: trace viewer, per-request latency breakdown, SSTable-level diagnostics. Only used when actively debugging an issue. The key principle: each dashboard should answer ONE question, and link to the dashboard that answers the next question.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dashboard_hierarchy", "progressive_disclosure", "operational_ux"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about alerting? How do you avoid alert fatigue?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "alerting_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Alert on symptoms, not causes. We page on: read/write error rate above 0.1% for 5 minutes (users are affected), latency p99 above SLO for 10 minutes, availability below 99.95% for any 15-minute window, and data loss risk — if any partition drops below 2 replicas. We do NOT page on: a single node going down (the system handles this automatically), temporary replication lag (the routing layer adjusts), or disk usage crossing a threshold (the prediction system handles this proactively). Each alert links to a runbook. We review alert frequency monthly — any alert that fires more than once a week without requiring human action gets automated or deleted.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["symptom_based_alerting", "alert_fatigue_prevention", "runbooks", "alert_hygiene"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle a split-brain scenario where two nodes both think they're the primary for a partition?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "split_brain" }
+    },
+    {
+      "role": "candidate",
+      "content": "In an AP system with tunable consistency, split-brain isn't catastrophic — both nodes accept writes, and we resolve conflicts during reads. But we still need to detect it for observability. Each write carries a vector clock or a version vector. During read-repair, if we find divergent versions on different replicas — versions that are neither equal nor one strictly greater than the other — that's a detected split. We metric this: 'conflict rate per partition per hour.' A sustained conflict rate above baseline indicates a network partition or a misbehaving node. For resolution, we offer last-writer-wins by default (using hybrid logical clocks for ordering) and expose a conflict resolution callback for clients who need application-specific merging.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["split_brain", "vector_clocks", "read_repair", "conflict_resolution", "hybrid_logical_clocks"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last topic — capacity planning. How do you decide when to add more nodes?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "capacity_planning" }
+    },
+    {
+      "role": "candidate",
+      "content": "Capacity planning feeds from the observability stack. I'd build a model that ingests: current QPS trends (with weekly and seasonal patterns), disk growth rate, latency headroom (how far below SLO we are), and planned business events (marketing campaigns, product launches). The model projects when we'll hit 80% of any resource ceiling — QPS capacity, disk, memory, or network bandwidth. It generates a capacity report monthly: 'At current growth, we need 10 more nodes by Q3 to maintain our latency SLO.' This feeds into procurement and budgeting. For unexpected spikes, we maintain 30% headroom across all resources, and the auto-scaling system can add nodes from a warm pool within 15 minutes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_planning", "growth_modeling", "headroom_policy", "warm_pool", "auto_scaling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're at time. Any closing thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The throughline of my design is that observability drives operability. The health scoring system automatically routes around problems. The disk prediction system prevents outages before they happen. The rebalancing system heals the cluster without human intervention. Alerts only fire when humans genuinely need to act. The goal is a system where the on-call engineer sleeps through the night not because nothing goes wrong, but because the system handles it. The observability stack isn't overhead — it's what makes a distributed system viable in production.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["self_healing_systems", "operational_philosophy", "observability_as_core"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Outstanding depth on observability. The health scoring and progressive dashboard design were highlights. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 79,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 6,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional observability design — health scoring, tiered dashboards, symptom-based alerting",
+      "Self-healing mechanisms: automatic traffic rerouting, proactive rebalancing, disk prediction",
+      "Principal-level thinking about operational sustainability and on-call quality"
+    ],
+    "weaknesses": [
+      "API design was not discussed — no client interface or protocol details",
+      "Caching layer was not addressed — read-through cache, bloom filters for non-existent keys",
+      "Capacity estimation was light — didn't calculate node count or network bandwidth needs"
+    ]
+  }
+}

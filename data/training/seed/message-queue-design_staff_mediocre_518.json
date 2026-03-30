@@ -1,0 +1,172 @@
+{
+  "metadata": {
+    "problem_id": "message-queue-design",
+    "level": "staff",
+    "candidate_profile": "mediocre",
+    "total_exchanges": 20,
+    "generation_id": "seed_518"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a distributed message queue like Kafka. At staff level, I expect depth on storage internals, replication mechanics, and failure scenarios.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Let me clarify requirements. What's the throughput — messages per second? What delivery guarantee do we need? And how long do we retain messages?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["throughput", "delivery_guarantee", "retention"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10 million messages per second, at-least-once delivery with option for exactly-once, 7-day retention. Drive the design.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "The core abstraction is a topic divided into partitions. Each partition is an append-only log stored on a broker. Producers hash the message key to determine the partition, ensuring ordering per key. Consumers read sequentially from partitions, tracking their offset. Consumer groups divide partitions among members for parallel processing.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["topic", "partition", "append_only_log", "key_hashing", "offset", "consumer_groups"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Standard Kafka overview. At staff level, I want more. How does the replication protocol work in detail? Walk me through what happens when a producer sends a message with acks=all.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "The message goes to the partition leader. The leader writes it to its local log. Then it replicates to the followers — they fetch from the leader. With acks=all, the leader waits for all replicas to acknowledge before responding to the producer. If any replica is slow, the write is slow.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["leader", "follower_fetch", "acks_all"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You said 'all replicas.' But what if one replica is permanently slow or crashed? Does the producer wait forever?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "isr" }
+    },
+    {
+      "role": "candidate",
+      "content": "No — Kafka has the ISR concept. In-sync replicas. Only replicas that are caught up are in the ISR. If a replica falls behind by more than a threshold, it's removed from the ISR. With acks=all, the leader only waits for ISR members, not all replicas. So a slow or crashed replica drops out of ISR and doesn't block writes.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["isr", "lag_threshold", "dynamic_membership"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What's the minimum ISR size? What happens if ISR shrinks to just the leader?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "min_isr" }
+    },
+    {
+      "role": "candidate",
+      "content": "If ISR is just the leader, acks=all is effectively acks=1 — we only wait for the leader. If the leader crashes, data is lost. So there's a min.insync.replicas setting — typically 2. If ISR drops below that, the broker rejects writes rather than accepting them with insufficient durability. It's a safety mechanism.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["min_insync_replicas", "write_rejection", "durability_guarantee"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now explain exactly-once semantics. How does Kafka achieve it?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "exactly_once" }
+    },
+    {
+      "role": "candidate",
+      "content": "Idempotent producers. Each producer gets a unique ID, each message gets a sequence number per partition. The broker deduplicates by checking if it's seen that sequence number before. This handles retries — if the producer sends the same message twice due to a timeout, the broker discards the duplicate.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["idempotent_producers", "sequence_numbers", "deduplication"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's producer idempotency — it handles duplicates from retries. But exactly-once also means that a consumer reading from one topic, processing, and writing to another topic doesn't produce duplicates either. How does that work?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "transactional_exactly_once" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's the transactional API. The consumer-producer atomically commits the consumed offset and the produced output messages in a single transaction. If any part fails, everything rolls back. The broker maintains a transaction log... but I'm not sure about the exact mechanics of how the two-phase commit works internally.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["transactional_api", "atomic_commit", "two_phase_commit"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "At staff level, I'd expect you to know the transaction protocol. Let's move on — how does log compaction work?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Log compaction is an alternative to time-based retention. Instead of deleting messages after 7 days, we keep the latest value for each key. The compaction process reads old segments, deduplicates by key — keeping only the latest message per key — and writes a new compacted segment. It's useful for changelog topics where you want the current state of each key, like a database table snapshot.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["log_compaction", "key_deduplication", "changelog_topics", "state_snapshot"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does compaction interact with consumer offsets? If segments are rewritten, do offsets change?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "compaction_offsets" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's a good question... I think offsets are preserved? The compacted segment keeps the original offset for each surviving message. So a consumer at offset 1000 still finds offset 1000 in the compacted segment, even though offsets 500-999 might be gaps where older versions of keys were removed. The consumer just skips gaps.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["offset_preservation", "offset_gaps", "consumer_skipping"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Correct — offsets are immutable. What about consumer group rebalancing? A new consumer joins or one dies. What happens?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "rebalancing" }
+    },
+    {
+      "role": "candidate",
+      "content": "The group coordinator triggers a rebalance. All consumers in the group stop processing, release their partition assignments, and re-join. The coordinator reassigns partitions — maybe with a round-robin or sticky strategy. Consumers resume from their last committed offsets. The problem is the stop-the-world pause — all processing halts during the rebalance, which can take seconds to minutes for large groups.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["group_coordinator", "rebalance", "stop_the_world", "assignment_strategies", "resume_from_offset"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you mitigate the stop-the-world problem?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "cooperative_rebalancing" }
+    },
+    {
+      "role": "candidate",
+      "content": "I've heard of cooperative rebalancing where only the affected partitions are revoked, but I don't know the details of how it's implemented. I think consumers keep processing their unchanged partitions while only the reassigned ones are paused. But the protocol details are beyond what I know.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["cooperative_rebalancing"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a broker dies? It was leading 50 partitions.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "broker_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The controller detects the failure via heartbeat timeout. For each of the 50 partitions, it elects a new leader from the ISR. Producers and consumers discover the new leaders via metadata refresh and reconnect. During the leadership transition — a few seconds — those partitions are unavailable for new writes. If the dead broker had uncommitted data in its WAL that hadn't been replicated, that data is lost.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["controller", "heartbeat_detection", "leader_election", "metadata_refresh", "unavailability_window", "unreplicated_data_loss"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Key monitoring metrics: consumer lag (most important), under-replicated partitions, broker disk utilization, and produce/fetch latency percentiles. And quotas per client to prevent noisy neighbors from saturating the cluster.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["consumer_lag", "under_replicated_partitions", "monitoring", "quotas"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good monitoring instincts. Overall, you showed solid surface-level knowledge but several areas lacked the depth expected at staff — exactly-once transactions, cooperative rebalancing, and storage engine internals. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 52,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 3,
+      "api_design": 5,
+      "database_design": 6,
+      "caching_strategy": 4,
+      "scalability": 6,
+      "failure_handling": 6,
+      "communication": 6
+    },
+    "strengths": [
+      "Good ISR explanation with min.insync.replicas safety mechanism",
+      "Correct understanding of log compaction with offset preservation",
+      "Solid broker failure handling — identified unreplicated data loss risk"
+    ],
+    "weaknesses": [
+      "No capacity estimation — 10M msg/sec wasn't broken down into broker count, storage, or network",
+      "Exactly-once transactional protocol was hand-waved — staff should know the two-phase commit mechanics",
+      "Cooperative rebalancing was acknowledged but not understood — staff should know this important operational improvement",
+      "No discussion of page cache, zero-copy (sendfile), or why Kafka's performance is exceptional",
+      "Didn't drive the conversation as expected at staff level — mostly responsive to interviewer prompts"
+    ]
+  }
+}

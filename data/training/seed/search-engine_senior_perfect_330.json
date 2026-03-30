@@ -1,0 +1,131 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "senior",
+    "candidate_profile": "perfect",
+    "total_exchanges": 22,
+    "generation_id": "seed_330"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a web search engine — specifically the search and ranking infrastructure. Think about how you'd build the system that takes a user query and returns ranked results. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question. Let me scope this. Are we designing the full stack — crawling, indexing, and serving? Or focusing on the search serving layer that takes a query and returns results? What's the corpus size — how many web pages? What's the query volume — queries per second? What's the latency budget? Do we need to support advanced features like spell correction, autocomplete, and personalization? And are we designing for a single language or multilingual?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["crawling", "indexing", "serving", "corpus_size", "qps", "latency", "spell_correction", "personalization"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Focus on indexing and serving — assume the crawler delivers pages. 10 billion web pages. 100,000 queries per second. Latency under 200ms at p99. English only. Yes to spell correction. How would you start?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the index, which is the heart of a search engine. For 10 billion documents, we need an inverted index — a mapping from every word to the list of documents containing that word. The inverted index structure: for each term, we store a posting list — a sorted array of document IDs that contain that term, along with metadata like term frequency, position within the document, and field (title vs body). Assuming an average of 1,000 unique terms per document and 10 billion documents, we're looking at roughly 10 trillion postings. At ~12 bytes per posting (4-byte doc_id + 2-byte term frequency + 4-byte position + 2-byte field), that's about 120TB uncompressed. With compression, we can reduce this significantly.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["inverted_index", "posting_list", "term_frequency", "document_positions", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you compress those posting lists?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "index_compression" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two key techniques. First, delta encoding: since posting lists are sorted by doc_id, instead of storing absolute IDs [100, 150, 155, 200], we store deltas [100, 50, 5, 45]. The deltas are typically much smaller numbers. Second, variable-byte (varint) encoding: small numbers use fewer bytes. The delta value 5 needs 1 byte instead of 4. Combined, delta + varint compression typically achieves 3-4x compression. For even better compression, we can use more sophisticated schemes like PForDelta or Simple-9 which pack multiple small integers into a single 32-bit word. For our 120TB uncompressed index, we'd expect about 30-40TB compressed. But we also add skip pointers — every 128th posting in a list stores the absolute doc_id and a pointer to that position. This allows us to skip over large chunks of the posting list during query evaluation instead of scanning sequentially. Skip pointers add ~5% overhead but make intersection queries dramatically faster.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["delta_encoding", "varint_compression", "skip_pointers", "pfordelta", "compression_ratio"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How is the index built? 10 billion documents is a lot to process.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "index_building" }
+    },
+    {
+      "role": "candidate",
+      "content": "Index building is a batch process using MapReduce or Spark. The pipeline has three phases. Phase 1 — Map: each mapper takes a chunk of documents, tokenizes the text (lowercasing, stemming, removing stop words), and emits (term, doc_id, term_frequency, positions) pairs. Phase 2 — Shuffle and Sort: the framework groups all pairs by term, so all postings for 'search' end up on the same reducer. Phase 3 — Reduce: each reducer receives all postings for a term, sorts them by doc_id, applies delta encoding and compression, adds skip pointers, and writes the final posting list to the index file. The output is a set of index shards — we partition terms across shards either by term hash (document-partitioned) or by doc_id range (term-partitioned). I'd use document-partitioned sharding: each shard contains a complete inverted index for a subset of documents. This means a single query touches every shard (scatter-gather), but each shard is self-contained and can be replicated independently. The full index build takes hours on a large cluster — we run it incrementally, updating only changed documents.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["mapreduce", "tokenization", "stemming", "index_sharding", "document_partitioning", "incremental_indexing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through what happens when a user types a query. How is it processed and how do you return results?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "query_processing" }
+    },
+    {
+      "role": "candidate",
+      "content": "The query processing pipeline has several stages. Stage 1 — Query Understanding: parse the query, tokenize and stem (matching the index tokenization), expand synonyms, and correct spelling (I'll detail this later). Stage 2 — Scatter: the query coordinator sends the processed query to all index shards in parallel. Stage 3 — Per-shard evaluation: each shard looks up the posting lists for each query term. For a multi-term query like 'distributed systems', we intersect the posting lists for 'distributed' and 'systems' using a zipper merge with skip pointers — walk both lists, advancing the shorter one until doc_ids match. For each matching document, compute a relevance score. Stage 4 — Gather: each shard returns its top-K results (say, top 100) to the coordinator. The coordinator merges the K results from all shards, producing a global top-K. Stage 5 — Document fetch: for the final top 20 results, fetch the document metadata (title, URL, snippet) from a document store. Return to the user. The latency budget: query understanding 10ms, scatter+shard evaluation 100ms (the bottleneck), gather+merge 20ms, document fetch 30ms — total ~160ms within our 200ms budget.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["query_pipeline", "scatter_gather", "posting_list_intersection", "skip_pointer_merge", "top_k_merge", "latency_budget"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you rank the results? What scoring function would you use?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a two-phase ranking approach. Phase 1 — Initial scoring with BM25: this is the standard information retrieval scoring function. For a query term t in document d: BM25(t, d) = IDF(t) * (tf(t,d) * (k1 + 1)) / (tf(t,d) + k1 * (1 - b + b * |d|/avgdl)), where tf is term frequency, IDF is inverse document frequency (log((N - df + 0.5) / (df + 0.5))), |d| is document length, avgdl is average document length, and k1=1.2 and b=0.75 are tuning parameters. BM25 handles the text relevance signal: documents mentioning the query terms frequently, especially rare terms, score higher. It also normalizes for document length so short focused documents aren't penalized versus long ones. Phase 2 — Re-ranking with PageRank and additional signals: the top 1000 BM25 results are re-ranked using a combination of BM25 score, PageRank (a query-independent authority signal), URL quality signals (domain authority, freshness), and user engagement data (click-through rate on this result for similar queries). The final score is a weighted combination, typically trained using learning-to-rank (LambdaMART) on human-judged relevance data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["bm25", "idf", "term_frequency", "pagerank", "learning_to_rank", "two_phase_ranking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does spell correction work? The user types 'distribted systms' — how do you know what they meant?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "spell_correction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Spell correction uses edit distance as the foundation. The Levenshtein edit distance between two strings is the minimum number of single-character insertions, deletions, or substitutions needed to transform one into the other. 'distribted' is edit distance 1 from 'distributed' (one insertion). For each query term, we find dictionary words within edit distance 2. But checking against every word in the dictionary is expensive. Optimization 1: use a BK-tree or a precomputed edit-distance-1 index. For each word in our dictionary, we precompute all possible single-character edits and store them in a hash map. When we see 'distribted', we generate all edit-distance-1 variants and look them up in the dictionary hash map. Optimization 2: frequency-weighted candidates. 'distributed' is a much more common word than 'distribited' — we rank correction candidates by their frequency in our corpus. Optimization 3: context. If the previous word is 'distributed', the next word 'systms' is very likely 'systems' because the bigram 'distributed systems' is frequent. We use a language model (bigram/trigram frequencies) to pick the most likely correction in context. The corrected query runs alongside the original — if the corrected version gets significantly more results, we show 'Did you mean: distributed systems?'",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["edit_distance", "levenshtein", "bk_tree", "precomputed_edits", "language_model", "context_correction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you distribute the index across machines and handle node failures?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "distributed_index" }
+    },
+    {
+      "role": "candidate",
+      "content": "With 10 billion documents and ~35TB of compressed index, I'd split this into, say, 1,000 shards of ~35GB each. Each shard easily fits in memory on a modern server. For fault tolerance, each shard is replicated 3 times across different racks. A query goes to all 1,000 shards, but for each shard, it only needs to hit one of the 3 replicas. The query coordinator uses round-robin or least-loaded routing per shard for load balancing. If a replica fails, the coordinator routes to a surviving replica automatically. At 100K queries/sec across 1,000 shards, each shard handles 100K queries/sec — but each query's per-shard work is small (a few posting list lookups). With 3 replicas, each replica handles ~33K queries/sec, which is manageable. For index updates, we use a two-tier architecture: a large base index (rebuilt weekly from the full MapReduce pipeline) and a small real-time index (updated continuously for fresh content). Queries search both and merge results. This lets us index breaking news within minutes without rebuilding the entire index.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["index_sharding", "replication", "shard_routing", "two_tier_index", "real_time_indexing", "load_balancing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost done. Anything else you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few additions. First, query caching — popular queries like 'weather' or 'news' have stable results. I'd cache the top results for high-frequency queries in Redis with a 5-minute TTL, which could serve 30-40% of traffic without touching the index. Second, safe search filtering — a classifier that flags adult/harmful content at index time, with query-time filtering based on user settings. Third, geographic relevance — boosting local results for queries with local intent ('pizza near me'). Fourth, snippet generation — highlighting query terms in the result snippet requires storing document text or pre-computed term positions, which adds storage but dramatically improves user experience. Fifth, click-through rate logging and feedback loops — tracking which results users click helps train the ranking model, but requires careful handling to avoid feedback loops where popular results get more clicks just because they're ranked higher.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["query_caching", "safe_search", "geographic_relevance", "snippet_generation", "feedback_loops", "ctr_logging"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great interview. Your depth on inverted index internals, BM25 scoring, and distributed query processing was excellent. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 85,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 9,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Deep understanding of inverted index internals — posting lists, skip pointers, varint compression, delta encoding",
+      "Precise BM25 formula with parameter explanations and normalization reasoning",
+      "Complete scatter-gather query pipeline with latency budget breakdown",
+      "Spell correction using edit distance with context-aware language model optimization",
+      "Two-tier index architecture for balancing freshness and rebuild cost"
+    ],
+    "weaknesses": [
+      "API design was not explicitly discussed — no mention of search API parameters, pagination, etc.",
+      "Could have discussed caching strategies at the query level earlier in the design"
+    ]
+  }
+}

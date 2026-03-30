@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "senior",
+    "candidate_profile": "implements-then-scales",
+    "total_exchanges": 22,
+    "generation_id": "seed_100"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a web search engine. Users type a query and get relevant results ranked by relevance. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "What's the corpus size — how many web pages are we indexing? What's the expected query volume? And are we building the crawler too, or just the search and ranking components?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["corpus_size", "qps", "scope"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10 billion web pages. 10,000 queries per second. Focus on indexing, search, and ranking — assume we have a crawler feeding us pages. Results should return in under 500ms.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "My approach is going to be: first, design a working search engine for a single machine, then scale it out. I find this makes the design much clearer because you understand the core data structures before distributing them. Is that approach okay?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["design_methodology"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Love that approach. Go for it.",
+      "annotation": { "action": "encourage", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "On a single machine, the core is an inverted index. For each term in our vocabulary, we maintain a sorted list of document IDs that contain that term — called a posting list. When we index a page, we tokenize the text, normalize tokens (lowercasing, stemming), and for each token, append the document ID to that token's posting list. We also store term frequency and position for ranking. The index is stored as sorted files on disk with an in-memory dictionary mapping terms to their file offsets. For a query like 'distributed systems', we look up the posting lists for 'distributed' and 'systems', then intersect them to find documents containing both terms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["inverted_index", "posting_list", "tokenization", "stemming", "term_frequency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the posting list intersection work efficiently?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "posting_list_intersection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Since posting lists are sorted by document ID, we use a merge-join approach — two pointers, advance the one pointing to the smaller doc ID. This is O(n+m) where n and m are the lengths of the two lists. For queries with a rare term and a common term — like 'defenestration AND the' — we start with the shorter list and use binary search (skip pointers) into the longer list. Skip pointers are placed every sqrt(n) entries and allow us to jump ahead, making intersection closer to O(n * log(m/n)). On a single machine with posting lists in memory, a two-term intersection over lists of 1 million entries each takes under 10ms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["merge_join", "skip_pointers", "posting_list_intersection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What about ranking? How do you decide which results appear first?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "On a single machine, I'd implement BM25 — a refined version of TF-IDF. For each matched document, the score is based on term frequency in the document (saturating — diminishing returns for repeated terms), inverse document frequency (rare terms matter more), and document length normalization (so longer documents don't automatically rank higher). BM25 has two tuning parameters: k1 controls term frequency saturation, b controls length normalization. This gives us content-based relevance. For the full system later, we'd add PageRank-like link analysis, but BM25 is a solid single-machine baseline.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["bm25", "tf_idf", "ranking", "pagerank"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great single-machine foundation. Now let's distribute this. 10 billion pages won't fit on one machine.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "distributed_search" }
+    },
+    {
+      "role": "candidate",
+      "content": "Now let me distribute this. Two approaches: document-based sharding or term-based sharding. Document-based: partition documents across N shards, each shard has a complete inverted index for its subset. A query goes to all shards in parallel, each returns its top-K results, and a coordinator merges them. Term-based: each shard owns a subset of terms. A query for 'distributed systems' goes to the shard owning 'distributed' and the shard owning 'systems', and they coordinate the intersection. I'd choose document-based sharding because: each shard is independent (no cross-shard coordination for intersection), failure of one shard only affects part of the index, and it's easier to rebalance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["document_sharding", "term_sharding", "distributed_search", "sharding_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How many shards do we need?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me estimate index size. Average web page is about 50KB of text. After tokenization and index compression (variable-byte encoding on posting lists), the inverted index is roughly 30% of the raw text size. So: 10 billion pages * 50KB * 0.3 = 150TB of index data. We also need to store the document content for snippet generation — maybe 2KB per document after compression = 20TB. Total: about 170TB. If each machine has 500GB of RAM for the hot index and 4TB SSD for the full index, we need about 340 shards for the full dataset. With replication factor 2 for availability, that's 680 machines. Each shard handles 10B/340 ≈ 29M documents.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "index_compression", "storage_estimation", "replication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "With 340 shards, every query fans out to all 340. That's a lot of parallel requests. How do you handle tail latency?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "tail_latency" }
+    },
+    {
+      "role": "candidate",
+      "content": "The slowest shard determines total latency — that's the tail latency problem. Several mitigations. First: with 2 replicas per shard, the coordinator sends the query to whichever replica responded faster recently. Second: hedged requests — if a shard hasn't responded in 50ms, send a duplicate request to its replica. Third: tiered index — put the most important 1 billion pages in a 'tier 1' index (34 shards). Most queries are answered well enough by tier 1 alone. Only if the user scrolls past page 1 do we query the full index. Google does exactly this. Fourth: early termination — if a shard has found enough high-scoring results, it stops scanning. With BM25, documents in the posting list are sorted by static quality score, so the best results come first.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tail_latency", "hedged_requests", "tiered_index", "early_termination"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle index updates? New pages are crawled continuously.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "index_updates" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two-layer approach. The main index is a large, optimized, immutable structure rebuilt periodically — say every few hours. But for freshness, each shard also maintains a small in-memory 'delta' index that receives real-time updates. Queries search both the main and delta indexes, merging results. Periodically, the delta index is merged into the main index through a compaction process — similar to an LSM tree. This way, a breaking news page can appear in search results within seconds of being crawled, without re-indexing 29 million documents.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["delta_index", "index_updates", "lsm_tree", "real_time_indexing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about query processing before it hits the index? Any preprocessing?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "query_processing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes, a query processing pipeline. Spell correction using a noisy channel model — P(correction|query) based on edit distance and language model probability. Query expansion with synonyms from a learned embedding model. Query understanding — detecting intent (navigational, informational, transactional) and entities. For popular queries (power law distribution), we cache the entire result set in Redis. The top 100K queries probably cover 30-40% of all search traffic, and caching them avoids hitting the index entirely.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["spell_correction", "query_expansion", "query_caching", "redis_caching"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if an entire shard goes down — both replicas?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "shard_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If one shard out of 340 is completely down, the search still works — we're missing about 0.3% of the index. The coordinator marks that shard as unavailable and returns results from the remaining 339 shards. Users won't notice. We accept slightly degraded recall over total unavailability. Meanwhile, a recovery process rebuilds the shard from the document store — the crawler's output is stored in a durable system like HDFS. Full shard rebuild takes maybe 1-2 hours. During that time, we're operating at 99.7% recall — a graceful degradation that's perfectly acceptable for search.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["graceful_degradation", "shard_failure", "recovery", "hdfs"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The approach of starting with a single machine really helped structure the distributed design. A few additions: A/B testing framework for ranking changes — even small BM25 parameter tweaks need to be tested on live traffic. Click-through rate as a signal to re-rank results over time — a learning-to-rank model trained on user behavior. And personalization — adjusting results based on user history, location, and language preference. But all of these layer on top of the solid single-machine foundation we built first.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ab_testing", "learning_to_rank", "personalization"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Your methodical approach — build it small, then scale it up — made the design very clear. Great interview, thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 73,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 8,
+      "api_design": 5,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 9
+    },
+    "strengths": [
+      "Excellent methodical approach — single-machine design made distributed design intuitive",
+      "Strong index data structure knowledge — posting lists, skip pointers, BM25 scoring",
+      "Thorough scaling analysis with concrete shard sizing and tail latency mitigation"
+    ],
+    "weaknesses": [
+      "API design not discussed — no mention of search API contract or response format",
+      "Requirements gathering was minimal — could have asked about result types, freshness needs",
+      "Security and abuse prevention (query injection, scraping protection) not addressed"
+    ]
+  }
+}

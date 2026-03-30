@@ -1,0 +1,152 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "staff",
+    "candidate_profile": "mediocre",
+    "total_exchanges": 20,
+    "generation_id": "seed_495"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a payment processing system like Stripe. At staff level, I expect you to drive the design and go deep on reliability and financial correctness.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll start with the payment flow. A customer buys something on a merchant's website. The merchant's frontend collects the card details using our client SDK — the card never touches the merchant's backend for PCI compliance. Our SDK tokenizes the card and returns a token. The merchant's backend calls our Charge API with the token and amount. We authorize with the card network, capture the funds, and eventually settle to the merchant's bank account.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["payment_flow", "tokenization", "pci_compliance", "authorize_capture_settle"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good overview. Let's assume 50 million transactions per day. Walk me through the core architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Core services: API Gateway for routing and authentication. Token Vault for card tokenization — heavily secured, isolated network segment. Payment Service for orchestrating the payment lifecycle. Bank Connector Service for communicating with card networks (Visa, Mastercard) and banks. Ledger Service for tracking money movement. Webhook Service for notifying merchants of events. The Payment Service is the orchestrator — it coordinates the flow between tokenization, authorization, capture, and settlement.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["api_gateway", "token_vault", "payment_service", "bank_connector", "ledger_service", "webhook_service"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned a Ledger Service. What's the data model? How do you ensure financial correctness?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "ledger_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ledger tracks every money movement. Double-entry bookkeeping — every transaction creates two entries that balance to zero. A debit from the customer's account and a credit to the merchant's account. The schema would be something like: ledger_entries table with entry_id, transaction_id, account_id, amount (positive for credit, negative for debit), currency, timestamp. For any transaction, SUM(amount) across all entries for that transaction_id must equal zero. If it doesn't, something went wrong.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["double_entry_bookkeeping", "ledger_schema", "balance_invariant"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now, at staff level, I want you to think about failure modes. What happens if we authorize a payment with the bank, but our system crashes before recording the result?",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "crash_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's dangerous — we charged the customer but have no record of it. We need... a write-ahead approach? Before calling the bank, we write our intent to the database — 'attempting authorization for $50 on card token xyz for merchant abc.' If we crash after the bank call, the recovery process sees the pending intent, queries the bank for the authorization status, and updates our records accordingly.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["write_ahead_intent", "crash_recovery", "bank_status_query"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's the right idea — it's essentially a saga pattern with a recovery step. How about idempotency? The merchant retries a failed charge request.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "idempotency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Idempotency keys. The merchant sends a unique key with each charge request. We store it. If we see the same key again, return the cached result instead of processing again. The key and result are stored atomically with the payment record. I'd use a unique constraint on the idempotency_key column in the payments table to prevent races.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["idempotency_key", "cached_result", "unique_constraint", "atomic_storage"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now, how does settlement work? The merchant wants their money. When and how do they get it?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "settlement" }
+    },
+    {
+      "role": "candidate",
+      "content": "Settlement is a batch process. Captured payments accumulate throughout the day. At the end of the day (or every T+2 days, depending on the schedule), we calculate the total owed to each merchant — sum of all captured payments minus our processing fee minus any refunds. We initiate a bank transfer (ACH or wire) to the merchant's bank account. The ledger records the settlement as a debit from our merchant holding account and a credit to the merchant's external bank.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["batch_settlement", "processing_fee", "bank_transfer", "ach", "settlement_ledger"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about reconciliation? How do you make sure your records match the bank's records?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "reconciliation" }
+    },
+    {
+      "role": "candidate",
+      "content": "We'd compare our ledger against the bank's settlement reports. The bank sends us a file daily — here's what we processed. We match each transaction in their file to our records. Matches are fine. Discrepancies need investigation — maybe we recorded a payment that the bank rejected, or the bank processed something we don't have a record for (the crash scenario we discussed). I'm not sure about the exact process for resolving discrepancies though.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["reconciliation", "settlement_reports", "discrepancy_detection"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "At staff level, reconciliation is one of the most important operational systems. Can you design it more concretely?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "reconciliation" }
+    },
+    {
+      "role": "candidate",
+      "content": "A daily batch job. Ingest the bank's settlement file. For each transaction in the file, look up the matching record in our system by transaction reference. Three outcomes: matched (amounts agree), amount mismatch (investigate), or unmatched (exists in one system but not the other). Unmatched items go into an exception queue for the finance ops team. For the crash scenario — we have a pending intent but no bank response — the reconciliation job sees it as 'pending for too long' and queries the bank API for the status. Auto-resolve if possible, escalate if ambiguous. We'd track reconciliation metrics: match rate should be >99.9%. If it drops, something systemic is wrong.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["daily_batch", "three_outcomes", "exception_queue", "auto_resolution", "match_rate_metric"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle multi-currency? A merchant in the EU charges in euros but wants to be paid in US dollars.",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "multi_currency" }
+    },
+    {
+      "role": "candidate",
+      "content": "We'd need to handle currency conversion. The charge happens in EUR. At settlement, we convert to USD using a market exchange rate plus our FX fee. The timing of when we lock the exchange rate matters — at charge time or at settlement time? Charging time is better for the merchant (they know the USD amount immediately) but we absorb the FX risk. Settlement time passes the risk to the merchant. I think most platforms offer both options.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["currency_conversion", "fx_rate_timing", "fx_risk"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned FX risk but didn't design the system. Where does currency conversion happen in the architecture?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "multi_currency" }
+    },
+    {
+      "role": "candidate",
+      "content": "There would be an FX Service that maintains current exchange rates (sourced from a market data provider). The Ledger Service operates in the original currency — all entries for a EUR charge are in EUR. At settlement time, the Settlement Service calls the FX Service to convert, creates a new ledger entry for the conversion (debit EUR from the holding account, credit USD to the merchant payout). The conversion is itself a ledger transaction — auditable and reversible.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fx_service", "ledger_in_original_currency", "conversion_ledger_entry", "auditability"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Fraud detection — ML models that score each transaction for fraud risk, blocking high-risk ones. Dispute handling — when a customer files a chargeback, we need to manage the dispute lifecycle and hold funds from the merchant. And a merchant dashboard showing transaction history, settlement reports, and analytics.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["fraud_detection", "chargebacks", "merchant_dashboard"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thanks. You showed good understanding of the payment lifecycle and ledger design, but reconciliation and multi-currency needed more depth for staff level.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 58,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 3,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 4,
+      "scalability": 5,
+      "failure_handling": 6,
+      "communication": 6
+    },
+    "strengths": [
+      "Good double-entry bookkeeping schema with clear balance invariant",
+      "Write-ahead intent pattern for crash recovery showed practical thinking",
+      "Clean service decomposition with proper separation of concerns"
+    ],
+    "weaknesses": [
+      "No capacity estimation — 50M transactions/day wasn't broken down into QPS or storage",
+      "Reconciliation was initially shallow — improved under pressure but still lacked depth on auto-resolution rules",
+      "Multi-currency design was reactive — identified the FX risk trade-off but needed prompting to design the system",
+      "No discussion of PCI compliance architecture — network segmentation, HSMs, audit requirements",
+      "Fraud detection mentioned as bullet point without any design depth"
+    ]
+  }
+}

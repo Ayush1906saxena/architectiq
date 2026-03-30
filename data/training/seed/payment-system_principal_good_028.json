@@ -1,0 +1,154 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "principal",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_028"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a payment processing platform — similar to Stripe. As a principal-level discussion, I'd like to explore both technical architecture and the broader platform strategy. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Key questions: Are we building this as a multi-tenant platform serving thousands of merchants, or for a single large merchant? What geographies — single country or global? If global, which payment methods per region? What's our PCI certification level — are we handling raw card numbers, or do we tokenize at the edge and minimize PCI scope? And what's our relationship with card networks — are we a payment facilitator or do each of our merchants need their own merchant accounts?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_tenant", "pci_compliance", "payment_facilitator", "global_payments"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Multi-tenant, global — US, EU, and APAC. We're a payment facilitator. PCI Level 1. Credit cards, ACH, SEPA in Europe, and local payment methods in key APAC markets. 5,000 TPS at peak. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me address PCI scope first because it drives architectural decisions. As a PCI Level 1 service provider, we're subject to annual on-site audits, quarterly ASV scans, and penetration testing. The most important design principle is PCI scope minimization — reduce the number of systems that touch raw cardholder data. I'd use a tokenization architecture: the merchant's frontend uses our JavaScript SDK (like Stripe Elements) to collect card details directly into our tokenization service. The card number never touches the merchant's servers — this keeps the merchant at SAQ A level (simplest PCI compliance). Our tokenization service is the only system that handles raw card numbers. It encrypts the card data with an HSM-managed key and returns a token. All downstream systems — our payment service, fraud engine, reporting — only ever see tokens, never raw card numbers. This means only the tokenization service and HSM are in the CDE (Cardholder Data Environment), keeping our PCI audit scope narrow.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pci_compliance", "tokenization", "scope_minimization", "hsm", "cardholder_data_environment"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent PCI scope analysis. Walk me through the high-level payment flow.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The flow: Merchant creates a PaymentIntent via our API specifying amount, currency, and payment method token. Our API service validates the request, runs fraud scoring, then routes to the appropriate payment processor. Routing is based on: card network (Visa goes through one processor, Amex through another), geography (EU transactions route to EU-based processors for lower interchange), and cost optimization (we may have volume-based pricing with multiple processors for the same network). The processor communicates with the card network and issuing bank. Authorization response comes back. We store the result in our database and return it to the merchant. For settlement, we batch authorized transactions and submit them to the processor daily. The processor handles the actual fund movement with the acquiring bank. We receive settlement confirmation and credit the merchant's balance in our ledger.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payment_flow", "payment_routing", "interchange", "settlement", "processor_selection"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned routing to different processors. How do you manage multiple processor integrations?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "vendor_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Processor management is one of the most operationally complex parts of a payment platform. I'd design a processor abstraction layer with a common interface: authorize(), capture(), refund(), void(), statusInquiry(). Each processor has an adapter that implements this interface, handling the specifics of their API format, authentication, and response mapping. We maintain at least two processors per card network per region for redundancy. If one processor goes down, we fail over to the backup. The routing engine decides which processor to use based on a configuration: cost (interchange + processor fees), reliability (historical success rate), latency, and feature support (some processors handle 3D Secure better). For vendor management: each processor integration requires a separate certification process, ongoing monitoring, and contract management. I'd have a dedicated payments partnerships team on the business side, and the engineering team maintains a processor health dashboard showing success rates, latency, and error breakdowns per processor in real-time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["vendor_management", "processor_abstraction", "failover", "routing_engine", "cost_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about multi-currency. A US merchant wants to accept EUR from European customers. Walk me through the currency handling.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "multi_currency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multi-currency introduces three concepts: presentment currency (what the customer sees), settlement currency (what the merchant receives), and processing currency (what the card network uses). Scenario: European customer pays €85 to a US merchant who settles in USD. Option 1: DCC (Dynamic Currency Conversion) — we convert at our rate and the customer pays in USD equivalent. Higher conversion rate but merchant gets USD directly. Option 2: MCC (Multi-Currency Processing) — we process in EUR, the card network handles conversion, and we settle with the merchant in USD at our FX rate. The merchant's PaymentIntent specifies the presentment currency (EUR) and their settlement currency (USD). We store both amounts and the exchange rate used. For the ledger, I'd record entries in the original currency and the settlement currency separately. The FX conversion is itself a ledger event: debit EUR liability, credit USD liability at the applied rate. We need to be careful with FX timing — the rate at authorization time may differ from the rate at settlement time (typically 1-3 days later). We lock the rate at authorization and absorb the FX risk, or we float the rate and settle at the actual rate. Stripe floats; most traditional processors lock.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_currency", "dynamic_currency_conversion", "fx_rate", "settlement_currency", "fx_risk"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good depth on multi-currency. What about cross-border payment regulations? Different countries have different rules.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "regulations" }
+    },
+    {
+      "role": "candidate",
+      "content": "Cross-border regulations are a maze. Key ones we'd need to handle: In the EU, PSD2 requires Strong Customer Authentication (SCA) for most online payments — that's the 3D Secure 2.0 flow. Our system needs to detect when SCA is required (based on the issuing bank's country and exemptions like low-value transactions under €30) and trigger the authentication flow. In India, RBI mandates that payment data for Indian cards must be stored only in India — data localization. We'd need an India-specific deployment for storing card tokens and transaction data, even if processing routes through global processors. In Brazil, PIX is effectively mandated for certain transaction types, and international transactions face IOF tax that we need to calculate and disclose. My approach is a regulatory rules engine — per-country configuration that determines: required authentication methods, data residency constraints, mandatory disclosures, and local payment method requirements. This configuration is maintained by a compliance team and versioned — regulations change, and we need to audit when changes were applied.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["psd2", "sca", "3d_secure", "data_localization", "regulatory_engine", "compliance"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong regulatory knowledge. Let's discuss the merchant payout flow. How do you move money from our platform to the merchant's bank account?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "payouts" }
+    },
+    {
+      "role": "candidate",
+      "content": "Payouts are the reverse flow. We accumulate the merchant's available balance in our ledger — authorized and settled transactions minus fees, refunds, and chargebacks. The merchant configures their payout schedule — daily, weekly, or manual. On payout day, the payout service calculates the available balance, creates a payout record, and initiates a bank transfer. In the US, we use ACH for most payouts — batch submission to our bank, funds arrive in 1-2 business days. In the EU, we use SEPA Credit Transfer — similar batch process, settlement within 1 business day. For instant payouts (premium feature), we use real-time payment rails like RTP in the US or SEPA Instant in the EU, with higher fees. The ledger entry for a payout: debit the merchant's available balance, credit the platform's outgoing transfers account. Once the bank confirms the transfer, we update the status. For failed payouts (invalid bank account, returned ACH), we reverse the ledger entry and notify the merchant. We hold a reserve — typically 10% of the merchant's balance — to cover potential chargebacks and refunds. The reserve is released after a rolling 90-day window.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payouts", "ach", "sepa", "real_time_payments", "reserves", "ledger"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the scenario where a merchant has a high chargeback rate? At what point does this become an existential risk?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "risk_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Chargeback management is existential for a payment facilitator. Card networks enforce thresholds: Visa's VDMP (Dispute Monitoring Program) triggers at 0.9% chargeback rate or 100 disputes in a month. Mastercard's EFM triggers at 1.5%. If we as a facilitator exceed these thresholds across all our merchants, Visa or Mastercard can fine us $25K-100K per month, increase our processing fees, or in the worst case, revoke our ability to process. Our risk management approach: per-merchant chargeback monitoring with automated actions. At 0.5% chargeback rate, we send the merchant a warning and require them to provide a remediation plan. At 0.8%, we increase their reserve from 10% to 25% and slow their payout schedule from daily to weekly. At 1.0%, we pause new transactions for that merchant. At 1.5%, we terminate the merchant account. For the platform overall, we maintain a blended chargeback rate target of 0.3% — well under the threshold. Our underwriting team reviews merchants before onboarding, assessing their industry, business model, and transaction patterns. High-risk categories (digital goods, subscriptions, adult content) get more scrutiny and higher reserves.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chargeback_management", "risk_management", "card_network_thresholds", "underwriting", "merchant_monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's thorough. Let's talk about the database and infrastructure architecture at 5K TPS.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the payment database, I'd use PostgreSQL with sharding by merchant_id. At 5K TPS with 16 shards, each shard handles about 312 TPS — comfortable for Postgres. The payment_intents and ledger_entries tables are co-located on the same shard for transactional integrity. For the tokenization service — which is in the PCI CDE — it has its own isolated database, separate VPC, no internet access, and HSM integration. Only the tokenization service can read this database. For infrastructure: the CDE components run in an isolated environment — separate AWS account, dedicated VPC, no shared resources with non-CDE systems. Network segmentation is enforced at the VPC level with security groups and NACLs. Logs from CDE systems go to a separate, PCI-compliant logging infrastructure — we can't send cardholder data to our general-purpose Datadog or Splunk instance. This isolation is annoying operationally but non-negotiable for PCI compliance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["postgresql", "sharding_strategy", "pci_compliance", "network_segmentation", "cde_isolation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good separation. What about testing? How do you safely test payment flows without moving real money?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multiple testing layers. First, a sandbox environment that mirrors production but connects to processor sandbox APIs. Merchants test their integration against our sandbox using test API keys — specific card numbers trigger specific responses (4242...42 always succeeds, 4000...02 always declines). The sandbox has the same API contract as production. Second, for internal testing, we run a processor simulator that mimics all processor behaviors including edge cases: timeouts, partial responses, intermittent failures. This lets us test failure handling without depending on external sandboxes. Third, load testing with the simulator to validate throughput targets. Fourth — and this is critical — a staging environment that connects to processor test environments (not sandboxes, but actual test card networks that simulate real authorization flows). This catches integration issues that sandboxes miss. We never test with real card numbers outside the CDE, and test environments are completely isolated from production data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sandbox_testing", "processor_simulator", "load_testing", "staging_environment", "pci_compliance"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's wrap up. What do you see as the hardest part of building this platform?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three things. First, regulatory complexity is the hardest sustained challenge. Every country has different rules, and they change. India's data localization mandate was announced with 6 months' notice and required a complete infrastructure deployment. We need a dedicated regulatory engineering team and strong relationships with legal counsel in each market. Second, the cold start problem for a payment facilitator — we need merchant volume to negotiate good processor rates, but we need good rates to attract merchants. The first 18 months are about growth at the expense of margin. Third, operational trust. Merchants entrust us with their revenue. A 30-minute outage means merchants can't accept payments — that's direct revenue loss for them. The reliability bar is 99.999% for the authorization path. That requires investment in redundancy, monitoring, and incident response that's disproportionate to the size of the engineering team.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["regulatory_complexity", "cold_start", "reliability", "sla", "trust"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong interview. Deep payment domain knowledge across PCI compliance, multi-currency, regulations, and risk management. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 76,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 6,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 5,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 8,
+      "domain_knowledge": 9,
+      "strategic_thinking": 8
+    },
+    "strengths": [
+      "Outstanding PCI scope minimization strategy with tokenization and CDE isolation",
+      "Deep multi-currency knowledge including FX risk timing and settlement currency handling",
+      "Strong regulatory awareness across US, EU, India, and Brazil with practical mitigation strategies",
+      "Thorough chargeback risk management with concrete thresholds and automated escalation"
+    ],
+    "weaknesses": [
+      "Capacity estimation was light — didn't calculate storage, memory, or bandwidth requirements",
+      "Didn't discuss idempotency implementation in detail — a critical correctness concern",
+      "Caching strategy was barely mentioned — could have discussed caching BIN tables, merchant configs, FX rates",
+      "Limited discussion of the fraud detection pipeline compared to the regulatory focus"
+    ]
+  }
+}

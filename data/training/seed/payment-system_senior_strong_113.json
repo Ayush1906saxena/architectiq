@@ -1,0 +1,159 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 20,
+    "generation_id": "seed_113"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a payment system — think Stripe or PayPal. It should handle processing payments between buyers and sellers. What clarifications do you need?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. What types of payments — credit cards, bank transfers, digital wallets? What's the expected volume — transactions per second? Do we need to support refunds and chargebacks? What about multi-currency? And what's the regulatory environment — PCI compliance requirements?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payment_types", "qps", "refunds", "multi_currency", "pci_compliance"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Credit cards and bank transfers. 10,000 transactions per second at peak. Yes to refunds and chargebacks. Multi-currency is nice to have. Full PCI-DSS compliance required. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd like to approach this from an event sourcing angle. In a payment system, the most critical property is auditability — you need to know exactly what happened, when, and why. Every payment state change should be an event: PaymentInitiated, PaymentAuthorized, PaymentCaptured, PaymentFailed, RefundRequested, RefundCompleted. The ledger — the current state of every payment — is derived from the event log. You never update a payment record directly. You append events and compute the current state.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["event_sourcing", "auditability", "payment_states", "immutable_log"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Why event sourcing specifically? What advantage does it give over a traditional CRUD approach?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "event_sourcing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three major advantages for payments. First, auditability — the event log is a complete, immutable history. Regulators and auditors can see every state transition. With CRUD, if you update a payment status from 'pending' to 'captured', the 'pending' state is gone. Second, debugging — when a payment goes wrong (and they will), you can replay the events to understand exactly what happened. Third, reconciliation — at end-of-day, you can replay events to independently compute what your ledger balance should be and compare it to what the bank reports. If they disagree, the event log tells you where. CRUD makes reconciliation a nightmare because you've lost intermediate states.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["event_sourcing", "auditability", "reconciliation", "debugging"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid reasoning. Walk me through the architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The core is an Event Store — an append-only log per payment, stored in a database with strict ordering guarantees. I'd use PostgreSQL with a table: event_id, payment_id, event_type, event_data (JSON), timestamp. Payment_id is the partition key. On top of the event store, we have three services. The Payment Orchestrator handles the payment flow — it receives a payment request, publishes events, and coordinates with external payment processors (card networks, banks). The Ledger Service consumes events and maintains materialized views of account balances. The Notification Service consumes events and sends webhooks/emails to merchants.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["event_store", "payment_orchestrator", "ledger_service", "materialized_views", "database_choice"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through a payment flow from initiation to completion.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "payment_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step by step. Merchant calls POST /payments with amount, currency, card token. The orchestrator creates a payment aggregate, appends a PaymentInitiated event. Then it calls the card network gateway to authorize — appends PaymentAuthorizationRequested. The gateway responds — we append either PaymentAuthorized or PaymentAuthorizationFailed. If authorized, the merchant later calls POST /payments/{id}/capture. We append PaymentCaptureRequested, send the capture to the card network, and append PaymentCaptured or PaymentCaptureFailed. Each event is the source of truth. The 'current status' of a payment is just the latest event type in its stream.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payment_flow", "event_sourcing", "authorization", "capture"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about idempotency? A merchant might retry a payment request due to a timeout.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "idempotency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Critical for payments — you absolutely cannot charge a customer twice. Every payment request includes a merchant-provided idempotency_key. Before processing, we check an idempotency store (Redis with persistence) for this key. If it exists, we return the previously stored result without re-processing. If not, we proceed and store the result keyed by the idempotency_key after the first event is persisted. The idempotency key has a TTL — say 24 hours — since retries after that are likely new intent. This works at every layer: the merchant-to-us call, and our-to-payment-processor call each have their own idempotency keys.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency", "idempotency_key", "exactly_once", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the ledger work? How do you prevent double-spending or balance inconsistencies?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "ledger" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ledger uses double-entry bookkeeping. Every payment event creates two ledger entries: a debit from one account and a credit to another. For a payment capture: debit the buyer's payment method, credit the merchant's balance, and credit our fee account. The ledger entries are derived from events — a Ledger Consumer reads PaymentCaptured events and creates the entries. Balances are computed by summing all ledger entries for an account. To prevent double-spending: the buyer's available balance is checked at authorization time using a pessimistic lock on the buyer's account row. The lock is held only for the authorization check — microseconds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["double_entry_bookkeeping", "ledger", "pessimistic_locking", "balance_check"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "With event sourcing, the event store grows indefinitely. How do you manage that?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "event_store_growth" }
+    },
+    {
+      "role": "candidate",
+      "content": "A few strategies. First, snapshotting: periodically, we compute and store a snapshot of each payment aggregate's current state. To reconstruct state, we load the latest snapshot and replay only events after it, rather than replaying the entire history. For payments, most have fewer than 10 events, so this is mainly for accounts with thousands of transactions. Second, archival: events older than, say, 2 years are moved to cold storage (S3 in Parquet format) and removed from the primary PostgreSQL store. They're still queryable via an archive service. Third, the ledger materialized view stores current balances, so most reads never touch the event store at all.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["snapshotting", "cold_storage", "archival", "materialized_views"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle communication with external payment processors that can be unreliable?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "external_service_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "External processors are the least reliable part of the system. My approach: all external calls go through a Payment Gateway Adapter with retry logic, circuit breakers, and timeout handling. If the processor is down, we append a PaymentProcessorUnavailable event and move the payment to a 'pending_retry' state. A background reconciliation job retries pending payments with exponential backoff. Critically, before retrying, we check with the processor whether the original request went through — many processors support idempotent lookups by transaction ID. This prevents double charges. If the processor is down for extended periods, we alert operations and can failover to a backup processor.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["circuit_breaker", "retry_logic", "external_service_failure", "reconciliation", "failover"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "At 10,000 TPS, how do you scale the event store?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "10K TPS of event appends is significant for PostgreSQL. I'd shard the event store by payment_id — consistent hashing across multiple Postgres instances. Each shard handles maybe 1-2K TPS, well within Postgres's capability for sequential appends. The events table with payment_id as the partition key ensures all events for a payment are on the same shard — important for atomic event appends within a payment. For the ledger service, account balances are sharded by account_id. The Kafka consumer that feeds the ledger reads from all event shards and routes to the correct balance shard. I'd use 8-16 Postgres shards initially.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_strategy", "consistent_hashing", "capacity_estimation", "kafka"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle PCI compliance? Where does sensitive card data live?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "pci_compliance" }
+    },
+    {
+      "role": "candidate",
+      "content": "PCI-DSS mandates that card data is isolated. I'd have a separate Card Vault service — a minimal, hardened service in its own PCI-scoped network segment. When a merchant submits card details, they go directly to the vault, which returns an opaque token. All other services — the orchestrator, ledger, event store — only ever see the token, never the actual card number. The vault encrypts card data at rest using AES-256 with keys managed by an HSM. Access to the vault is strictly controlled — only the payment gateway adapter calls the vault to detokenize when making processor calls. This minimizes PCI scope to just the vault and gateway.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pci_compliance", "tokenization", "card_vault", "encryption", "hsm"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running low on time. Anything else you'd want to cover?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Two important additions. First, end-of-day reconciliation: a batch job replays the day's events, computes expected balances, and compares them against the processor's settlement reports. Discrepancies trigger alerts. This is the safety net for the entire system. Second, monitoring: we'd track payment success rates by processor, latency percentiles, and the event processing lag between the event store and the ledger consumer. A spike in lag means merchants see delayed balance updates. The event sourcing architecture actually makes monitoring easier — you can measure the gap between 'events produced' and 'events consumed' at every stage.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["reconciliation", "monitoring", "event_processing_lag", "settlement"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great design. The event sourcing approach was well-motivated and the PCI discussion showed real-world awareness. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 9,
+      "caching_strategy": 6,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Event sourcing approach was well-justified with concrete benefits for auditability and reconciliation",
+      "Strong idempotency design with multi-layer idempotency keys",
+      "PCI compliance discussion showed practical production awareness"
+    ],
+    "weaknesses": [
+      "Capacity estimation was light — didn't estimate storage growth or cache sizing in detail",
+      "Caching strategy was barely discussed — no mention of caching payment status for merchant dashboards"
+    ]
+  }
+}

@@ -1,0 +1,119 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "staff",
+    "candidate_profile": "deep-compaction",
+    "total_exchanges": 18,
+    "generation_id": "seed_397"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We've been designing an LSM-tree based key-value store. You mentioned compaction is critical. Let's go deep — starting from first principles, why do we need compaction at all?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "compaction_fundamentals" }
+    },
+    {
+      "role": "candidate",
+      "content": "In an LSM-tree, writes go to an in-memory memtable, which is periodically flushed to disk as an immutable sorted string table (SSTable). Over time, we accumulate many SSTables. Without compaction, two things go wrong. First, read amplification: a point lookup for a key that doesn't exist must check every SSTable at every level to confirm absence — with hundreds of SSTables, that's hundreds of disk reads even with bloom filters (which have false positives). Second, space amplification: when a key is updated, the old value still exists in an older SSTable. A key updated 50 times has 50 copies on disk, and only the newest is valid. Deletes are even worse — a delete writes a tombstone marker, but the original data persists in older SSTables until compaction removes it. Compaction solves both problems by merging SSTables: it reads multiple SSTables, performs a merge-sort, keeps only the latest version of each key, discards tombstones for fully-deleted keys, and writes out new consolidated SSTables. The result: fewer SSTables (better read performance), less wasted space (only live data), and properly cleaned up deletes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["compaction_fundamentals", "read_amplification", "space_amplification", "sstable_accumulation", "tombstone_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good foundation. Now the big design choice: size-tiered compaction versus leveled compaction. Walk me through both and when you'd choose each.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "size_tiered_vs_leveled" }
+    },
+    {
+      "role": "candidate",
+      "content": "Size-tiered compaction (STCS), used by default in early Cassandra: SSTables are grouped into tiers by size. When a tier accumulates enough similarly-sized SSTables (typically 4), they're merged into a single larger SSTable, which enters the next tier. Think of it like a geometric series — you have 4 small files, merge into 1 medium, then 4 mediums merge into 1 large. Pros: write amplification is low because each piece of data is compacted relatively few times — roughly O(log N) over its lifetime. Cons: space amplification is terrible — you can temporarily need 2x the live data size during compaction (reading + writing), and multiple versions of the same key persist until their size tiers align. Read amplification is also poor because multiple SSTables at the same size tier may contain overlapping key ranges. Leveled compaction (LCS), the RocksDB default: SSTables are organized into levels (L0, L1, L2, ...). Each level is 10x larger than the previous. Within each level (except L0), SSTables have non-overlapping key ranges. When L(N) exceeds its size threshold, one SSTable from L(N) is picked and merged with all overlapping SSTables in L(N+1). Pros: read amplification is excellent — at most one SSTable per level contains a given key, so a lookup checks at most ~7 SSTables (for 7 levels). Space amplification is bounded at about 10% above live data. Cons: write amplification is significantly higher — each write is amplified by roughly 10x per level, so total write amplification can be 30-50x. I'd choose STCS for write-heavy workloads (time-series data, logging) and LCS for read-heavy or mixed workloads where space efficiency matters (user-facing KV stores, metadata stores).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["size_tiered_vs_leveled", "stcs_mechanics", "lcs_mechanics", "write_amplification", "space_amplification", "workload_selection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned 30-50x write amplification for leveled compaction. Let's do the math. Can you derive the write amplification for leveled compaction?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "write_amplification_math" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. In leveled compaction with a size ratio T (typically T=10), each level is T times larger than the previous. When we compact from level L(N) to L(N+1), we pick one SSTable from L(N) and merge it with the overlapping SSTables in L(N+1). In the worst case, the key range of our L(N) SSTable overlaps with T SSTables in L(N+1) (since L(N+1) is T times larger, there are roughly T SSTables covering the same key range). So we read 1 + T SSTables and write T + 1 SSTables back. The write amplification for this one compaction step is approximately T (since we write ~T SSTables for every 1 SSTable that triggered the compaction). With N levels, each byte written by the user is compacted through each level once, so total write amplification = T * N. For T=10 and a dataset that spans 5 levels (L0 through L4, supporting up to 10^4 = 10,000x the L0 size, so roughly 10TB if L0 is 1GB), write amplification is 10 * 5 = 50x. In practice, it's somewhat lower because not every SSTable has worst-case overlap — the average overlap is closer to T/2, bringing it to about 25-30x. This is why RocksDB introduced dynamic leveling and universal compaction as alternatives. You can also reduce T (say T=4 instead of 10) to trade lower write amplification for more levels and slightly higher read amplification.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["write_amplification_math", "size_ratio", "per_level_amplification", "total_amplification_derivation", "parameter_tuning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now derive the read amplification for both strategies.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "read_amplification" }
+    },
+    {
+      "role": "candidate",
+      "content": "For leveled compaction: within each level (L1 and below), key ranges don't overlap, so at most one SSTable per level could contain a given key. L0 is the exception — it has up to K SSTables with overlapping ranges (typically K=4 before compaction to L1 triggers). So worst-case read amplification for a point lookup is K + (N-1) SSTables, where N is the number of levels. With K=4 and 5 levels, that's 4 + 4 = 8 SSTable lookups. But each lookup is just a binary search within the SSTable's index block — fast. And bloom filters eliminate most lookups: with a 1% false-positive rate per SSTable, the expected number of actual disk reads for a key that exists is ~1 (find it in the correct SSTable) plus ~0.08 false positives across the other 7 (0.01 * 8). So effective read amplification is close to 1. For size-tiered compaction: at any given size tier, there can be up to T SSTables with overlapping key ranges (where T is the number per tier before compaction). With 4 SSTables per tier and 5 tiers, worst case is 4 * 5 = 20 SSTables. Bloom filters help, but 20 SSTables with 1% FP rate means ~0.2 false positive reads per query — still manageable for point lookups but noticeably worse. For range scans, it's far worse: STCS requires merging data from all overlapping SSTables in sorted order, while LCS touches at most one SSTable per level.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_amplification", "bloom_filter_effectiveness", "point_lookup_analysis", "range_scan_comparison", "l0_overlap_exception"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about space amplification? How do you quantify it for each strategy?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "space_amplification" }
+    },
+    {
+      "role": "candidate",
+      "content": "Space amplification is defined as (total disk usage) / (actual live data size). For leveled compaction: in steady state, each key exists in at most 2 SSTables — one in the level where it was last compacted into, and possibly one in L0 or a higher level waiting to be compacted down. With the default size ratio of 10, the top level (the largest) contains roughly 90% of the data. So space amplification is approximately 1 + 1/T = 1.1, meaning 10% overhead. During compaction, we temporarily need space for the input and output SSTables simultaneously, adding roughly 1/T more, so worst-case temporary space amplification is about 1.2. For size-tiered compaction: the situation is much worse. In the worst case, all SSTables at a tier are about to be compacted, meaning the same key might exist in up to T SSTables at each tier before merging. Steady-state space amplification can be 2-3x in practice. During compaction, it's catastrophic — when merging T SSTables, you read them all and write one output, so you temporarily need (T + 1) / T times the input — roughly doubling disk usage for the largest tier. With large datasets, you need to provision 2x the disk space you actually need for data, which is expensive. This is why ScyllaDB and modern Cassandra moved to incremental compaction strategy (ICS), which is a hybrid approach.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["space_amplification", "leveled_space_overhead", "tiered_space_overhead", "temporary_compaction_space", "incremental_compaction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you schedule compaction? When does it run, and how do you prevent it from interfering with foreground reads and writes?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "compaction_scheduling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Compaction scheduling is a balancing act between keeping LSM-tree healthy and not starving foreground I/O. The trigger for compaction is typically size-based: when L(N) exceeds its threshold, a compaction job is enqueued. RocksDB uses a priority system: L0 compaction to L1 is highest priority because L0 overlap directly impacts read performance. Lower-level compactions can be deferred. For concurrency, RocksDB allows configurable max_background_compactions (default 1-4). Each compaction job runs in a separate thread. More concurrent compactions clear the backlog faster but consume more disk I/O. To prevent interference with foreground operations, I'd use rate limiting. RocksDB provides a rate_limiter that caps compaction I/O bandwidth — say 100MB/s out of 500MB/s total disk bandwidth, reserving the rest for reads and flushes. During periods of low foreground traffic (off-peak hours), the rate limit can be relaxed to allow compaction to catch up. I'd also use I/O priority: on Linux, set compaction threads to the IDLE I/O class using ioprio_set(), so the kernel scheduler gives them I/O time only when no foreground I/O is pending. For SSDs, this matters less than for HDDs since SSDs handle concurrent I/O better, but it still helps avoid saturating the device queue depth. The worst scenario is a 'write stall' — when L0 reaches its max file count (default 20 in RocksDB) and compaction can't keep up, RocksDB stalls all incoming writes until compaction clears L0. This manifests as latency spikes. Monitoring L0 file count and pending compaction bytes is critical to prevent stalls.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["compaction_scheduling", "priority_based_scheduling", "rate_limiting", "io_priority", "write_stall", "monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned compaction throttling. How do you decide the right throttle rate, and what happens when you get it wrong?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "compaction_throttling" }
+    },
+    {
+      "role": "candidate",
+      "content": "The throttle rate is determined by two factors: the sustained write rate and the write amplification. If the application writes at 50MB/s and write amplification is 30x, compaction must sustain 1.5GB/s of I/O throughput just to keep up with steady state. If our disk can do 2GB/s, we have 500MB/s headroom for reads. Throttle too low (say 500MB/s compaction rate): compaction falls behind, L0 accumulates, read performance degrades, and eventually we hit a write stall. This is the 'compaction debt' scenario — it compounds like technical debt. The more you defer, the larger the compaction jobs become, and the more disruptive they are when they finally run. Throttle too high (say 1.8GB/s): compaction hogs I/O bandwidth, read latencies spike as foreground reads compete for disk, and the system becomes read-unfriendly. The sweet spot is adaptive throttling. RocksDB auto-tunes this: as pending compaction bytes increase, the write rate limiter kicks in to slow down incoming writes, giving compaction more headroom. This creates backpressure — rather than letting the system accumulate unbounded compaction debt, it slows the application. I'd add application-level monitoring: if 95th-percentile write latency exceeds 10ms (indicating write throttling from RocksDB), alert the ops team to provision faster storage or reduce write throughput. The key insight is that compaction throughput must be provisioned as part of capacity planning — it's not free overhead.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["compaction_throttling", "compaction_debt", "adaptive_throttling", "backpressure", "capacity_planning", "io_budget"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Final topic: tombstone handling. Deletes in an LSM-tree are tricky. Walk me through the full lifecycle of a delete operation.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "tombstone_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a client deletes key K, we don't remove data — we can't, because the data is in immutable SSTables on disk. Instead, we write a tombstone marker to the memtable: a special entry saying 'key K is deleted at timestamp T.' This tombstone flows through the system like any other write — it's flushed to an SSTable in L0 and compacted through levels. When a read encounters the tombstone during merge, it shadows all older versions of key K — the read returns 'not found.' The tombstone can only be truly removed during compaction when we can guarantee there are no older versions of K in any deeper level. In leveled compaction, a tombstone at L(N) can be dropped only when it reaches the bottom level (the largest level), because that's the only point where we're certain no older data exists below. For size-tiered, it's even harder — a tombstone can only be dropped during a full compaction that includes the oldest tier. The problem: if your workload involves heavy deletes — say a TTL-based eviction of old records — tombstones accumulate and consume space. Reads that scan ranges become slow because they have to process tombstones that don't contribute to results. This is the 'tombstone bloat' problem, and it was a major issue in early Cassandra. Mitigations: configure compaction to prioritize SSTables with high tombstone density (RocksDB has a `bottommost_compaction` option). Set a minimum tombstone age (e.g., 24 hours) before allowing tombstone drops — this prevents correctness issues if data is still being replicated to other nodes. Use range deletes (DeleteRange in RocksDB) instead of per-key deletes when dropping large contiguous key ranges — this is O(1) instead of O(N) tombstones. And most importantly, design your key schema so deletes correspond to compaction boundaries — for example, prefix keys with a time bucket so TTL-expired data naturally falls into SSTables that can be dropped entirely without compaction.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tombstone_handling", "tombstone_lifecycle", "tombstone_bloat", "bottom_level_drop", "range_deletes", "key_schema_design", "tombstone_density_compaction"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Impressive depth on compaction. You covered the theory and the operational reality. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 81,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 8,
+      "api_design": 5,
+      "database_design": 10,
+      "caching_strategy": 6,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 9
+    },
+    "strengths": [
+      "Rigorous mathematical derivation of write, read, and space amplification for both compaction strategies",
+      "Deep understanding of compaction scheduling, throttling, and the write-stall failure mode",
+      "Practical tombstone handling advice including key schema design for TTL alignment"
+    ],
+    "weaknesses": [
+      "Focused entirely on compaction — did not discuss replication, consistency, or client-facing API",
+      "Requirements gathering and high-level design were not covered"
+    ]
+  }
+}

@@ -1,0 +1,171 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "changes-mind",
+    "total_exchanges": 22,
+    "generation_id": "seed_050"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design the Twitter news feed — the home timeline that shows tweets from people you follow. What do you want to clarify first?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. How many users total, and how many daily active? What's the average number of people a user follows? Do we need to support just text tweets or also media? And is the feed strictly chronological or is there a ranking algorithm?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "feed_ranking"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500 million total users, 200 million DAU. Average user follows 200 people. Text and media both, but focus on the delivery mechanism, not media storage. Chronological feed for now, but keep ranking in mind. What's your approach?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me think about scale first. 200 million DAU, let's say each user checks their feed 5 times a day — that's 1 billion feed reads per day, roughly 12,000 feed reads per second. For writes, if 20% of DAU tweet at least once, that's 40 million tweets per day, about 460 tweets per second.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good estimates. Now the core question — how do you build the feed? When a user opens their home timeline, what happens?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "So the fundamental choice is fan-out on write versus fan-out on read. I'm going to go with fan-out on write. When a user tweets, we push that tweet into every follower's feed cache — basically a pre-computed timeline stored in Redis. Each user's timeline is a sorted set of tweet IDs ordered by timestamp. When they open the app, we just read their pre-computed feed. It's fast on read because the work was already done at write time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the write path then. A user with 1,000 followers tweets. What happens?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "The tweet gets stored in the tweets table first — that's the source of truth. Then we look up the user's follower list, which gives us 1,000 follower IDs. For each follower, we do an ZADD to their timeline sorted set in Redis with the tweet ID and timestamp as the score. So 1,000 Redis writes for one tweet. At 460 tweets per second average, that's 460,000 Redis operations per second for the fan-out. Wait — actually, I need to think about the outlier case. What happens when someone with... say, 50 million followers tweets? That's 50 million Redis writes for a single tweet. That would take — even at 100K ops per second per Redis node — 500 seconds. That's over 8 minutes to fan out one tweet. And celebrities tweet multiple times per—",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "redis_caching", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You're catching an important issue in real-time. Keep going.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, so fan-out on write completely breaks down for high-follower-count accounts. Let me rethink this. I'm going to pivot to a hybrid approach. For normal users — let's say anyone with fewer than 10,000 followers — we keep fan-out on write. The math works: 460 tweets/sec * average 200 followers = 92,000 Redis ops per second. Totally fine. But for users above that threshold — celebrities, brands, news outlets — we skip the fan-out. When a user reads their feed, we merge their pre-computed timeline with the latest tweets from any 'celebrity' accounts they follow. That merge happens at read time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "hybrid_approach", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting pivot. How does the read path work with this hybrid model?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a user opens their feed: step one, fetch their pre-computed timeline from Redis — that covers tweets from 'normal' accounts they follow. Step two, look up which 'celebrity' accounts they follow from a separate index. Step three, fetch the latest N tweets from each of those celebrity accounts — these are stored in a per-user timeline cache for the celebrity (just their recent tweets, not fan-out). Step four, merge the two lists by timestamp and return the top 50 or whatever the page size is. The merge is in-memory and fast — it's just merging sorted lists.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "redis_caching", "hybrid_approach"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How many celebrity accounts might a user follow? What's the latency impact?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good question. On average a user might follow maybe 20-30 celebrity accounts. Each celebrity's recent tweets are a small Redis sorted set — maybe their last 200 tweets. So that's 20-30 ZRANGE queries at read time. If we pipeline them into a single Redis round trip, that's still under 2-3 milliseconds. Compared to the zero-latency of pure fan-out-on-write, there's a penalty, but 3ms for the celebrity merge is negligible to the user.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "fan_out"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about the data model. What's in the database?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "Core tables: Users (user_id, name, follower_count, is_celebrity flag), Tweets (tweet_id, user_id, content, media_urls, created_at), and Follows (follower_id, followee_id, created_at). Tweets are the heaviest table — 40 million rows per day. I'd use a sharded MySQL or PostgreSQL setup, partitioned by user_id for tweets so we can efficiently fetch all tweets by a user. The Follows table is also large — 500M users * 200 average follows = 100 billion edges — so that needs sharding too, probably dual-sharded by both follower and followee for different query patterns.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "database_schema", "sharding_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The Follows graph is interesting. 100 billion edges. Why not a graph database?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "Our query patterns are actually simple — 'who does user X follow' and 'who follows user X.' These are straightforward lookups by one key, which relational databases handle fine with an index. A graph database would make sense if we needed multi-hop queries like 'friends of friends' or community detection. But for the feed, we never traverse the graph beyond one hop. The operational overhead of running a graph database at this scale isn't worth it for simple adjacency lookups.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair point. What happens when a user follows a new celebrity account? How does their feed update?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "With the hybrid approach, it's actually easy. We add the follow relationship to the database. The next time the user's feed is generated, the celebrity index now includes the new account, and their recent tweets get merged in automatically. There's no backfill needed because we always fetch celebrity tweets at read time. For normal users, when you follow someone, we'd want to inject their recent tweets into your precomputed timeline — a small backfill of maybe their last 20 tweets. That's a quick operation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "hybrid_approach"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss Redis memory. How much do you need for the timeline caches?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "redis_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "For each active user's timeline, we store maybe 800 tweet IDs — the last few days of content. Each entry in a Redis sorted set is roughly 16 bytes (8-byte tweet ID as member, 8-byte score for timestamp). So 800 * 16 = 12.8KB per user. With 200 million DAU, that's about 2.5TB of timeline data. For celebrity tweet caches — say 100,000 celebrity accounts, 200 tweets each, same 16 bytes — that's about 300MB, negligible. So total Redis memory is around 2.5TB. With a 16-node Redis cluster of 256GB each, we have room with replication.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if Redis loses a node? How do you handle timeline cache misses?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each Redis node should have a replica for failover. If a node dies, the replica promotes automatically. During the brief failover window, we fall back to fan-out on read — query the database for the user's follow list, then fetch the latest tweets from each followed account. It's slow — maybe 200-500ms instead of 20ms — but it works. We can cache the regenerated timeline in the new primary. For cold-start users whose timeline was never cached or evicted, same approach: build on read, cache the result.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_failure", "single_point_of_failure", "fan_out"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned ranking is a future consideration. How would you add that?",
+      "annotation": { "action": "redirect", "phase": "wrap_up", "target_concept": "feed_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "The timeline merge step is the natural insertion point for ranking. Instead of merging by timestamp alone, we'd score each tweet based on signals — engagement velocity (likes/retweets in the first N minutes), author relationship strength (how often the user interacts with this author), content type affinity, and recency. A lightweight ML model scores the merged candidates and reorders. The key is keeping this fast — the model needs to score maybe 500 candidates in under 50ms. We'd use a simple model like logistic regression or a small neural net, precompute some features, and cache author-pair affinity scores.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_ranking"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nicely done. I really liked how you caught the celebrity fan-out problem in real-time and pivoted. That kind of self-correction is what we look for. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 72,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 9,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Caught the celebrity fan-out problem organically mid-explanation and pivoted to hybrid approach",
+      "Strong capacity estimation throughout — always backed claims with numbers",
+      "Redis memory sizing was thorough and realistic",
+      "Good argument against graph databases based on actual query patterns"
+    ],
+    "weaknesses": [
+      "Didn't discuss API design explicitly — no mention of pagination, cursors, or endpoints",
+      "Initial approach didn't consider the celebrity edge case upfront — needed to discover it mid-explanation",
+      "Could have discussed tweet deletion propagation and its impact on cached timelines"
+    ]
+  }
+}

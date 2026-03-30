@@ -1,0 +1,140 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "senior",
+    "candidate_profile": "split-brain",
+    "total_exchanges": 20,
+    "generation_id": "seed_367"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed key-value store. Today I want to focus on a specific nightmare scenario: split-brain with divergent data. But let's start with the basics — what's your replication strategy?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "replication_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd design a leaderless key-value store similar to Dynamo. Data is partitioned using consistent hashing across a ring of nodes. Each key is replicated to N nodes — I'll use N=3. Reads and writes use quorum: W=2 for writes (must succeed on 2 of 3 replicas) and R=2 for reads. This gives us W+R > N, so reads always see the most recent write under normal conditions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing", "quorum", "replication_factor", "dynamo"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now the scenario: a network partition splits your three replicas for a key — Node A and Node B can talk to each other, but Node C is isolated. Both sides continue accepting writes. After the partition heals, Node A and Node B have version X of a key, Node C has version Y. Tell me what happened.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "split_brain" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, let me trace through this. Before the partition, all three nodes agree. Then the partition hits. A write comes to Node A's side — it writes locally and replicates to Node B. That's W=2 satisfied, so the write succeeds. Meanwhile, a different write for the same key arrives at Node C. Node C tries to replicate to A and B but can't reach them. With W=2 and only 1 node available, this write should fail — unless we've configured sloppy quorum. If sloppy quorum is enabled, Node C might write to itself and a different node (a hinted handoff node) to satisfy W=2. Now we have divergent data: Nodes A and B have one version, Node C (and a hinted handoff node) have another.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sloppy_quorum", "hinted_handoff", "write_conflict", "partition_behavior"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly. Sloppy quorum let both writes succeed. Now the partition heals. You have two conflicting versions of the same key. How does the system detect and resolve this?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "conflict_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Detection happens through vector clocks or version vectors. Each write increments the writing node's component of the vector clock. Node A's write produces vector clock {A:2, B:1, C:1}. Node C's write produces {A:1, B:1, C:2}. Neither dominates the other — A:2 > A:1 but C:1 < C:2 — so they're concurrent. When a read quorum pulls both versions, it sees two sibling values with incomparable vector clocks. At this point, the system knows there's a conflict that can't be automatically resolved by picking the 'latest' — because there is no 'latest' in a causal ordering sense.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["vector_clock", "causal_ordering", "sibling_detection", "concurrent_writes"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. So you've detected the conflict. Now what? You have two values for the same key. How do you resolve it?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "conflict_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several strategies depending on the data semantics. First, last-write-wins (LWW) using wall clock timestamps — simple but lossy. We pick the version with the higher timestamp and discard the other. Easy to implement but you silently lose data. Second, return both versions to the client and let the application resolve it — this is what Dynamo and Riak do. The application knows the semantics. For a shopping cart, you'd merge the two carts (union of items). For a user profile, you might show both versions and ask the user. Third, use CRDTs — conflict-free replicated data types that are designed to auto-merge. A G-Counter, for example, always converges correctly regardless of merge order.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["last_write_wins", "application_level_resolution", "crdt", "semantic_merge"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's dig into the LWW approach since it's the most common. Wall clocks can disagree across nodes. Node C's clock might be 200ms ahead. How does that affect conflict resolution?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "clock_skew" }
+    },
+    {
+      "role": "candidate",
+      "content": "Clock skew is a real problem. If Node C's clock is 200ms ahead, its writes will always 'win' in LWW even if Node A's write was causally later. In our split-brain scenario, the write that happened second in real time might lose if it was on the node with the behind clock. NTP can keep clocks synchronized to within a few milliseconds under normal conditions, but during a network partition, NTP itself might not be reachable for the isolated node, causing drift to increase. Google's Spanner addresses this with TrueTime — hardware-synchronized clocks with bounded uncertainty. For our system, we could use Hybrid Logical Clocks (HLC) which combine physical timestamps with logical counters. HLCs are always monotonically increasing per-node and respect causality, though they don't fully solve the concurrent write problem.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["clock_skew", "ntp", "truetime", "hybrid_logical_clock"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's say we go with client-side resolution. The client reads and gets two siblings. What's the read path look like concretely?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "read_repair" }
+    },
+    {
+      "role": "candidate",
+      "content": "The client sends a read request. The coordinator node sends parallel reads to all 3 replicas. It receives version X from Nodes A and B, and version Y from Node C. It returns both siblings to the client along with a context object containing both vector clocks. The client's application logic merges them — let's say it picks the union for a shopping cart. The client writes the merged result back with a new vector clock that descends from both: {A:2, B:1, C:2} — this dominates both conflicting versions. The coordinator writes this to all replicas. Now all three nodes converge to the resolved value. This is called read repair — the conflict is resolved at read time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_repair", "sibling_resolution", "vector_clock_merge", "coordinator_node"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if nobody reads that key for weeks? The conflict just sits there unresolved?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "anti_entropy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes, without a read, read repair can't trigger. That's why we need an anti-entropy background process. It works like this: periodically — say every hour — each node picks a random partner and they compare their data using Merkle trees. The Merkle tree is a hash tree over the key space. They start at the root and drill down through branches where hashes disagree, efficiently identifying the specific keys that differ. For each conflicting key, they initiate the same sibling resolution process. This ensures conflicts are eventually resolved even for cold data. The trade-off is the computational cost of building and comparing Merkle trees, but it's amortized over time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["anti_entropy", "merkle_tree", "background_repair", "hash_comparison"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now here's a deeper problem. During the partition, both sides accepted writes for many keys. Some keys were written on both sides. When healing happens, you could have thousands of conflicting keys. How do you handle the volume?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "bulk_conflict_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "For a bulk healing event, I'd run the anti-entropy process immediately rather than waiting for the periodic schedule. But thousands of conflicts hitting client-side resolution simultaneously could overwhelm clients. A few strategies: first, batch the resolution — don't surface all conflicts at once. Process them in the background as keys are accessed. Second, for keys with simple semantics where LWW is acceptable, auto-resolve them in the background without client involvement. Reserve client-side resolution only for keys with complex merge semantics. Third, emit metrics on the number of unresolved siblings and set up alerts. If sibling count grows beyond a threshold, we know healing isn't keeping up.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["bulk_conflict_resolution", "auto_resolution", "metrics", "healing_strategy"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if instead of eventual consistency, you wanted to prevent split-brain entirely? How would you redesign?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "strong_consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "To prevent split-brain, you need a consensus protocol. Switch from leaderless to a leader-based design using Raft or Multi-Paxos. Each partition has a single leader that coordinates all writes. During a network partition, only the side with the majority of replicas can elect a leader and accept writes. With 3 replicas, the side with 2 nodes (A and B) can still operate — the side with 1 node (C) becomes read-only or unavailable. This is the CAP theorem in action: we're choosing consistency over availability. No split-brain, no conflicting writes, but Node C's clients experience downtime during the partition.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["raft", "consensus", "cap_theorem", "leader_election", "strong_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Which approach would you recommend for a production key-value store?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "design_decision" }
+    },
+    {
+      "role": "candidate",
+      "content": "It depends on the use case. For a session store or cache where availability matters more than consistency and data loss is tolerable — go with the Dynamo-style leaderless approach with LWW conflict resolution. For a configuration store or coordination service where correctness is critical — use Raft-based strong consistency, accept the availability trade-off. For a general-purpose KV store, I'd offer both modes: default to strong consistency with Raft for safety, but allow users to opt into eventual consistency with higher availability for specific key spaces. etcd and FoundationDB take the strong consistency approach; Cassandra and Riak take the eventual consistency approach. The market has shown demand for both.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["design_decision", "use_case_analysis", "consistency_spectrum"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You showed solid depth on conflict detection and resolution strategies. I would have liked to see more concrete numbers on performance impact of the different approaches and more discussion of sibling explosion — what happens when conflicts compound. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 73,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 5,
+      "api_design": 7,
+      "database_design": 9,
+      "caching_strategy": 6,
+      "scalability": 7,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent understanding of vector clocks and causal ordering for conflict detection",
+      "Strong explanation of anti-entropy with Merkle trees for background repair",
+      "Good comparative analysis of consistency models with real system examples"
+    ],
+    "weaknesses": [
+      "No capacity estimation — didn't discuss storage overhead of vector clocks or sibling storage",
+      "Didn't address sibling explosion: what happens when conflicts compound over time",
+      "Bulk conflict resolution strategy was surface-level compared to detection depth"
+    ]
+  }
+}

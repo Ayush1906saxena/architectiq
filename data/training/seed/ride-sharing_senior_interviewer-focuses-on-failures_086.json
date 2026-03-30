@@ -1,0 +1,151 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "senior",
+    "candidate_profile": "interviewer-focuses-on-failures",
+    "total_exchanges": 22,
+    "generation_id": "seed_086"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing system like Uber or Lyft. Start with whatever you think is important.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Key requirements: riders request rides, we match them with nearby drivers, track rides in real time, handle payments, and provide ETAs. Scale-wise — let me assume 20 million daily rides, 5 million concurrent drivers, peak of 500,000 ride requests per hour. Latency target: match a rider with a driver in under 10 seconds. Should I start with the high-level architecture?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ride_matching", "real_time_tracking", "capacity_estimation", "latency"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Give me a quick high-level overview, then I want to spend most of our time on what goes wrong.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "High level: a Location Service ingests driver GPS updates every 3-5 seconds and stores them in a spatial index (QuadTree or geohash in Redis). A Matching Service receives ride requests, queries the Location Service for nearby available drivers, scores them by ETA and rating, and sends a ride offer. A Trip Service manages the ride lifecycle: requested, driver_assigned, en_route_to_pickup, rider_picked_up, en_route_to_destination, completed. A Payment Service handles fare calculation and charging. A Notification Service pushes real-time updates to both rider and driver apps via WebSocket.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["location_service", "spatial_index", "matching_service", "trip_state_machine", "payment_processing", "websocket"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good overview. Now — GPS is inaccurate by 50 meters. The driver appears to be on the wrong street. What does the rider see, and what do you do about it?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "gps_inaccuracy" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a common real-world problem, especially in urban canyons — tall buildings reflecting GPS signals. The rider sees the driver icon jittering or on a parallel street. It erodes trust and causes confusion at pickup. Mitigations: first, map matching — snap the raw GPS coordinate to the nearest road segment using a road network graph. This is computationally feasible because we know the driver's recent trajectory, so we can use a Hidden Markov Model to determine the most likely road they're on. Second, smooth the trajectory on the client side — interpolate between updates and animate the car icon along the road rather than jumping between raw coordinates. Third, for pickup specifically — use the rider's pin location as the meeting point, not the driver's GPS, and show the rider a message like 'Your driver is arriving' rather than trying to show exact real-time position near the pickup point.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gps_accuracy", "map_matching", "client_interpolation", "user_experience"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The driver's app crashes mid-ride. The driver is still driving but the app is dead. What happens to the trip?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "driver_app_crash" }
+    },
+    {
+      "role": "candidate",
+      "content": "The server stops receiving GPS updates from the driver. We need to distinguish between 'app crashed' and 'trip ended abnormally.' First, a grace period — if no GPS update for 30 seconds, the server marks the trip as 'connection_lost' but doesn't end it. The rider's app shows a message like 'Reconnecting with your driver...' Second, when the driver's app restarts, it checks for an active trip and resumes sending updates. The trip continues seamlessly. Third, if the driver doesn't reconnect within 5 minutes, we escalate — send a push notification asking the driver to confirm trip status. If no response in 10 minutes, we estimate the fare based on the last known location and planned route, end the trip, and flag it for manual review. We never silently charge a rider for a potentially incomplete trip.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["connection_loss", "trip_recovery", "grace_period", "fare_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Two riders request a ride at the same time, same location. Only one driver is nearby. Both get matched to the same driver. What happens?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "double_matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a race condition in the matching system. Prevention: when the matching service selects a driver, it must atomically mark that driver as 'unavailable' before sending the offer. I'd use optimistic locking — the match attempt includes a version number for the driver's availability status. If two matching requests try to claim the same driver, the second one fails the version check and retries with the next-best driver. Implementation: the driver's availability state is in Redis with a SET NX (set if not exists) lock. The first match acquires the lock, the second sees the lock and moves on. If the driver declines the ride or the offer times out, the lock is released and the driver becomes available again.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["race_condition", "optimistic_locking", "atomic_operations", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The payment service is down. The ride just completed. How do you handle it?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "payment_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The payment should never block the ride completion. When the trip ends, we calculate the fare and store it as a pending payment in the Trip Service database. The actual charge is async — a payment worker picks up the pending charge from a queue. If the Payment Service is down, the charge stays in the queue and is retried with exponential backoff. The rider sees 'Trip completed — processing payment' and can go about their day. The driver's earnings are recorded immediately as a receivable — they see the fare in their earnings dashboard even though the actual settlement hasn't happened yet. If the payment fails permanently after retries (card declined), we notify the rider to update payment method. The driver still gets paid — we eat the cost and pursue the rider's debt separately.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["async_payment", "retry_strategy", "graceful_degradation", "payment_failure"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "There's a natural disaster. Suddenly 10x the normal ride requests in one area. Surge pricing kicks in but drivers aren't moving — roads are blocked. What breaks?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "demand_spike" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several things break. First, the matching service has a massive queue of unmatched riders — normal timeout of 10 seconds doesn't work when there are no drivers. We'd extend the matching timeout and show riders estimated wait times. Second, surge pricing goes to extreme levels, which in a disaster is ethically wrong — we should cap surge pricing during declared emergencies and potentially eat the cost. Third, ETAs are wrong — our routing assumes normal road conditions, but roads may be blocked. We need to integrate real-time road closure data. Fourth, the supply of drivers drops because drivers can't get to the demand area. We could show drivers a heat map of high-demand areas and offer guaranteed minimums to incentivize them to come. Fifth, the Location Service gets overwhelmed — 10x location updates from drivers all trying to navigate the same area. We'd need to scale the spatial index horizontally.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["demand_spike", "surge_pricing", "routing", "supply_demand", "scalability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The driver picks up the wrong person. Someone on the street gets into the car thinking it's their ride. How does the system detect or prevent this?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "safety" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a safety issue more than a technical one, but the system can help. Prevention: require PIN verification — the rider's app shows a 4-digit code, the driver must enter it before starting the trip. This confirms the right rider is in the car. Detection: if the rider's phone GPS diverges significantly from the driver's GPS after trip start, the system should alert — the rider might still be at the pickup point while the car is driving away. The rider's app should also show 'Verify your ride' with the driver's photo, license plate, and car model before getting in. Post-incident: the actual rider reports they never got picked up, the driver has a trip with a phantom rider — the system matches these reports and flags for review. We'd also track that the rider's phone never moved from the pickup point, which is strong evidence.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["safety", "pin_verification", "gps_verification", "anomaly_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The driver takes a much longer route than necessary — either intentionally or due to a navigation error. Total fare is 3x what it should be. How do you handle this?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "fare_fraud" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two layers. First, upfront pricing — calculate the fare based on the optimal route at ride request time and charge that amount regardless of the actual route taken. This protects riders from bad routes and removes the incentive for drivers to take long routes. The driver's pay can also be based on the upfront estimate. Second, for cases where the actual trip is significantly longer (road closures, rider-requested detours), we compare the actual route against the estimated route. If the deviation is more than, say, 30% in distance or time and the rider didn't make stops, we flag it for review. The fare adjustment algorithm looks at: was there a known traffic event? Did the rider change the destination mid-trip? Is this a pattern for this driver? Repeated route-padding gets the driver deactivated.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["upfront_pricing", "route_comparison", "fraud_detection", "fare_adjustment"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last failure scenario. Your entire matching service cluster goes down. No new rides can be matched. Existing rides are still in progress. What's the recovery plan?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "service_outage" }
+    },
+    {
+      "role": "candidate",
+      "content": "In-progress rides are safe — they're managed by the Trip Service, not the Matching Service. The Trip Service has the driver-rider assignment and continues tracking. For new requests: the rider's app shows 'Looking for a driver...' and keeps retrying. On the backend, ride requests are queued in Kafka, not lost. When the Matching Service comes back, it drains the queue and matches backlogged requests. Some requests will be stale (rider cancelled or gave up), so we check rider status before sending a match. Recovery priority: deploy the Matching Service to a different availability zone from standby instances. If it's a code bug, roll back to the last known good version. During the outage, we show riders an honest message — 'We're experiencing issues matching rides. Please try again in a few minutes' — rather than leaving them waiting indefinitely. We'd also have a circuit breaker so the API returns a fast failure rather than timing out.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["service_outage", "kafka", "circuit_breaker", "rollback", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We covered a lot of failure modes. Anything else you'd want to address?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd want to mention monitoring specifically for the failure scenarios we discussed. Key alerts: match rate dropping below threshold (supply/demand imbalance), payment failure rate spiking, GPS update frequency dropping (could indicate Location Service issues), trip duration significantly exceeding estimates at aggregate level (possible routing data issue), and unresolved 'connection_lost' trips exceeding a threshold. Each failure mode we discussed should have a corresponding runbook for the on-call team.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "alerting", "runbooks", "operational_excellence"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You handled every failure scenario I threw at you with practical, well-reasoned answers. I can tell you've thought about these edge cases before. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 65,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 6,
+      "api_design": 5,
+      "database_design": 4,
+      "caching_strategy": 5,
+      "scalability": 6,
+      "failure_handling": 9,
+      "communication": 7
+    },
+    "strengths": [
+      "Exceptional failure handling — addressed every scenario with multi-layered practical solutions",
+      "Strong understanding of real-world ride-sharing edge cases like GPS inaccuracy and fare fraud",
+      "Good safety awareness — PIN verification, GPS divergence detection, anomaly flagging"
+    ],
+    "weaknesses": [
+      "High-level architecture was rushed — barely discussed before diving into failures",
+      "Database design was not addressed — no discussion of schema, choice of database, or data modeling",
+      "No API design — never specified endpoints, request/response formats, or versioning",
+      "Caching strategy was not discussed beyond Redis for spatial index"
+    ]
+  }
+}

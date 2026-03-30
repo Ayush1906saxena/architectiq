@@ -1,0 +1,193 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "staff",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_475"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a video streaming platform like YouTube or Netflix. Users upload videos, others watch them at scale. What do you need to know before we start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few questions. What's our scale in terms of daily uploads and peak concurrent viewers? Are we focusing on user-generated content like YouTube or licensed content like Netflix? Do we need live streaming or just video on demand? What geographies do we serve?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scale", "content_model", "live_vs_vod", "geography"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "User-generated content, YouTube-style. 800K uploads per day, 150 million peak concurrent viewers. VOD only. Global audience across all continents. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "What video quality range are we supporting? And what's the expected average video length? Also, do we need to handle the recommendation feed or just upload and playback?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["video_quality", "video_length", "scope"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "360p through 4K. Average video is 8 minutes. Recommendations out of scope -- focus on upload, transcoding, and playback. Go ahead.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do some quick capacity math. 800K uploads per day is roughly 9 per second. Assuming an average raw upload of 400MB for an 8-minute HD video, that's about 320TB of raw content daily. After transcoding into 5-6 quality variants, we're looking at roughly 1.5x the original in aggregate storage -- so about 480TB of transcoded output daily. On the read side, 150 million concurrent viewers at an average of 4 Mbps for HD is 600 Tbps of aggregate bandwidth. That's firmly in multi-CDN territory -- no single CDN provider can handle that alone.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "storage_calculation", "bandwidth_estimation", "multi_cdn"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Reasonable estimates. Walk me through the upload and transcoding pipeline.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "upload_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The upload flow starts with the client obtaining a presigned URL from our upload service, then uploading directly to object storage like S3. For large files, we use chunked resumable uploads so a failed 2GB upload doesn't restart from scratch. Once the upload completes, S3 fires an event notification into an SQS queue. A transcoding orchestrator picks up the job, validates the file -- checks for corruption, verifies codec support -- and then splits the video into segments at keyframe boundaries, typically 4-6 seconds each. Each segment gets farmed out as an independent transcoding task to a worker fleet. Workers use hardware-accelerated encoding -- either GPU instances with NVENC or dedicated ASIC encoders -- to transcode each segment into all target resolutions: 360p, 480p, 720p, 1080p, and 4K. Each resolution gets an appropriate bitrate ladder -- for example, 1080p might target 4-5 Mbps with H.264 or 2-3 Mbps with H.265. Once all segments for all resolutions are done, the orchestrator generates HLS manifest files -- a master playlist pointing to per-resolution media playlists, which list all the .ts segments.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["presigned_url", "resumable_upload", "transcoding_pipeline", "keyframe_splitting", "hardware_encoding", "bitrate_ladder", "hls_manifest", "h264", "h265"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good detail on the pipeline. You mentioned splitting at keyframe boundaries. Why is that important versus splitting at arbitrary timestamps?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "keyframe_alignment" }
+    },
+    {
+      "role": "candidate",
+      "content": "Video codecs like H.264 use three frame types: I-frames (keyframes) which are full images, P-frames which reference the previous frame, and B-frames which reference both previous and future frames. A segment must start with an I-frame to be independently decodable. If you split mid-GOP -- between keyframes -- the first few frames of the segment can't be decoded because their reference frames are in the previous segment. This is critical for adaptive bitrate switching, because when the player switches quality levels, it needs each segment to start clean without dependencies on the prior segment. So we either split at natural keyframes or force keyframes at fixed intervals during encoding.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["i_frames", "p_frames", "b_frames", "gop", "independent_decoding", "abr_switching"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid. Now, the player is doing adaptive bitrate streaming. How does the player decide when to switch quality levels? Walk me through the algorithm.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "abr_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "The player monitors its download throughput and buffer level. When it fetches a segment, it measures how long the download took versus the segment duration. If a 4-second segment at 1080p downloads in 1 second, the effective bandwidth is about 4x the bitrate, so there's headroom. If it takes 6 seconds, we're falling behind and the buffer is draining. Based on that, the player picks a lower or higher quality for the next segment. The buffer level is the safety net -- if the buffer drops below a threshold, say 5 seconds, the player aggressively drops quality to avoid rebuffering. Honestly though, I'm not deeply familiar with the specific algorithms like BBA or MPC that modern players use internally. I know the general throughput-and-buffer approach but I'd need to look into the specifics of how they balance quality stability versus responsiveness.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["throughput_estimation", "buffer_level", "quality_switching"], "depth": "surface", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair enough. The algorithms like BBA use buffer occupancy as the primary signal and MPC uses model predictive control to optimize a QoE function. It's worth understanding these if you're designing a streaming platform. Let's move on -- tell me about the CDN architecture.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "cdn_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "For 600 Tbps of bandwidth, we need a multi-tier, multi-provider CDN strategy. I'd use at least two CDN providers -- say CloudFront and Akamai -- to avoid single-provider dependency and leverage geographic strengths. The architecture has three tiers: edge PoPs closest to users, mid-tier regional caches, and our origin in S3. When a user's player requests a segment, DNS or an anycast routing layer directs them to the nearest edge. The edge checks its local cache -- for viral and popular videos, the cache hit rate at the edge will be 90%+ which is huge for reducing origin load. Cache misses fall through to the regional tier, then to origin. For new uploads from popular creators, I'd do proactive cache warming -- push segments to edge PoPs in regions where the creator's audience is historically concentrated. This reduces the thundering herd problem on origin when a popular video drops.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_cdn", "cache_tiers", "edge_caching", "cache_hit_rate", "cache_warming", "thundering_herd", "anycast_routing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good CDN design. What about long-tail content -- videos with very few views? How do you handle CDN economics there?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "long_tail_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Long-tail content is a big cost driver. If a video gets 2 views per month, caching it on CDN edges is wasteful. A few strategies: first, we can tier our storage -- popular content stays on fast SSDs in origin, long-tail moves to cheaper storage like S3 Infrequent Access or Glacier. Second, for long-tail playback, we skip the edge cache entirely and serve from a regional origin, accepting slightly higher latency since there's no audience to amortize the cache cost over. Third, we could transcode long-tail videos into fewer resolutions -- maybe just 480p and 720p instead of the full ladder -- since optimizing encoding quality for content nobody watches is wasted compute. The 80/20 rule applies heavily here: maybe 5% of videos drive 80% of views.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["storage_tiering", "cdn_economics", "selective_transcoding", "long_tail_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Smart cost optimization. Let's shift to failure modes. What happens if your transcoding pipeline backs up -- say a hardware issue takes out 30% of your worker fleet?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "transcoding_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "First, detection -- we monitor queue depth and processing latency. If queue depth is growing faster than it's draining, we alert. For immediate mitigation: auto-scaling kicks in to spin up replacement workers, though that takes minutes. In the meantime, I'd implement priority queuing -- videos from high-subscriber creators or videos already accumulating waiting viewers get processed first. We can also degrade gracefully by transcoding only the most critical resolutions first -- 720p and 1080p -- and queuing the rest for later. The video becomes watchable sooner in the two most popular resolutions, and 360p and 4K get filled in when capacity recovers. We'd also need circuit breakers to avoid hammering a failing transcoding dependency and making things worse.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "auto_scaling", "priority_queuing", "graceful_degradation", "circuit_breakers"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about a CDN outage in an entire region? How does the system respond?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cdn_failover" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where multi-CDN pays off. Our DNS or traffic management layer -- something like Route 53 with health checks or a dedicated GSLB -- detects the outage via failed health probes. It redirects traffic from the downed CDN's region to the secondary CDN provider. There's a brief period of elevated latency as users get routed to farther PoPs, and a spike in cache misses on the new provider since it hasn't cached the same content. The origin needs to handle this surge -- so we need headroom in origin capacity, or a shield layer in front of origin to collapse duplicate requests for the same segment. For users mid-stream, their player will experience a brief stall as the CDN switch happens, but the retry logic in the player should handle it within a few seconds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_cdn_failover", "gslb", "health_checks", "cache_miss_surge", "origin_shield", "player_retry"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "One area we haven't touched on -- content moderation. How do you prevent harmful or illegal content from being served to users after upload?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "content_moderation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, content moderation... I'd add a moderation step in the pipeline after upload but before the video is published. We could run the video through automated classifiers -- image recognition models that detect nudity, violence, copyrighted content. Videos flagged by the automated system get held for human review. But honestly, I haven't thought deeply about the architecture of the moderation pipeline itself. I'd assume it's a separate ML service that processes frames from the video and returns a classification. The video stays in a 'pending review' state until it clears moderation.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["content_moderation", "ml_classifiers", "human_review"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Content moderation is a critical part of any UGC platform. You'd want to think about how it scales -- sampling frames versus processing every frame, handling appeals, CSAM detection requirements, and how moderation latency affects time-to-publish. What about DRM? How do you protect premium content from being downloaded and redistributed?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "drm" }
+    },
+    {
+      "role": "candidate",
+      "content": "DRM... I know at a high level that services like Netflix use Widevine or FairPlay to encrypt content so it can only be played by authorized clients. The video segments would be encrypted, and the player needs to obtain a decryption license from a license server. The license server checks that the user has a valid subscription or access rights before issuing the key. But I'll be honest, I don't know the internals of how the encryption is integrated into the HLS or DASH pipeline, or how key rotation works across segments. It's a gap in my knowledge.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["drm", "widevine", "fairplay", "license_server", "content_encryption"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "At a staff level, we'd expect more depth on DRM since it's fundamental to video platform economics. The integration involves encrypting segments with AES-128 during transcoding, embedding key IDs in the manifest, and the license server issuing short-lived keys after verifying entitlements. Let's talk about the database layer. What does your metadata storage look like?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "metadata_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Video metadata goes into a relational database -- Postgres. Schema includes video_id, creator_id, title, description, upload_timestamp, duration, processing_status, and a JSON column or separate table for the manifest URLs per resolution. I'd shard by video_id using consistent hashing for horizontal scale. View counts go to a separate write-optimized path -- Redis INCR for real-time counting, flushed to a time-series store periodically. For the creator's channel page, we need an index on creator_id, which means either a secondary index in the sharded DB or a separate denormalized table mapping creator to their video list. Comments get their own service and database since the access pattern is different -- paginated, time-ordered, high-write for popular videos.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["relational_database", "sharding", "consistent_hashing", "view_counters", "redis", "denormalization", "service_separation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Reasonable. How do you handle the API design for playback? Walk me through what happens from the moment a user clicks a video thumbnail.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "playback_api" }
+    },
+    {
+      "role": "candidate",
+      "content": "User clicks a video. The client calls GET /api/v1/videos/{video_id} which returns metadata -- title, description, creator info, view count, and critically, the master manifest URL. The master manifest URL points to our CDN. The player fetches the master manifest from CDN, which lists available quality levels with their bandwidths. The player picks an initial quality based on a bandwidth estimate from previous sessions or starts conservatively at 720p. It fetches the media playlist for that quality, then starts downloading segments sequentially. As segments download, the player measures throughput and adjusts quality for subsequent segments. For authentication, the manifest and segment URLs include signed tokens with an expiration -- so a user can't share a direct CDN link that works forever. The token gets validated at the CDN edge.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rest_api", "manifest_delivery", "cdn_signed_urls", "token_authentication", "playback_flow"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running low on time. Summarize the architecture and call out what you think the top three operational challenges would be.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The architecture has three main paths. Upload: resumable upload to S3, event-driven transcoding pipeline that splits videos at keyframe boundaries, transcodes into multiple resolutions with hardware encoders, and generates HLS manifests. Storage: metadata in sharded Postgres, video segments in S3 with tiered storage for cost optimization. Playback: multi-tier, multi-provider CDN with proactive cache warming for popular content and signed URLs for access control. Top three operational challenges: first, transcoding cost and latency -- it's the most compute-intensive part and directly affects creator experience. Second, CDN cost management -- at 600 Tbps, bandwidth is the largest line item, so cache hit rate optimization is critical. Third, handling viral content spikes -- a video going from zero to millions of views in minutes creates sudden CDN cache miss storms and origin pressure that auto-scaling can't anticipate.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["architecture_summary", "operational_challenges", "cost_optimization", "viral_content"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good summary and reasonable prioritization. You demonstrated strong knowledge of the transcoding pipeline and CDN architecture, but the gaps on ABR algorithm internals, content moderation, and DRM are notable at staff level. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 68,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 7
+    },
+    "strengths": [
+      "Thorough transcoding pipeline design including keyframe splitting, hardware encoding, and bitrate ladders",
+      "Excellent CDN architecture with multi-provider strategy, cache warming, and long-tail cost optimization",
+      "Strong failure mode analysis for both transcoding backlog and CDN regional outage",
+      "Good capacity estimation with concrete numbers for storage and bandwidth"
+    ],
+    "weaknesses": [
+      "Could not explain adaptive bitrate algorithm internals (BBA, MPC) beyond basic throughput/buffer monitoring",
+      "Content moderation discussion was surface-level -- no depth on frame sampling, CSAM requirements, or moderation pipeline architecture",
+      "DRM knowledge limited to naming Widevine/FairPlay without understanding integration into the encoding pipeline or key management",
+      "Did not proactively raise content moderation or DRM -- both were interviewer-initiated",
+      "No discussion of video codec selection tradeoffs (AV1 vs H.265 vs H.264) at the strategic level"
+    ]
+  }
+}

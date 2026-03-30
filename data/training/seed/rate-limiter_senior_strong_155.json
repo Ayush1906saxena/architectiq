@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_155"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter for an API gateway. What clarifying questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things I'd like to clarify. What's the scale — number of unique clients and total request throughput? Are we rate limiting per user, per API key, per IP, or some combination? What granularity — requests per second, per minute? And is there a hard requirement on accuracy, or is approximate rate limiting acceptable?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scale", "rate_limit_dimensions", "granularity", "accuracy_requirements"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500K unique API keys, 800K QPS across 15 gateway nodes. Rate limit per API key, 1,000 requests per minute. Slight over-admission is acceptable — within 5% is fine. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Should we support burst traffic — like a client sending 100 requests in 1 second if they haven't used any in the last 59 seconds? And do we need different tiers with different limits?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["burst_handling", "rate_limit_tiers"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes to both — burst should be allowed within the window limit, and we have free, pro, and enterprise tiers. Let's start designing.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I want to use a sliding window counter approach implemented with Redis sorted sets. Here's the idea: for each API key, we maintain a Redis sorted set where each element is a unique request ID and the score is the request timestamp. When a request comes in, we remove all entries older than 60 seconds using ZREMRANGEBYSCORE, then count the remaining entries with ZCARD. If the count is below the limit, we add the new request with ZADD. This gives us a true sliding window — no boundary issues that fixed windows have.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sliding_window_counter", "redis_sorted_set", "fixed_window_boundary"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How do you make those three Redis operations — ZREMRANGEBYSCORE, ZCARD, ZADD — atomic? A race condition between two gateway nodes could let requests slip through.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "atomicity" }
+    },
+    {
+      "role": "candidate",
+      "content": "Lua script in Redis. The entire check-and-admit logic runs as a single atomic operation. The script takes the API key, current timestamp, window size, and rate limit as arguments. It does: ZREMRANGEBYSCORE to clean old entries, ZCARD to count, and conditionally ZADD if under the limit. Returns 1 for allowed, 0 for rejected, along with the remaining quota and retry-after time. Since Redis executes Lua scripts atomically, there's no race condition between concurrent requests for the same key.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lua_script", "atomic_operations", "rate_limit_headers"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the memory cost of this approach? Each request adds an entry to the sorted set.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "memory_analysis" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's the main trade-off. For a client at their limit — 1,000 requests per minute — the sorted set holds 1,000 entries. Each entry in a Redis sorted set is roughly 80-100 bytes with overhead. So 1,000 entries is about 100KB per active client. With 500K unique API keys, if all are active simultaneously: 500K times 100KB is 50GB. That's significant. In practice, not all 500K are at their limit simultaneously — maybe 10-20% are active in any given minute, bringing it down to 5-10GB. Still, this is a real concern.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["memory_estimation", "sorted_set_overhead", "active_client_ratio"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does this compare to the sliding window log approach memory-wise? And are there more memory-efficient alternatives?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "algorithm_comparison" }
+    },
+    {
+      "role": "candidate",
+      "content": "The sliding window log is essentially what I described — it stores every request timestamp. The sliding window counter is a hybrid: divide the minute into sub-windows, say 6 intervals of 10 seconds each, and keep a count per interval. When checking the rate, sum the counts in the current window and a weighted portion of the previous window. Memory per client drops from 100KB to just 6 counters — maybe 100 bytes. The trade-off is reduced accuracy: it approximates the sliding window. But since our requirement allows 5% over-admission, this approximation is perfectly acceptable. I'd actually switch to this approach given the memory constraints.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sliding_window_log", "sliding_window_counter", "sub_window", "weighted_count", "accuracy_tradeoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good self-correction. How would you implement the sliding window counter in Redis?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "implementation_detail" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a Redis hash per API key. The hash fields are the sub-window timestamps — like the start of each 10-second interval — and the values are the request counts. The Lua script does: calculate the current sub-window key, HINCRBY to increment the current window's count, sum all sub-window counts within the sliding window range, and apply the weighted calculation for the partial oldest window. Expired sub-windows get cleaned up lazily — either in the same Lua script or via Redis key expiration set to 2 times the window duration. Memory footprint: a hash with 6-12 fields per key, roughly 200 bytes per active client. For 500K clients, that's about 100MB. Much more manageable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_hash", "sub_window_counter", "lazy_cleanup", "memory_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "At 800K QPS, how does the Redis cluster handle the load?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "redis_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each rate limit check is one Lua script execution. Redis handles around 200K-300K simple operations per second on a single instance, but Lua scripts are heavier — maybe 100K-150K per second depending on complexity. With 800K QPS, I'd shard across 8-10 Redis instances, partitioned by API key hash. Each instance handles 80-100K operations per second, well within capacity. The gateway node computes the hash of the API key to determine which Redis shard to query. Since all data for a given key lives on one shard, the Lua script remains atomic without cross-shard coordination.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_cluster", "lua_throughput", "sharding_strategy", "data_locality"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when the Redis cluster goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "redis_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "We fail open — allow all requests through. Blocking all API traffic because rate limiting is down would be worse than temporarily losing rate limits. But we add two safety nets. First, each gateway node maintains a local in-memory rate limiter using the same sliding window counter algorithm. Since requests are distributed across 15 nodes, the local limit is set to 2x the per-node fair share — so 2 times 1000/15, roughly 134 requests per minute per key per node. This catches obvious abusers even without Redis. Second, we set up Redis Sentinel for automatic failover so the outage is brief — typically under 30 seconds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fail_open", "local_rate_limiting", "graceful_degradation", "redis_sentinel", "automatic_failover"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle rate limit tier changes? An API key upgrades from free to pro mid-minute.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "configuration_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "The rate limit rules are stored in a configuration service — a simple key-value store that maps API key or tier to limits. Each gateway node caches this configuration locally with a 30-second refresh interval. When a tier changes, the configuration service updates the mapping, and within 30 seconds all gateways pick up the new limit. The Lua script receives the current limit as a parameter on each call, so it always uses the latest cached value. For immediate propagation, we can supplement polling with a Redis pub/sub notification that triggers an early refresh. The sliding window counter data doesn't need to change — the new limit just applies to the existing counters.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["configuration_caching", "polling", "pub_sub_notification", "limit_parameterization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you communicate rate limit status to clients?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "client_communication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Standard HTTP headers on every response: X-RateLimit-Limit shows the total allowed, X-RateLimit-Remaining shows how many are left, X-RateLimit-Reset shows when the window resets. When a request is rejected, we return 429 Too Many Requests with a Retry-After header. The Lua script already computes remaining quota, so this adds zero extra cost. This is important for good API UX — well-behaved clients can back off proactively instead of getting hard rejected.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_headers", "http_429", "retry_after", "client_experience"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're wrapping up. Anything you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few production concerns. Monitoring: dashboards showing rejection rates per tier, Redis latency percentiles, and local fallback activation alerts. Logging: every rejection should be logged with context for debugging customer complaints. And I'd consider a grace period feature — instead of hard cutting off at 1,000, we allow a 10% burst buffer but log it, giving us data to help customers right-size their tier. Finally, for DDoS scenarios, we'd want IP-based rate limiting in addition to API-key-based, applied at a separate layer before the API key is even resolved.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "logging", "burst_buffer", "ddos_protection", "ip_rate_limiting"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent depth on the sliding window counter approach and memory trade-offs. Thanks for the thorough discussion.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 79,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 8,
+      "database_design": 8,
+      "caching_strategy": 9,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Deep understanding of sliding window variants — articulated memory trade-offs between log and counter approaches",
+      "Self-corrected from sorted set to hash-based approach when memory analysis revealed issues",
+      "Production-ready thinking — rate limit headers, monitoring, graceful degradation all covered proactively"
+    ],
+    "weaknesses": [
+      "Could have discussed token bucket as an alternative algorithm and compared trade-offs",
+      "Multi-region rate limiting not addressed — what if the same API key hits different geographic regions?",
+      "Didn't discuss rate limit bypass strategies for internal/health-check traffic"
+    ]
+  }
+}

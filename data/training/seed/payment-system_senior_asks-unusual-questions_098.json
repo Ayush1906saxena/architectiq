@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "senior",
+    "candidate_profile": "asks-unusual-questions",
+    "total_exchanges": 22,
+    "generation_id": "seed_098"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a payment processing system — something that handles online transactions for an e-commerce platform. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Before diving in — what currencies are we supporting? Single currency like USD or multi-currency? Because multi-currency introduces exchange rate volatility, rounding issues, and the need for settlement in different banking systems. Also, are we operating in a single country or globally? PCI DSS compliance in the US is different from PSD2 in Europe or RBI regulations in India.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_currency", "compliance", "regional_regulations"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Multi-currency, global operation. Let's focus on credit card payments but keep it extensible. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "multi_currency" }
+    },
+    {
+      "role": "candidate",
+      "content": "What about cryptocurrency? I ask because if there's even a 2-year roadmap for crypto payments, the architecture needs to account for blockchain confirmation times — Bitcoin takes 10 minutes for one confirmation versus credit cards which are milliseconds. That changes our async processing model fundamentally. Also, do we need to support escrow for marketplace payments? Like if we're an Etsy-style marketplace, the buyer pays, the money is held, and the seller gets paid on delivery. That's a completely different flow from direct merchant payments.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cryptocurrency", "escrow", "marketplace_payments", "async_processing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "No crypto for now, but I like that you're thinking about it. Yes, we need marketplace-style escrow. Interesting questions — keep going.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "escrow" }
+    },
+    {
+      "role": "candidate",
+      "content": "What about chargebacks and disputes? In the US, consumers have 120 days to dispute a charge. That means our transaction records need to be immutable and auditable for months. Do we need a dispute resolution workflow? And what about fraud — are we building our own fraud detection or integrating with a service like Stripe Radar? Because the fraud model affects latency — we need to make a fraud decision before authorizing, which adds time to checkout.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chargebacks", "audit_trail", "fraud_detection", "latency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes to dispute workflow, integrate with external fraud service. Good edge case thinking. Let's start the design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me sketch the high-level flow. A payment goes through several stages: payment intent creation, fraud check, authorization (hold on card), capture (actual charge), and settlement (money movement). Each stage is a separate microservice because they have different SLAs and failure modes. The payment intent service creates an immutable record with a unique idempotency key — this is critical for preventing double charges. Every downstream call includes this key.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payment_flow", "microservices", "idempotency", "double_charge_prevention"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me more about the idempotency key design.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "idempotency" }
+    },
+    {
+      "role": "candidate",
+      "content": "The client generates a UUID v4 idempotency key and sends it with the payment request. Our API gateway stores this key in a Redis hash with the request fingerprint and response. If we see the same key again within 24 hours, we return the cached response without reprocessing. The key is also stored with the payment record in the database. For the downstream payment processor call — to Visa/Mastercard — we use the same key or a derived one, so if we crash after they process but before we record the result, a retry won't charge twice. This is the at-least-once delivery with idempotent receiver pattern.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency", "redis_caching", "at_least_once_delivery"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the escrow flow work for marketplace payments?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "escrow" }
+    },
+    {
+      "role": "candidate",
+      "content": "The escrow flow is a state machine: CREATED → AUTHORIZED → CAPTURED_TO_ESCROW → RELEASED_TO_SELLER or REFUNDED_TO_BUYER. When the buyer pays, we authorize and capture into our platform's escrow account — a real bank account we hold on behalf of sellers. We track each escrow balance per seller in a ledger. When the buyer confirms delivery or after a timeout, we release funds to the seller's account. If there's a dispute, we freeze the escrow balance. One unusual consideration: in some jurisdictions, escrow funds earn interest. Who gets that interest? The platform usually does, but we need to account for it. The ledger tracks these accruals separately.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["escrow", "state_machine", "ledger", "compliance"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "I hadn't considered the interest angle — nice catch. What about the database design for the ledger?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "ledger_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ledger follows double-entry bookkeeping — every transaction has a debit and a credit that sum to zero. This is an append-only table: ledger_entry_id, account_id, counterparty_account_id, amount, currency, type (debit/credit), transaction_id, created_at. No updates or deletes ever. The balance is a materialized view computed from sum of entries. I'd use PostgreSQL with serializable isolation for ledger writes — correctness is more important than throughput here. We can handle about 5,000 transactions per second on a single Postgres instance, which is sufficient for most payment platforms. For higher throughput, we shard by account_id.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["double_entry_ledger", "postgresql", "serializable_isolation", "append_only"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about handling partial failures — you've authorized a card but the capture call to the payment processor times out?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "partial_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where the saga pattern comes in. Each payment is a saga with compensating actions. If capture times out, we don't know if it succeeded or not. We move the payment to a CAPTURE_UNCERTAIN state. A reconciliation worker queries the payment processor's API to check the actual status. If it went through, we update our records. If it didn't, we void the authorization. If the processor is down entirely, we keep retrying with exponential backoff. The authorization hold expires after 7 days typically, so we have a hard deadline. We also run a daily batch reconciliation — compare our ledger against the processor's settlement file to catch any discrepancies. Every mismatch triggers an alert and manual review.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["saga_pattern", "compensating_actions", "reconciliation", "exponential_backoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle multi-currency conversion?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "multi_currency" }
+    },
+    {
+      "role": "candidate",
+      "content": "We store all amounts as the smallest unit of the currency — cents for USD, pence for GBP. Important: not all currencies have 2 decimal places. Japanese Yen has 0 decimal places, Kuwaiti Dinar has 3. We store the currency code and use a currency metadata table for formatting. For conversion: we lock the exchange rate at payment intent creation time and store it with the transaction — the buyer sees exactly what they'll pay. We use a rate provider like Open Exchange Rates, refreshed every minute. The FX markup is configurable per currency pair. In the ledger, we record both the original currency amount and the settlement currency amount for full auditability.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_currency", "currency_precision", "exchange_rates", "audit_trail"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned fraud detection earlier. How does it fit into the payment flow?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "fraud_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "After payment intent creation, before authorization, we call the fraud service synchronously. It needs to return in under 200ms to keep checkout fast. The fraud service evaluates: device fingerprint, IP geolocation, purchase history, velocity checks (5 transactions in 1 minute from the same card is suspicious), and the BIN of the card (some BIN ranges have higher fraud rates). It returns a risk score: low risk passes, high risk blocks, medium risk might trigger 3D Secure (additional verification). We also feed chargeback data back to the fraud service as training signal. An unusual case I'd plan for: friendly fraud — the legitimate cardholder makes a purchase then disputes it. We need to store evidence like delivery confirmation and device fingerprints to fight these disputes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fraud_detection", "risk_scoring", "3d_secure", "velocity_checks", "friendly_fraud"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong depth. Any thoughts on scaling and high availability?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "scalability" }
+    },
+    {
+      "role": "candidate",
+      "content": "The payment service must be multi-region active-active for availability — a payment system going down directly loses revenue. Each region handles local traffic with its own PostgreSQL cluster. Cross-region replication for the ledger uses synchronous replication to prevent double-spending across regions — we accept higher latency for consistency here. The API is idempotent so clients can safely retry against any region. For scale: with sharding by merchant_id, each shard handles its own ledger independently. Most marketplace platforms top out at 10K-50K transactions per second which is manageable with 10-20 database shards.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_region", "active_active", "synchronous_replication", "sharding_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "One more unusual consideration: timezone-aware settlement. In payment processing, the 'settlement day' cut-off varies by acquiring bank and timezone. A transaction at 11:59 PM EST might settle on day N in the US but day N+1 in Europe. Our settlement engine needs to handle this correctly to match bank statements. Also, tax handling: in many jurisdictions, the payment system needs to calculate and remit VAT/GST, which varies by buyer location. We should keep the tax calculation separate from the payment flow but linked via transaction ID for reporting.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["settlement", "timezone_handling", "tax_calculation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent breadth of thinking. Your unusual questions early on showed real-world payment domain expertise. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 72,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 5,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 5,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional domain knowledge — currency precision, escrow interest, friendly fraud, settlement timezones",
+      "Creative requirements questions that revealed deep real-world experience",
+      "Strong ledger design with double-entry bookkeeping and audit trails"
+    ],
+    "weaknesses": [
+      "Light on capacity estimation — no back-of-envelope math for transaction volumes",
+      "Caching strategy not discussed — could have covered payment session caching",
+      "Some areas felt like domain expertise rather than system design thinking"
+    ]
+  }
+}

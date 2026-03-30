@@ -1,0 +1,191 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "staff",
+    "candidate_profile": "misses-obvious",
+    "total_exchanges": 24,
+    "generation_id": "seed_409"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter. This will be used across our API gateway to enforce rate limits for thousands of API clients. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure, great problem. Let me clarify a few things. What granularity of rate limiting do we need — per user, per API key, per endpoint, or some combination? What are the rate limit tiers — are we talking about different limits for different plans? And what's the scale — how many unique clients and how many requests per second total?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_granularity", "tiered_limits", "qps"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Rate limiting per API key, with configurable limits per key. Three tiers: free (100 req/min), pro (1000 req/min), enterprise (10000 req/min). Total scale: 500K active API keys, 2 million requests per second at peak across all keys. The rate limiter runs across 50 API gateway nodes.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. So the core challenge here is distributed counting — we need to track request counts for 500K keys across 50 nodes, and the counts need to be reasonably accurate. Let me think about consistency requirements. Is it okay if we occasionally allow a few extra requests through — say 5% over the limit — or do we need hard enforcement?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_counting", "consistency", "accuracy_tolerance"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Soft enforcement is fine — 5-10% over-admission is acceptable. Hard limits aren't required.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Perfect, that relaxes things significantly. Let me start with the algorithm choice. For rate limiting, the main options are fixed window counters, sliding window log, sliding window counter, token bucket, and leaky bucket. For our use case, I'd go with a sliding window counter — it gives a good balance between accuracy and memory efficiency. Fixed window has the burst-at-boundary problem. Token bucket is great but slightly more state to manage in a distributed setting.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fixed_window", "sliding_window", "token_bucket", "leaky_bucket", "algorithm_comparison"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good analysis. Walk me through the distributed architecture.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": "distributed_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "So the key architectural decision is centralized vs. decentralized counting. Centralized: all 50 gateway nodes talk to a central Redis cluster to check and increment counters. Decentralized: each node tracks counts locally and periodically syncs. I'd go with a hybrid approach. Each gateway node maintains a local count and periodically syncs with Redis. This way, individual requests don't need a round-trip to Redis — they check locally first. We batch sync to Redis every 1 second or every N requests, whichever comes first.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["centralized_vs_decentralized", "redis_counter", "local_caching", "batch_sync"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting hybrid approach. How does the local counting work? Walk me through the data flow for a single request.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "request_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a request arrives at a gateway node: 1) Extract the API key from the request header. 2) Look up the key's rate limit tier from a local config cache (synced from a configuration service). 3) Check the local sliding window counter for this key. 4) If local count plus the node's share of the global count is under the limit, allow the request and increment the local counter. 5) Periodically, a background thread sends all local deltas to Redis and fetches the global counts. For the node's share: if the limit is 1000/min and we have 50 nodes, each node gets a local budget of 20/min, plus it checks the global count for overflow.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["request_flow", "sliding_window", "local_budget", "global_sync"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the Redis layer? How do you structure the counters there?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "redis_data_structure" }
+    },
+    {
+      "role": "candidate",
+      "content": "In Redis, for sliding window counters, I'd use a sorted set per API key. The key is rate_limit:{api_key}, members are request timestamps (or a hash to save space), and scores are the timestamps. To count requests in the current window, we do ZCOUNT to count members with scores in [now - window_size, now]. To add a request, ZADD with the current timestamp. To clean up old entries, ZREMRANGEBYSCORE to remove anything older than the window. But at 2M RPS, that's a lot of sorted set operations. Alternative: use simple counters with the sliding window counter approximation — two fixed-window counters (current and previous) and interpolate. Much cheaper. Key: rate_limit:{api_key}:{window_timestamp}, value is the count. INCR is O(1).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_sorted_set", "sliding_window_approximation", "fixed_window_counter", "performance_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good optimization. How do you handle Redis failures? If Redis goes down, what happens to rate limiting?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "redis_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If Redis is down, we fall back to local-only rate limiting. Each node enforces limits independently based on its local budget (total_limit / num_nodes). This is less accurate — a client could get up to 50x their limit if they hit all 50 nodes — but it's better than no rate limiting at all. We'd also set up Redis Sentinel or use Redis Cluster with replicas for high availability. The local counters act as a natural safety net. We could also use a circuit breaker: if Redis latency exceeds 10ms, skip the global check and use local only.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["graceful_degradation", "local_fallback", "redis_sentinel", "circuit_breaker"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the configuration — when an admin changes a rate limit, how does that propagate to all 50 nodes?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "config_propagation" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd store rate limit configurations in a config store like etcd or Consul. Each gateway node watches for changes and updates its local config cache. The propagation delay is typically under a second. For immediate propagation, we could use a pub/sub channel on Redis — when a config changes, publish an event, all nodes receive it and refresh. The config includes: API key to tier mapping, tier definitions (requests per window, window size), and any per-key overrides.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["config_management", "etcd", "pub_sub", "config_propagation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about edge cases. What happens when a load balancer redistributes traffic and now one node gets a disproportionate share of requests for a particular API key?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "hot_key" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good point — hot key problem. If a single API key generates a lot of traffic and it all lands on one node, that node's local budget (limit/50) would be exhausted quickly, causing false rate-limiting even though the global limit isn't reached. Solution: the local budget should be adaptive. If a node sees it's hitting its local budget frequently for a key, it can request a larger share from the global pool. Or simpler: don't use static per-node budgets. Instead, each node uses its local count as a fast check but always validates against the global count on the next sync cycle. The sync frequency can adapt — high-traffic keys sync more often.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hot_key", "adaptive_budgeting", "dynamic_sync"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "This is all great distributed systems design. Now let me ask you something simpler. What if a single user just sends 1000 requests in 1 second from a single machine? Walk me through exactly what happens.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "single_node_burst" }
+    },
+    {
+      "role": "candidate",
+      "content": "So... 1000 requests in 1 second from one machine. They'd all hit... well, probably the same gateway node if the load balancer uses sticky sessions or IP hashing. The local counter would increment. Let me think — with the sliding window counter and a 1-second sync interval... actually, wait. If 1000 requests arrive within 1 second and we only sync to Redis every second, the local counter would count all 1000. But our sync hasn't happened yet, so we're comparing against the stale global count from the last sync. If the limit is 100/min, that's... hmm.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["sync_delay", "burst_handling"], "depth": "surface", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "So would those 1000 requests all go through?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "single_node_burst" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh... I think I see the issue. If the user is on the free tier with 100 requests per minute, and they blast 1000 requests in 1 second... if the local budget is 100/50 = 2 requests per node per minute, then the local check would catch it after 2 requests. But wait, that means legitimate users on a free tier who happen to hit the same node twice in a minute would get rate-limited. This is the problem with static budgets I mentioned. But if we're using the 'check local, validate global' approach... we'd let through up to some batch size before the global check kicks in. I think I need an immediate local enforcement layer that doesn't depend on the sync cycle at all.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["local_enforcement", "static_budget_problem", "immediate_checking"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right. So you've built this sophisticated distributed counting system but didn't think about the simplest case — a burst from one client. How would you fix this?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "local_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "You're right, I over-indexed on the distributed case. The fix is layered rate limiting. Layer 1: per-node, per-key token bucket that enforces an instantaneous rate limit. For 100/min, that's roughly 1.7 requests per second. If a burst exceeds this, reject immediately — no Redis needed. Layer 2: the distributed sliding window for global accuracy. Layer 1 catches the obvious abuse case locally and instantly. Layer 2 ensures the aggregate across all nodes stays within bounds. This is like having a bouncer at each door AND a room capacity counter.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["layered_rate_limiting", "token_bucket", "local_enforcement", "defense_in_depth"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good recovery. How do you communicate rate limit status back to the client?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Standard HTTP headers: X-RateLimit-Limit (the max), X-RateLimit-Remaining (how many left), X-RateLimit-Reset (epoch timestamp when the window resets). When rate-limited, return HTTP 429 Too Many Requests with a Retry-After header. The response body should include a clear error message and the retry time. For enterprise clients, we might also expose a separate endpoint to check their current usage without making an actual API call.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["http_headers", "rate_limit_headers", "429_status", "retry_after"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you test this system? It seems like distributed rate limiting would be hard to test.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "testing_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Testing is tricky. I'd do it in layers. Unit tests for the algorithms — test the sliding window counter logic, token bucket logic, boundary conditions. Integration tests: spin up 3-5 gateway nodes with a real Redis instance, send controlled traffic patterns and verify the aggregate counts are within acceptable bounds. Load testing: use a tool like Locust or Vegeta to generate realistic traffic patterns — bursty traffic, hot keys, slow ramps. Chaos testing: kill Redis mid-test, kill gateway nodes, simulate network partitions. And accuracy testing: send exactly N requests across M nodes and verify that roughly N (within the tolerance) were admitted.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["unit_testing", "integration_testing", "load_testing", "chaos_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Any final thoughts on the design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add observability: metrics on rate limit hits per tier, per key. Alert when a key consistently hits its limit — might indicate a misconfigured client or an attack. Also, a dashboard for the operations team showing global request rates and rate-limited percentages. And I'd think about DDoS protection as a separate concern — rate limiting handles legitimate abuse, but a true DDoS needs L3/L4 protection upstream of the application layer.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["observability", "monitoring", "ddos_protection", "alerting"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thanks. You showed excellent distributed systems knowledge, but the oversight on the basic single-machine burst case is concerning for a staff-level candidate. That should have been your first consideration, not an afterthought.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 58,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 5
+    },
+    "strengths": [
+      "Excellent distributed systems architecture — hybrid local/global counting is sophisticated",
+      "Strong Redis failure handling with graceful degradation",
+      "Good algorithm comparison with clear reasoning for choices"
+    ],
+    "weaknesses": [
+      "Missed the most basic case: a single user bursting requests from one machine",
+      "Over-engineered the distributed aspect before establishing local enforcement",
+      "At staff level, should instinctively start with simple cases before distributed complexity",
+      "Needed three prompts from interviewer to realize the gap in local burst handling"
+    ]
+  }
+}

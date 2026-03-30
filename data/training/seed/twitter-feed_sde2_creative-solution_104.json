@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "sde2",
+    "candidate_profile": "creative-solution",
+    "total_exchanges": 22,
+    "generation_id": "seed_104"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed. Users follow other users, and they see a timeline of recent posts from people they follow. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "How many users are we talking about? And how many people does a typical user follow? I want to understand the scale so I know what approach to take.",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["qps"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "100 million users, average user follows 200 people. Some celebrities have millions of followers. Average 2 posts per user per day. Feed should load quickly.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay so the tricky part is: when I open my feed, I need to see the latest posts from 200 people I follow, merged and sorted by time. The naive approach would be to go query each of those 200 people's posts and merge them — but that's 200 database queries per feed load, which seems terrible at scale. Let me think of something better...",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["fan_out"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right, that's the core challenge. What approach would you take?",
+      "annotation": { "action": "encourage", "phase": "high_level_design", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "What if each user has a mailbox — like an inbox — and when someone posts, we put a copy of that post into each of their followers' mailboxes? So if I follow you and you post something, your post gets dropped into my mailbox. When I open my feed, I just read from my own mailbox — it's already sorted by time because we insert in order. One database query instead of 200.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "feed_inbox"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's actually a well-known pattern called fan-out on write. You've basically derived it from first principles. Nice. What's the downside?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh, the celebrity problem! If someone has 10 million followers and they post, we'd need to write that post into 10 million mailboxes. That's a huge amount of writes for a single post. That could take a long time and a lot of resources. Hmm... what if we don't do the mailbox thing for celebrities? For users with a huge number of followers — say over 50,000 — we skip the mailbox distribution. Instead, when I open my feed, I read from my mailbox for normal accounts I follow, and separately fetch the latest posts from any celebrities I follow. Then merge the two lists. Most people follow maybe 5-10 celebrities, so that's only 5-10 extra queries.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "hybrid_fan_out", "celebrity_problem"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent — you've independently arrived at the hybrid fan-out approach that Twitter actually uses. Where would you store the mailboxes?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "The mailbox needs to be fast for reads since it's the feed. I'm thinking Redis — each user's mailbox is a sorted set where the score is the timestamp and the value is the post ID. Redis is in-memory so reads are super fast. We cap each mailbox at the latest 500 posts to keep memory bounded. When the user scrolls past 500, we fall back to the database. For the actual post content — the text, images, etc. — that's stored separately. The mailbox only stores post IDs to keep it lightweight.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "sorted_set", "data_separation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good instinct on storing only IDs. Where does the actual post content live?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a database that's good at lots of writes since we're handling 200 million posts per day — 100M users times 2 posts each. MySQL or PostgreSQL could work, but at this scale, maybe something like Cassandra? I know Cassandra is good at writes and can handle a lot of data. The table would be something like: partition key is user_id, clustering key is post_timestamp descending, and columns for post content, media URLs, like count, etc. That way fetching a user's recent posts is a single partition scan.",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["cassandra", "database_design", "write_throughput"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Reasonable. How does the distribution process work? When someone posts, how does it get to all the mailboxes?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "write_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a user posts, the post goes to the post database first. Then we need to notify a background job to distribute it. I'd use a message queue — like RabbitMQ or something similar. The post event goes into the queue. A pool of worker processes picks up the event, looks up the poster's follower list, and iterates through them, adding the post ID to each follower's Redis mailbox. For a user with 10,000 followers, the worker does 10,000 Redis ZADD operations. We could batch these — Redis has pipelining where you send multiple commands at once, which is much faster than one-by-one.",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["message_queue", "background_workers", "redis_pipelining"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good thinking about batching. What about the follower list — how and where is that stored?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "follower_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd have a followers table — maybe in MySQL — with two columns: followed_user_id and follower_user_id. Indexed both ways so we can quickly look up 'who follows user X' (for fan-out) and 'who does user X follow' (for the celebrity merge). For hot users, we could cache the follower list in Redis too. A set per user of their follower IDs. The trade-off is memory — a user with 10M followers would need a Redis set with 10M entries, each maybe 8 bytes, so 80MB. That's a lot for one key. Maybe we don't cache the really large lists and just read from the database for celebrities.",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["follower_storage", "mysql", "redis_caching", "memory_estimation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "When the user opens their feed, walk me through the exact data flow.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "read_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "User opens the app. The app calls GET /feed. The feed service does two things in parallel: first, reads the user's Redis mailbox — ZREVRANGE to get the top 20 post IDs sorted by timestamp. Second, for each celebrity the user follows, fetches their latest 5 posts from Cassandra. Then we merge these two lists by timestamp and take the top 20. Now we have 20 post IDs. We do a multi-get to fetch the full post content — either from Cassandra or from a post cache in Redis. We also batch-fetch the author profiles for display. Return the assembled feed to the client. Total: maybe 3-5 backend calls in parallel, each under 10ms from Redis. Total feed load should be under 50ms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_path", "parallel_fetching", "feed_assembly", "latency"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if Redis goes down and all the mailboxes are lost?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's bad — we lose all the pre-computed feeds. I think the fallback would be the naive approach: for each user requesting their feed, go query the posts table for each person they follow and merge the results. It's the 200-queries approach, which is slow, but at least the system still works. To rebuild the mailboxes, we could replay: for each active user, look up who they follow, fetch recent posts from those users, and repopulate the Redis sorted set. With 100 million users, that would take a while... maybe we prioritize active users first. And to prevent this from happening, we should use Redis Cluster with replication so losing one node doesn't lose everything.",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["cache_failure", "graceful_degradation", "redis_cluster"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle pagination? The user scrolls down to see older posts.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "pagination" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use the timestamp of the last post on the current page as a cursor. So the next request says 'give me posts older than this timestamp.' In Redis, that's ZREVRANGEBYSCORE with a max score of that timestamp. For the celebrity posts, we pass the same cursor to the Cassandra query. This way scrolling is consistent even if new posts arrive at the top — we won't see duplicates or skip posts. I think this is called cursor-based pagination?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cursor_pagination", "redis_sorted_set"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly right — cursor-based pagination. Any thoughts on how to handle deleted posts?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "post_deletion" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a user deletes a post, we mark it as deleted in the database — soft delete. But we also need to remove it from everyone's mailbox in Redis. That's the reverse of fan-out — we'd need to iterate through all followers and ZREM the post ID from each mailbox. For a popular user, that's a lot of Redis operations. Alternatively, we could just leave the post ID in the mailboxes and filter it out at read time — when assembling the feed, if a post ID points to a deleted post, we skip it and fetch one more to fill the gap. That's lazier but avoids the costly reverse fan-out.",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["soft_delete", "lazy_cleanup", "fan_out"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good trade-off thinking. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I want to be honest — I wasn't familiar with the standard fan-out patterns before this interview. I derived the mailbox approach by thinking about what would make the read path fast. I think in a real system, I'd also want to add: a notification system for mentions and likes, some kind of ranking beyond just chronological (maybe boosting posts with more engagement), and rate limiting on post creation to prevent spam. I also realize I should have done more capacity math upfront — like estimating the Redis memory needed for all the mailboxes.",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["ranking", "rate_limiting", "capacity_estimation", "self_awareness"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The fact that you derived fan-out on write independently is impressive. It shows strong first-principles thinking. Good interview, thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 60,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 4,
+      "capacity_estimation": 4,
+      "api_design": 5,
+      "database_design": 6,
+      "caching_strategy": 7,
+      "scalability": 6,
+      "failure_handling": 5,
+      "communication": 8
+    },
+    "strengths": [
+      "Independently derived fan-out on write and hybrid fan-out from first principles",
+      "Good intuition for Redis data structures — sorted sets for mailboxes",
+      "Honest about knowledge gaps while showing strong reasoning ability"
+    ],
+    "weaknesses": [
+      "No capacity estimation — didn't calculate Redis memory, QPS, or storage needs",
+      "Requirements gathering was minimal — one basic question about scale",
+      "Failure handling was reactive — only considered Redis failure when directly asked"
+    ]
+  }
+}

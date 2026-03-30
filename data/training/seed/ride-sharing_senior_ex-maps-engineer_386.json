@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "senior",
+    "candidate_profile": "ex-maps-engineer",
+    "total_exchanges": 22,
+    "generation_id": "seed_386"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing service like Uber or Lyft. Users request rides, we match them with nearby drivers, and handle the trip lifecycle. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I worked on Google Maps for three years, so I have a lot of thoughts on the geospatial and routing side. My first questions are actually about the matching and routing: what's the acceptable ETA accuracy? At Google Maps, we targeted under 10% error on ETA predictions — is that the same bar here? How real-time do driver locations need to be? And what's our coverage — dense urban only or also suburban/rural?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["eta_prediction", "geospatial", "location_accuracy", "coverage_area"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "ETA accuracy within 15% is acceptable. Driver locations updated every 4 seconds. Cover both urban and suburban. Scale: 1 million concurrent active rides, 500,000 available drivers, 50 cities.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me estimate the geospatial workload. 500K available drivers sending location updates every 4 seconds = 125K location updates per second. Each update needs to be indexed spatially so we can answer 'find drivers near this pickup point' queries. For ride requests: at 1M concurrent rides averaging 20 minutes each, that's about 50K new ride requests per minute, or ~833 requests per second. Each request triggers a nearest-driver search, ETA computation for the top candidates, and a matching decision. The ETA computation is the expensive part — let me explain why.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "geospatial_indexing", "eta_computation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Please explain the ETA computation challenge.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "eta_computation" }
+    },
+    {
+      "role": "candidate",
+      "content": "ETA computation is not just 'distance divided by speed'. At Google Maps, we learned this the hard way. A proper ETA needs: road network routing (find the actual path, not straight-line distance), real-time traffic conditions (congestion, accidents, road closures), historical traffic patterns (rush hour patterns, event-based congestion), and turn-by-turn penalties (left turns at unsignalized intersections take longer). For routing, the standard algorithm is A* on the road graph. But the road graph for 50 cities has maybe 50 million road segments — A* on the raw graph takes 100-500ms per query. Way too slow for 833 requests/sec where each request evaluates 5-10 candidate drivers. The solution: Contraction Hierarchies (CH). It's a preprocessing technique where you precompute 'shortcut' edges that skip over unimportant intermediate nodes. After preprocessing (takes a few hours), point-to-point queries take 0.1-1ms instead of 100-500ms. That's a 1000x speedup. With CH, we can compute ETAs for 10 candidate drivers in about 5ms — well within budget. The catch: CH assumes a static graph. For real-time traffic, we use a variant called Customizable Contraction Hierarchies (CCH) that separates the graph topology (precomputed) from edge weights (updatable in real-time from traffic data).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["routing_algorithms", "contraction_hierarchies", "a_star", "real_time_traffic", "road_graph"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you incorporate real-time traffic into the ETA?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "traffic_integration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multiple data sources, fused together. Source 1: our own drivers. 500K drivers sending GPS pings every 4 seconds is an incredible traffic probe dataset. For each road segment, we compute the current traversal speed from drivers who recently crossed it. A segment with 10 drivers averaging 15 mph when the speed limit is 45 mph tells us there's heavy congestion. Source 2: historical traffic patterns. For each road segment, we maintain speed profiles by time-of-day and day-of-week. Monday at 8:30 AM on I-280 averages 25 mph. This handles predictable congestion. Source 3: incident data. Accidents, road closures, construction from municipal feeds and driver reports. For the fusion: current probe data trumps historical when available (we have at least 3 recent probes on the segment). Historical fills in when probe data is sparse (suburban roads with few drivers). The ETA prediction model: a gradient-boosted tree that takes route-level features (total distance, number of traffic lights, number of highway segments) and segment-level features (current speed, historical speed, time of day) and predicts trip duration. At Google Maps, we also provided ETA confidence intervals: 'Estimated 23-28 minutes'. The interval width reflects route uncertainty — a route through congested downtown has wider intervals than an uncongested highway route. I'd implement the same here because riders want to know 'will I make my flight?' not just a point estimate.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["traffic_data_fusion", "probe_data", "historical_traffic", "eta_confidence_intervals", "speed_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great ETA depth. Now, how do you efficiently find the nearest available drivers for a rider?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "geospatial_indexing" }
+    },
+    {
+      "role": "candidate",
+      "content": "The naive approach — compare the rider's location against all 500K drivers — is O(N) per query and doesn't scale. We need a spatial index. Option 1: Geohash. Encode each driver's lat/lng as a geohash string (e.g., '9q8yyk'). Nearby locations share a common prefix. To find drivers near a point, compute the geohash of the pickup location and query for all drivers with matching prefixes. Problem: geohash cell boundaries create edge effects — two drivers across a cell boundary appear far apart in geohash space but may be 10 meters apart geographically. Fix: always query the 8 neighboring cells too. Option 2: S2 Geometry (what we used at Google). Divides the Earth's surface into hierarchical cells using a space-filling curve. Better than geohash because the cells are more uniform in size and the hierarchy allows multi-resolution queries. At resolution level 12, each S2 cell is about 3km x 3km. Maintain a mapping: S2_cell_id -> list of driver_ids. When a rider requests a ride, compute their S2 cell and the surrounding cells at the appropriate level, look up all drivers in those cells. This is O(1) per cell lookup — we check maybe 9-25 cells for a 5km radius search. Implementation: Redis with sorted sets. Key is the S2 cell ID, members are driver IDs with scores as timestamps. 500K drivers across maybe 100K active cells — the memory footprint is negligible.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geospatial_indexing", "geohash", "s2_geometry", "spatial_search", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the full ride request flow — from when the rider taps 'Request Ride' to when a driver accepts.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ride_matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step 1: Rider taps 'Request Ride'. The client sends pickup location, destination, and ride type to the Ride Service. Step 2: Ride Service calls the Driver Matching Service. The matcher queries the S2 spatial index for available drivers within a 5km radius (expandable to 10km if too few candidates). Returns maybe 10-30 candidates. Step 3: For each candidate, compute road-network ETA from driver to pickup point using the routing service with Contraction Hierarchies. This gives us actual drive time, not straight-line distance — critical because a driver 1km away across a river might be 15 minutes out. Step 4: Rank candidates by a matching score: weighted combination of ETA to pickup (lower is better), driver rating, trip direction alignment (does the driver's heading suggest they're already moving toward the rider?), and supply/demand balance (in oversupplied areas, match the closest driver; in undersupplied areas, consider future demand predictions). Step 5: Send the ride request to the top-ranked driver. Driver has 15 seconds to accept. If no response, cascade to driver #2. Step 6: Driver accepts. The ride is created, the driver's status changes to 'en route to pickup', and both rider and driver see the live route.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ride_matching", "spatial_search", "driver_ranking", "routing", "matching_algorithm"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the live location tracking work during the ride?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "live_tracking" }
+    },
+    {
+      "role": "candidate",
+      "content": "The driver's app sends GPS updates every 4 seconds. Each update goes to a Location Service which writes to the spatial index (for matching availability) and to a Ride Tracking Service (for the active ride). The rider's app subscribes to their ride's location stream via WebSocket. But raw GPS has issues: GPS accuracy is 5-10 meters in open sky but 50+ meters in urban canyons (tall buildings). So we do map matching — snap the raw GPS coordinate to the most likely road segment. This uses a Hidden Markov Model: the hidden states are road segments, observations are GPS points, transition probabilities are based on road connectivity and turn restrictions. At Google Maps, map matching was critical — without it, the blue dot would jump between parallel streets and appear to drive through buildings. After map matching, we also smooth the trajectory using a Kalman filter to remove GPS jitter. The rider sees a smooth, road-aligned car icon moving naturally, even though the raw GPS data is noisy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["live_tracking", "gps_accuracy", "map_matching", "hidden_markov_model", "kalman_filter"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about surge pricing. How would you implement dynamic pricing based on supply and demand?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing is fundamentally a geospatial demand prediction problem. Divide the city into hexagonal zones (H3 cells at resolution 7, about 5km across). For each zone, continuously track: current demand (ride requests in last 5 minutes), current supply (available drivers in the zone), and predicted demand (based on time of day, events, weather). The surge multiplier for a zone: if demand/supply ratio exceeds a threshold (say 1.5), start surging. The multiplier scales with the ratio — 2x demand means 1.5x price, 3x demand means 2.0x price, capped at 3x. But here's the geospatial nuance: surge shouldn't have sharp boundaries. If zone A is 2x surge and adjacent zone B is 1x, a rider standing on the border would see wildly different prices by moving 50 meters. Solution: smooth the surge field using spatial interpolation. Each rider's surge is a distance-weighted average of the surge values in their zone and neighboring zones. This creates a gradient rather than a cliff.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_pricing", "demand_prediction", "supply_demand", "spatial_interpolation", "h3_hexagons"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when the routing service is degraded — slow or returning errors?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "routing_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the routing service is slow, the entire matching pipeline stalls — that's the most critical dependency. Fallback layers: First, cache recent ETAs. For popular origin-destination pairs, cache the ETA with a 5-minute TTL. Many pickups happen from the same locations (airports, downtown offices). Cache hit rate could be 20-30%. Second, fall back to straight-line distance with a city-specific correction factor. In Manhattan, multiply straight-line distance by 1.4 (grid layout), in San Francisco multiply by 1.8 (hills and one-way streets). This gives rough ETAs within 30% accuracy — not great, but functional. Third, if routing is completely down, match purely on straight-line distance and skip the ETA display to the rider — show 'calculating...' instead. The match quality degrades but the system stays operational. At Google Maps, we had a similar fallback hierarchy. The principle: never let a supporting service failure prevent the core product from functioning.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["graceful_degradation", "eta_caching", "fallback_strategy", "distance_heuristic"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle GPS spoofing? Drivers faking their location to game the system.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "fraud_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "GPS spoofing detection is a map-matching problem in disguise. A spoofed location often violates physical constraints that real GPS doesn't. Detection signals: speed violations (driver appears to teleport — consecutive GPS points imply speeds above 200 mph), road network violations (location snaps to a road 500 meters away consistently — map matching confidence is very low), trajectory smoothness (real GPS has natural jitter; spoofed GPS is often unnaturally smooth or follows impossible paths), and sensor cross-validation (compare GPS location against cell tower triangulation and Wi-Fi positioning — if they disagree significantly, suspect spoofing). I'd run a spoofing classifier on driver trajectories using these features. If flagged, the system switches to a 'verified location only' mode where the driver must pass additional checks before being matched. For the ride-sharing context specifically: also check that the driver's route during a trip approximately follows the expected road path. Large deviations might indicate the driver is spoofing to claim a longer trip distance for higher fare.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gps_spoofing", "fraud_detection", "map_matching", "sensor_fusion", "trajectory_analysis"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running short. What infrastructure aspects would you strengthen?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The areas I glossed over: the payment system (fare calculation, payment processing, driver payouts), the database architecture for trip history and user profiles (sharding strategy, replication), and the real-time dispatch optimization — matching isn't just 'find nearest driver' at scale. It's a global optimization: given all pending requests and all available drivers, find the assignment that minimizes total wait time across all riders. This is a bipartite matching problem that should be solved holistically, not greedily per-request. Uber published a paper on this — their 'batched matching' approach collects requests over a 2-second window and solves the optimal assignment for the batch. I'd implement something similar. Also, I didn't discuss the map data pipeline — how we keep the road network, speed limits, and turn restrictions up to date. At Google, this was a team of 200+ people. For a ride-sharing company, you'd license map data from providers and augment with your own driver probe data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["global_optimization", "bipartite_matching", "batch_matching", "map_data_pipeline", "self_awareness"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Your geospatial and routing expertise is exceptional. The Contraction Hierarchies, map matching, and traffic integration depth was impressive. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 75,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 5,
+      "caching_strategy": 6,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional routing and ETA expertise — Contraction Hierarchies, traffic data fusion, confidence intervals",
+      "Deep geospatial knowledge — S2 geometry, map matching with HMM, GPS spoofing detection",
+      "Strong surge pricing design with spatial interpolation to avoid boundary effects"
+    ],
+    "weaknesses": [
+      "Database design for trip storage and user profiles was not discussed",
+      "Payment and fare calculation system was acknowledged as a gap",
+      "API design was implicit — no formal endpoint specification"
+    ]
+  }
+}

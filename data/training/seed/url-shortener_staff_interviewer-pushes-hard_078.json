@@ -1,0 +1,200 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "staff",
+    "candidate_profile": "interviewer-pushes-hard",
+    "total_exchanges": 24,
+    "generation_id": "seed_078"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service like bit.ly. Go ahead — what do you need to know?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Let me clarify the scope. What's our expected traffic volume — daily URL creation and read QPS? Should we support custom aliases? What's the expected URL lifespan? And any geographic distribution requirements?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "custom_aliases", "url_expiration", "geographic_distribution"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "200 million new URLs per day. 200:1 read-to-write ratio. Custom aliases supported. Default TTL 3 years. Multi-region. But why those specific questions? What would change if I said the read-to-write ratio was 10:1 instead?",
+      "annotation": { "action": "challenge", "phase": "requirements", "target_concept": "read_write_ratio" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question. At 10:1, the system becomes much more write-heavy relative to reads. That changes our caching strategy dramatically — with 200:1, we invest heavily in read caches because that's where the load is. At 10:1, caching still helps but we'd need to worry more about write throughput, database sharding for writes, and potentially write-behind caches. The storage layer architecture fundamentally shifts.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_write_ratio", "redis_caching", "sharding_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Okay but why would you cache at all? Convince me caching is necessary here.",
+      "annotation": { "action": "challenge", "phase": "requirements", "target_concept": "redis_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 200:1 read ratio, we're looking at roughly 460,000 reads per second. Even with database read replicas, sustaining that on disk-backed storage alone would require an enormous fleet. A Redis cluster serving from memory can handle millions of ops per second with sub-millisecond latency. The cost of a few hundred GB of RAM is far less than the database fleet we'd need otherwise. Plus the p99 latency from cache is 1-2ms versus 5-10ms from database.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "qps_calculation", "latency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What breaks at 100x that scale? 46 million reads per second.",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "scalability" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 46M reads per second, Redis itself becomes the bottleneck. A single Redis cluster tops out around 1-2M ops/sec per node. We'd need 30-50 Redis nodes just for reads. At that point, I'd push redirects to the CDN edge — the most popular URLs get resolved at the edge without hitting our infrastructure at all. We'd use CDN cache headers with short TTLs, maybe 60 seconds, and the sheer volume means even short TTLs get high hit rates. The architecture shifts from app-server-centric to edge-centric.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_redirect", "redis_caching", "scalability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "But why CDN? Why not just more Redis nodes? What's the actual argument against horizontal scaling of the cache layer?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "cdn_redirect" }
+    },
+    {
+      "role": "candidate",
+      "content": "You could add more Redis nodes, but there are real costs. First, network bandwidth — 46M requests per second through our load balancers and network switches is a massive internal traffic problem. CDN moves that traffic to the edge, closer to users, reducing both latency and backbone bandwidth. Second, operational complexity — managing a 50-node Redis cluster with consistent hashing, failover, and monitoring is significant. CDN is a managed service. Third, cost — at that scale, CDN bandwidth is actually cheaper per request than running our own cache fleet. But the tradeoff is we lose real-time analytics on cached requests and have less control over invalidation timing.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_redirect", "redis_caching", "load_balancing", "monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fine. Walk me through the high-level architecture. And don't just list components — tell me why each one is there.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Alright. Starting from the client: DNS resolves to a CDN, which handles the hottest redirects at the edge — that's there because at our scale, we can't afford to route every request to origin. Cache miss goes to a global load balancer, which routes to the nearest region — multi-region because we specified geographic distribution and it reduces latency for a global user base. Each region has stateless application servers behind a regional LB — stateless so we can scale horizontally without session affinity. App servers check a regional Redis cache — regional to avoid cross-region latency. Cache miss goes to the database. For writes, the app server generates a unique short code, writes to the primary database, and invalidates relevant cache entries. Async analytics events go to Kafka for click tracking without blocking the redirect path.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_redirect", "load_balancing", "redis_caching", "kafka", "api_design", "geographic_distribution"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You said 'stateless so we can scale horizontally.' But what's the alternative? When would you choose stateful servers?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "scalability" }
+    },
+    {
+      "role": "candidate",
+      "content": "Stateful servers make sense when you need connection affinity or in-memory state that's expensive to reconstruct. WebSocket-based services like chat systems use stateful servers because a user's connection is bound to a specific server. Another example is in-memory caching of user sessions for latency-sensitive applications where even a Redis hop is too slow. For URL shortening, there's zero per-user state in the redirect flow — it's a pure lookup. Stateless is the obvious choice here. The only state is the URL mapping, which lives in the database and cache layers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scalability"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about ID generation. How do you generate the short codes? And before you answer — think carefully, because I'm going to challenge whatever you say.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "base62_encoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Ha, fair enough. I'd use a range-based ID allocation system. A central coordination service — could be ZooKeeper or even a simple database table — hands out ranges of 100K sequential IDs to each app server. The app server generates IDs locally from its range, applies a bijective scrambling function to avoid sequential predictability, then base62 encodes the result to get a 7-character code. This gives us high write throughput with no per-request coordination, collision-free generation, and non-enumerable codes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["base62_encoding", "collision_handling", "snowflake_id"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when ZooKeeper is down? Your entire write path stops?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "single_point_of_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "No — that's why ranges are 100K IDs. Each app server has a large local buffer. At 2,300 writes per second across, say, 10 servers, each server does about 230 writes/sec. A 100K range lasts about 7 minutes. ZooKeeper runs as a 5-node ensemble with leader election, so it can tolerate 2 node failures. Even in the unlikely event the whole ZooKeeper cluster is down, we have 7 minutes of buffer. If it's still down after that, we can fall back to random UUID-based code generation with collision detection — slightly slower but zero dependency on coordination.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["single_point_of_failure", "collision_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Why not just use UUIDs from the start then? If that's your fallback, why not your primary approach?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "base62_encoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two reasons. First, URL length. A UUID is 128 bits — base62 encoded that's 22 characters. Our range-based approach gives us 7 characters. Short URLs should be short — every character matters for usability, especially on mobile and in social media where character limits exist. Second, collision detection with UUIDs requires a database read before every write to check uniqueness, or dealing with retry logic on duplicate key errors. At 2,300 writes per second, that's meaningful overhead. The range approach is collision-free by construction.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["base62_encoding", "collision_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the database layer? And I want to hear about what happens when you shard — specifically the pain points, not the happy path.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use PostgreSQL sharded by hash of the short code. The pain points are real. First, cross-shard queries — if someone wants to list all their shortened URLs, that data is scattered across shards. We'd need a separate index table mapping user_id to their short codes, which is another consistency headache. Second, shard rebalancing — when we need to add capacity, consistent hashing helps but we still need to migrate data while serving live traffic. That means dual-reads during migration and careful coordination. Third, schema migrations across 64 shards are operationally brutal — you need rolling deployments with backward-compatible schemas. Fourth, hotspots — if one viral URL is on shard 17, that shard takes disproportionate read load even with caching.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_strategy", "consistent_hashing", "database_choice", "database_schema"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the hotspot problem specifically? A single URL goes viral — 10 million clicks in an hour.",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multiple layers handle this. The CDN absorbs most of it — a viral URL gets cached at every edge node worldwide. Behind the CDN, our Redis cache absorbs the remainder. But the interesting edge case is cache stampede — when the CDN TTL expires, hundreds of edge nodes simultaneously request from origin. For this, I'd implement request coalescing at the app server — if a cache miss is already being resolved, subsequent requests wait for the first one instead of all hitting the database. Some call this 'single-flight' pattern. The database shard itself is never touched more than once per cache miss cycle.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_redirect", "redis_caching", "cache_failure", "scalability"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's cache stampede, but I asked about hotspots. They're different problems. The database shard holding this URL also holds millions of other URLs. What if the metadata queries for this one URL create lock contention?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "You're right, I conflated those. For actual database-level hotspots — the read load is handled by cache, so that's fine. The concern is writes: analytics counter updates for the viral URL. If we're doing synchronous counter increments, yes, row-level locking on the click counter causes contention on that shard. The fix is to never update counters synchronously. Click events go to Kafka, and the analytics consumer batches updates — increment by 1,000 instead of 1 at a time. The URL mapping row itself is write-once, read-many, so there's no lock contention on the core redirect data. The hotspot is purely an analytics problem, and we've decoupled that.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_strategy", "kafka", "analytics_pipeline"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Better. Now — multi-region. You mentioned it earlier. What's the consistency model when someone creates a URL in US-East and someone tries to access it from EU-West 50 milliseconds later?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "geographic_distribution" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a real problem. With async replication across regions, there's a window where the URL exists in US-East but not yet in EU-West. At 50ms, cross-Atlantic replication lag is tight — it might or might not have arrived. Options: one, designate a single write region and replicate globally — simplest but creates write latency for non-primary regions. Two, use synchronous cross-region writes — guarantees consistency but adds 100-150ms to every write. Three — and this is what I'd actually do — write to the local region and also write-through to a global metadata store like DynamoDB Global Tables, which replicates in under a second. For the rare case where a redirect happens before replication completes, the app server in EU-West can fall back to querying the US-East region directly. It's an extra 70ms for that one request, but it's correct.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geographic_distribution", "read_replicas", "consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Why DynamoDB Global Tables specifically? What's wrong with just having your Postgres replicate cross-region?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "Honestly, Postgres cross-region replication would work too. The reason I mentioned DynamoDB Global Tables is the conflict resolution — it handles last-writer-wins automatically for multi-region writes. With Postgres, cross-region async replication works for a single-writer topology, but if we want multi-region writes, we'd need to handle conflicts ourselves or use something like BDR (Bi-Directional Replication), which is complex. For this specific workload — where URLs are write-once and immutable — conflict resolution barely matters, so you're right, Postgres streaming replication across regions is probably simpler and avoids adding another technology to the stack. I'd keep it as Postgres.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "geographic_distribution", "consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're nearing the end. You've held up well under pressure. Anything you'd add that we haven't covered?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. Abuse prevention — rate limiting on URL creation, plus scanning destination URLs against known malware/phishing databases before creating the short link. Observability — distributed tracing across the redirect path, dashboards on cache hit rates, replication lag, and per-shard load. An automated URL cleanup job that handles TTL expiration efficiently — probably a background scanner partitioned by creation date rather than scanning the whole table. And finally, a URL preview feature for safety — letting users see where a short URL goes before clicking.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "monitoring", "url_expiration"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. You clearly know this space well. I pushed hard on every answer and you adapted well each time. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 70,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 6
+    },
+    "strengths": [
+      "Defended every design decision under intense pressure with concrete reasoning",
+      "Excellent understanding of multi-region consistency tradeoffs",
+      "Willing to revise positions when challenged — changed DynamoDB to Postgres when the simpler solution was pointed out"
+    ],
+    "weaknesses": [
+      "Initially conflated cache stampede with database hotspots — needed correction",
+      "Communication became more defensive as the interview progressed, less structured",
+      "Didn't proactively address failure scenarios — only responded when directly challenged"
+    ]
+  }
+}

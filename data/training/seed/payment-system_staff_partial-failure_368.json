@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "staff",
+    "candidate_profile": "partial-failure",
+    "total_exchanges": 22,
+    "generation_id": "seed_368"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a payment processing system. I want to focus on partial failure scenarios — what happens when things go wrong mid-transaction. First, give me the basic flow for processing a payment.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "payment_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "A payment goes through several steps: authorization, capture, and settlement. Authorization checks if the customer has funds and puts a hold. Capture actually moves the money. Settlement is the batch process where funds transfer between banks. For an e-commerce flow: (1) user submits order, (2) our service calls the payment gateway to authorize, (3) on success, we create the order and mark it as 'payment authorized', (4) upon fulfillment, we send a capture request to actually charge, (5) nightly settlement batches finalize everything.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payment_authorization", "capture", "settlement", "payment_gateway"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now here's the scenario: you've successfully authorized the charge. You send the capture request to the payment gateway. Your server crashes — process dies, machine restarts — before you receive the response. Did the capture happen?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "partial_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "We don't know. That's the fundamental problem. The capture request left our server and was received by the payment gateway. The gateway may have processed it successfully, returned a 200, but our server was already dead and never got the response. Or the gateway might have rejected it, or the request might never have arrived due to the crash happening before the TCP packet was fully sent. We're in an indeterminate state — the capture either happened or it didn't, and we have no record of the outcome.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["indeterminate_state", "partial_failure", "network_uncertainty"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly. How do you design the system so you can recover from this state without double-charging the customer?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "idempotency" }
+    },
+    {
+      "role": "candidate",
+      "content": "The key is idempotency. Every capture request must include a unique idempotency key — typically we generate a UUID and store it in our database before sending the request. If our server crashes and restarts, the recovery process finds the pending capture (stored in DB with state 'capture_sent'), and retries the capture using the same idempotency key. The payment gateway, seeing the same idempotency key, will either: (a) if it already processed the capture, return the original result without charging again, or (b) if it never received the original, process it for the first time. Either way, the customer is charged at most once.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency", "idempotency_key", "recovery_process", "at_most_once"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if the payment gateway doesn't support idempotency keys? Not all gateways do.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "gateway_limitations" }
+    },
+    {
+      "role": "candidate",
+      "content": "Then we need to check before retrying. Before re-sending the capture, we call the gateway's query/status API with the authorization ID to check if a capture was already processed. If the status shows 'captured', we record it and move on. If it shows 'authorized but not captured', we send the capture. If the status API is also unreliable — which happens with some older gateways — we need a manual reconciliation process. We'd flag the transaction as 'capture_uncertain' and have an automated job that periodically queries the gateway for uncertain transactions and resolves them. As a last resort, a human reviews it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["status_query", "reconciliation", "manual_resolution", "uncertain_state"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's look at the state machine for a payment transaction. What states does it go through, and what transitions are valid?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "state_machine" }
+    },
+    {
+      "role": "candidate",
+      "content": "The states are: CREATED (order placed, no payment action yet), AUTH_PENDING (authorization request sent), AUTHORIZED (hold placed on funds), AUTH_FAILED (authorization declined), CAPTURE_PENDING (capture request sent), CAPTURED (funds charged), CAPTURE_FAILED (capture declined — rare, maybe hold expired), REFUND_PENDING, REFUNDED, and SETTLED. The critical insight is CAPTURE_PENDING — this is the dangerous state. We must persist this state BEFORE sending the capture request to the gateway. That way, even if we crash, the recovery process knows 'I was in the middle of capturing' and can check/retry. If we sent the request and crashed before persisting, we'd have no record of the attempt.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["state_machine", "write_ahead", "capture_pending", "recovery_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What database guarantees do you need for the state machine transitions? Can you use an eventually consistent store?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "database_consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Absolutely not for the payment state machine. This needs strong consistency — specifically, serializable or at least read-committed isolation. I'd use PostgreSQL with transactions. The state transition — for example, moving from AUTHORIZED to CAPTURE_PENDING — must be atomic and durable. We use an optimistic locking pattern: UPDATE payments SET state = 'CAPTURE_PENDING', version = version + 1 WHERE id = ? AND state = 'AUTHORIZED' AND version = ?. If another process already moved the state, the WHERE clause won't match, the update affects 0 rows, and we know to bail out. This prevents two processes from concurrently attempting to capture the same payment.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["strong_consistency", "optimistic_locking", "serializable_isolation", "postgresql"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now let's make it worse. Your database writes the state to CAPTURE_PENDING, your app sends the capture to the gateway, the gateway processes it, but your database goes down before you can update the state to CAPTURED. Now what?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "db_failure_during_capture" }
+    },
+    {
+      "role": "candidate",
+      "content": "The payment is captured at the gateway, but our database still shows CAPTURE_PENDING. When the database recovers, the recovery process sees the CAPTURE_PENDING state and tries to resolve it — it queries the gateway and discovers the capture already succeeded. It then updates the state to CAPTURED. But there's a window where our system and the gateway disagree. During this window, if a customer checks their order status, they might see 'processing' even though their card was already charged. We should show a user-friendly message like 'Payment is being processed' rather than a definitive 'Not charged.' And we absolutely must not allow a re-attempt of the payment during this window.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["recovery_process", "state_reconciliation", "user_experience", "duplicate_prevention"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if the database is down for hours? The authorization hold might expire. What happens then?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "auth_hold_expiration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Authorization holds typically expire in 5-7 days for most card networks, but some can be as short as 24 hours. If our database is down for hours, the hold is still valid — we have time. But if we're talking about a capture that was already processed at the gateway, the funds are captured regardless of the hold. The real risk is for payments that are still in AUTH_PENDING or AUTHORIZED state. If our system was down long enough that the hold expired, we'd need to re-authorize. But the customer's available balance might have changed — the re-auth could fail. In this case, we'd need to notify the customer that their payment needs to be resubmitted. We should have a TTL on authorization holds in our system that's shorter than the actual hold period — say 24 hours — so we proactively re-authorize before the real expiration.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["auth_hold_expiration", "re_authorization", "ttl_management", "proactive_refresh"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the outbox pattern. How would you use it to make the payment state transitions more reliable?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "outbox_pattern" }
+    },
+    {
+      "role": "candidate",
+      "content": "The outbox pattern solves the dual-write problem between our database and the payment gateway. Instead of updating the DB state and then calling the gateway as separate steps, we write both the state transition and a 'pending action' record to the database in a single transaction. For example: BEGIN; UPDATE payment SET state='CAPTURE_PENDING'; INSERT INTO outbox (payment_id, action, payload) VALUES (?, 'CAPTURE', ?); COMMIT. A separate relay process polls the outbox table, sends the capture request to the gateway, and on success, removes the outbox entry and updates the payment state. If the relay crashes, the outbox entry persists and gets retried. No state can be lost because everything starts with a durable database write.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["outbox_pattern", "dual_write", "transactional_outbox", "relay_process"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the settlement side? Your daily reconciliation finds discrepancies. How does that work?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "reconciliation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Daily reconciliation is the safety net. We download the settlement file from the payment gateway — it lists every capture and refund processed that day. We compare it against our internal records. There are four possible outcomes for each transaction: (1) both agree — captured on both sides, great. (2) We say captured, gateway says not captured — we charged in our records but the money didn't move. Need to investigate: did the capture fail silently? (3) Gateway says captured, we say not captured — money moved but we didn't record it. This is the CAPTURE_PENDING scenario we discussed. (4) Amount mismatches — could be a currency conversion issue or a partial capture. Each discrepancy gets classified and routed: auto-resolvable ones (like case 3) get fixed automatically, others go to a human review queue.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["reconciliation", "settlement_file", "discrepancy_classification", "auto_resolution"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the case where you need to refund a customer, but your system is in an uncertain state? The customer calls support and says they were double-charged.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "refund_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "First, check the gateway's records via their API — what does the gateway say actually happened? If there are two captures for the same order, issue a refund for the duplicate immediately. Don't wait for reconciliation. For the support workflow: give the support agent a tool that shows both our internal state and the gateway state side by side. The agent should be able to initiate a refund with a reason code 'duplicate_charge'. This refund also goes through the outbox pattern for reliability. For proactive prevention: run a near-real-time duplicate detection job that catches potential double-charges within minutes and auto-flags them for review. Better to refund proactively than wait for an angry customer call.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["refund_handling", "duplicate_detection", "support_tooling", "proactive_refund"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last question. If you could only implement one protection mechanism against partial failures in this payment system, what would it be?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "critical_protection" }
+    },
+    {
+      "role": "candidate",
+      "content": "The transactional outbox with idempotency keys. It's the single mechanism that addresses the root cause of most partial failure problems: the dual-write between our database and an external system. Every interaction with the payment gateway goes through the outbox, every request carries an idempotency key, and the relay process retries until it gets a definitive answer. With this in place, you can crash at any point in the flow and recover to a correct state. Without it, you're patching individual failure scenarios one by one, and you'll always miss edge cases.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["outbox_pattern", "idempotency", "crash_recovery", "root_cause"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent answer. Strong interview overall — you showed deep understanding of the failure modes in payment systems and practical recovery strategies. The outbox pattern discussion was particularly well done. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 78,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 5,
+      "api_design": 8,
+      "database_design": 9,
+      "caching_strategy": 5,
+      "scalability": 7,
+      "failure_handling": 10,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional understanding of payment state machine and crash recovery semantics",
+      "Strong explanation of the transactional outbox pattern with concrete SQL examples",
+      "Excellent coverage of idempotency and its role in preventing double-charges"
+    ],
+    "weaknesses": [
+      "No capacity estimation — didn't discuss transaction throughput or database sizing",
+      "Caching strategy was not addressed — hot path optimization was missing",
+      "Didn't discuss multi-gateway failover or provider redundancy"
+    ]
+  }
+}

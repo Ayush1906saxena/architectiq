@@ -1,0 +1,142 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "staff",
+    "candidate_profile": "textbook_no_experience",
+    "total_exchanges": 22,
+    "generation_id": "seed_531"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a real-time messaging system at WhatsApp scale. At staff level, I expect you to drive the conversation with production-grade depth.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll structure this systematically. First, requirements: DAU, concurrent connections, message throughput, group size limits, encryption model, and delivery guarantee semantics. Then I'll present the architecture, do capacity estimation, and discuss failure handling.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["structured_approach", "requirements_list", "capacity_estimation", "failure_handling"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "200M DAU, 20M concurrent connections, 500K messages/sec, max 1000-member groups, E2E encryption required, at-least-once delivery. Go.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "The transport layer uses WebSockets for full-duplex bidirectional communication. The alternative protocols — Server-Sent Events (unidirectional, insufficient for chat) and Long Polling (higher latency, more connection overhead) — are inferior for this use case. MQTT is another option, designed for IoT with QoS levels, but WebSockets are more widely supported in web and mobile clients. The architecture follows a gateway pattern with a message bus. WebSocket Gateway servers (stateful, holding connections), a Message Router for delivery orchestration, a Persistence Layer for durable storage, a Notification Service for offline delivery, and a Presence Service for online status.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["websockets", "sse", "long_polling", "mqtt", "protocol_comparison", "gateway_pattern", "message_router", "persistence"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Textbook protocol comparison. Now give me something production-grade: you're running 200 gateway servers with 100K connections each. A gateway crashes. What happens to the 100K users on it?",
+      "annotation": { "action": "failure_probe", "phase": "high_level_design", "target_concept": "gateway_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The clients detect the broken WebSocket and reconnect. The load balancer routes them to healthy gateways. The connection registry in Redis — mapping user_id to gateway_id — has stale entries for the dead gateway. These entries have a TTL and expire within, say, 30 seconds. New connections register fresh entries. Messages sent during the disconnection are persisted in the message store and delivered via the sync protocol on reconnect.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["automatic_reconnection", "connection_registry", "ttl_expiry", "message_persistence", "sync_on_reconnect"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good theoretical answer. Now the real production question: during those 30 seconds of stale registry entries, incoming messages for those 100K users are being routed to the dead gateway. What happens to them?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "message_loss_during_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The Message Router tries to deliver to the dead gateway, which fails. So... we'd need a retry mechanism? Or the router detects the connection failure and falls back to storing the message for later delivery? Actually, I'm not sure of the exact mechanism. In a textbook design, the message is persisted first and the real-time delivery is best-effort. So even if delivery fails, the message isn't lost — it's in the store and will be synced on reconnect.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["retry", "persist_first", "best_effort_delivery"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right — write-ahead persistence means the message is safe in storage regardless of delivery success. But in practice, the router needs to handle the failed delivery gracefully: detect the dead gateway (connection refused), update or invalidate the registry entry proactively rather than waiting for TTL, and mark the user as 'connection uncertain' to trigger push notification fallback. These are production details. Let's move to E2E encryption.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "e2e_encryption" }
+    },
+    {
+      "role": "candidate",
+      "content": "E2E encryption uses the Signal Protocol for 1:1 chats. Key components: X3DH (Extended Triple Diffie-Hellman) for initial key agreement — Alice and Bob derive a shared secret using their identity keys and ephemeral pre-keys. The Double Ratchet algorithm provides forward secrecy and break-in recovery — each message uses a unique encryption key derived from a continuously advancing ratchet. The server stores only ciphertext and pre-key bundles. For groups, the Sender Keys protocol: each member generates a sender key, distributes it to all group members via encrypted 1:1 channels. Messages are encrypted once with the sender key. On member removal, the sender key is rotated — the member generates a new key and distributes to N-1 members.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["signal_protocol", "x3dh", "double_ratchet", "forward_secrecy", "break_in_recovery", "sender_keys", "key_rotation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Clean protocol description. Now the production question: a user has 500 unread messages across 30 conversations, all E2E encrypted. They open the app on a new phone. How does the first sync work? They don't have any keys on this device.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "multi_device_sync" }
+    },
+    {
+      "role": "candidate",
+      "content": "New device, no keys... that's the multi-device problem. The new device generates a new identity key pair and registers new pre-keys with the server. But it can't decrypt messages encrypted for the old device's keys. Options: the user could transfer keys from the old device (QR code or backup). Or we could re-encrypt messages from the server... but the server can't decrypt them because E2E encryption. So... the new device would only receive messages sent after it registers? Previous messages would need to be forwarded from the old device? I'm not confident in the exact production implementation here.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["multi_device", "new_identity_key", "key_transfer", "message_re_encryption_impossible", "forward_from_old_device"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The standard approach: encrypted message backup (to cloud storage, encrypted with a user-chosen passphrase or a key stored in their platform account's secure enclave). The new device downloads the backup, decrypts with the passphrase, and has the full history. WhatsApp and Signal both offer this. Let's talk about message ordering.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "message_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each conversation needs a strict total order. A per-conversation sequence number assigned by a centralized counter guarantees this. Implementation: when a message arrives at the Message Router, it calls a Sequence Service that returns the next number for that conversation. The number is stored with the message and used by clients for display ordering. The Sequence Service can be Redis INCR — one key per conversation. Per-conversation rate is low (even busy conversations rarely exceed 10 msgs/sec), so a single Redis instance handles millions of conversations. For fault tolerance, use a Redis cluster with replication and automatic failover.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["per_conversation_sequence", "centralized_counter", "redis_incr", "low_per_conversation_rate", "redis_cluster", "failover"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The Sequence Service goes down for 10 seconds. How do you handle message ordering during the outage?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "sequence_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the Sequence Service is unavailable... we could fall back to timestamps? They're not perfectly ordered due to clock skew, but for a 10-second window, the skew is probably within a few milliseconds — close enough that users wouldn't notice. Alternatively, we could buffer messages until the Sequence Service recovers, but that adds latency. I think the timestamp fallback is pragmatic — accept slightly imperfect ordering for a brief window rather than delaying messages.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["timestamp_fallback", "clock_skew", "message_buffering", "pragmatic_tradeoff"], "depth": "surface", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "A practical answer, but a staff engineer should have a better solution. For example: each Message Router could pre-allocate sequence number ranges from the Sequence Service (like getting a batch of 1000 numbers). If the service goes down, routers continue assigning from their allocated range. When the service recovers, they request new ranges. No fallback to timestamps needed. Let's move on. How do you handle presence at 200M DAU?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "presence" }
+    },
+    {
+      "role": "candidate",
+      "content": "Presence tracks who's online. Each user's online/offline status and last-seen timestamp. Storage: Redis with a key per user and a TTL. The gateway sends a heartbeat every 30 seconds that refreshes the TTL. If the heartbeat stops (user closes the app), the key expires and the user is shown as offline. For querying: when a user opens a chat, the client queries the other user's presence. We can batch these queries — 'give me the presence of these 50 contacts.' The push-based alternative — notifying all contacts when a user's status changes — has O(contacts × status_changes) fan-out which is expensive. Pull-based (lazy) presence is more efficient at our scale.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["heartbeat_ttl", "lazy_presence", "pull_vs_push", "batch_queries", "fan_out_avoidance"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Read receipts as persistent state (stored with messages), typing indicators as ephemeral fire-and-forget signals over WebSocket. File sharing via S3 with client-side E2E encryption. And message search — with E2E encryption, server-side search is impossible, so search must be local on the client's encrypted database. This is a UX limitation of E2E encryption that's worth acknowledging to stakeholders.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["read_receipts", "typing_indicators", "e2e_file_encryption", "local_search", "ux_limitation_transparency"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. You have strong theoretical foundations — protocol comparisons, Signal Protocol, presence design. But the production failure scenarios consistently exposed gaps: gateway message loss handling, multi-device key management, and sequence number fault tolerance. The gap between textbook knowledge and operational experience is clear. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 55,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 5,
+      "api_design": 5,
+      "database_design": 6,
+      "caching_strategy": 6,
+      "scalability": 6,
+      "failure_handling": 4,
+      "communication": 7
+    },
+    "strengths": [
+      "Thorough protocol comparison showing breadth of knowledge (WebSocket, SSE, Long Polling, MQTT)",
+      "Clean Signal Protocol description with X3DH, Double Ratchet, and Sender Keys",
+      "Good lazy presence design with pull-based efficiency reasoning"
+    ],
+    "weaknesses": [
+      "Every production failure scenario required intervention — gateway message loss, multi-device sync, and sequence outage all got uncertain answers",
+      "Multi-device E2E encryption was a significant gap — didn't know about encrypted cloud backups",
+      "Sequence number fault tolerance needed the interviewer to suggest range pre-allocation",
+      "Gateway failure answer was correct but didn't address the proactive registry invalidation problem until prompted",
+      "No capacity estimation for storage, bandwidth, or server fleet sizing"
+    ]
+  }
+}

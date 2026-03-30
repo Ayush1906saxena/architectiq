@@ -1,0 +1,99 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "senior",
+    "candidate_profile": "deep-encryption",
+    "total_exchanges": 14,
+    "generation_id": "seed_405"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We've designed a chat system. Now let's go deep on end-to-end encryption. Start with the initial key exchange — how do two users who've never communicated establish a shared secret?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "key_agreement" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use the Extended Triple Diffie-Hellman protocol (X3DH), which Signal developed and WhatsApp, Google Messages, and others have adopted. The problem X3DH solves: two users need to establish a shared secret even when one of them is offline. Here's how it works. Each user generates three key pairs at registration time. An identity key (IK): a long-term Curve25519 key pair that represents the user's cryptographic identity — this never changes. A signed prekey (SPK): a medium-term key pair, rotated every 1-4 weeks, signed with the identity key to prove authenticity. A set of one-time prekeys (OPKs): ephemeral key pairs (say 100 of them) uploaded to the server. Each is used exactly once and then deleted. When Alice wants to message Bob for the first time: she downloads Bob's prekey bundle from the server (Bob's IK, SPK, and one OPK). She generates her own ephemeral key pair (EK). She performs four Diffie-Hellman computations: DH(Alice_IK, Bob_SPK), DH(Alice_EK, Bob_IK), DH(Alice_EK, Bob_SPK), and DH(Alice_EK, Bob_OPK). The four DH outputs are concatenated and passed through a KDF (HKDF-SHA-256) to derive the initial shared secret. Alice sends her first message encrypted with this secret, along with her IK, EK, and which OPK she used. Bob computes the same four DH values from his private keys and Alice's public keys, derives the same shared secret, and decrypts the message. The elegance: Bob doesn't need to be online — Alice uses his prekeys from the server. The one-time prekey provides forward secrecy against future compromise of the signed prekey. After this initial exchange, both parties transition to the Double Ratchet for ongoing messages.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["key_agreement", "x3dh_protocol", "identity_key", "signed_prekey", "one_time_prekeys", "diffie_hellman", "forward_secrecy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Explain the Double Ratchet — how does it provide forward secrecy for each message?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "double_ratchet" }
+    },
+    {
+      "role": "candidate",
+      "content": "The Double Ratchet combines two ratcheting mechanisms to ensure that compromising a single message key doesn't compromise past or future messages. The first ratchet is the DH ratchet (asymmetric). Every time the conversation turn switches (Alice sends, then Bob replies), the replying party generates a new ephemeral DH key pair and includes the public key in their message. Both parties compute a new DH shared secret using the new key and the other party's latest key. This ratchet provides 'future secrecy' — if an attacker compromises the current state, they lose access once the next DH ratchet step occurs because new key material is introduced. The second ratchet is the symmetric ratchet (hash chain). Between DH ratchet steps — say Alice sends three messages before Bob replies — each message key is derived from the previous one using a KDF chain: chain_key_n+1 = KDF(chain_key_n, 'chain'), message_key_n = KDF(chain_key_n, 'message'). Each message key is used exactly once and immediately deleted. This provides 'forward secrecy' — even if an attacker compromises a current chain key, they can derive future message keys but not past ones (the KDF is irreversible). The combination: DH ratchet steps provide post-compromise security (recovering from key compromise), while the symmetric ratchet provides forward secrecy between DH steps. In practice, for a flowing conversation where both parties alternate messages, the DH ratchet advances with every message, so each message has a unique key derived from fresh DH material. For burst messages (one party sends many in a row), the symmetric ratchet advances for each message within the burst.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["double_ratchet", "dh_ratchet", "symmetric_ratchet", "forward_secrecy", "post_compromise_security", "kdf_chain", "message_key_deletion"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned prekey bundles stored on the server. What happens when a user runs out of one-time prekeys?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "prekey_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a user's one-time prekeys on the server are exhausted, the X3DH protocol still works — it just falls back to three DH computations instead of four (skipping the DH involving the OPK). The security degradation: without the one-time prekey, if both the identity key and signed prekey are compromised, an attacker could decrypt the initial message of a new conversation. With an OPK, even that scenario is protected because the OPK adds unique key material per session. To minimize this risk: the client should monitor its prekey count on the server. The protocol includes a mechanism for this — when the server returns a prekey bundle to an initiator, it also notifies the prekey owner's next online session of the consumption. The client then replenishes by uploading new OPKs. I'd implement a replenishment threshold: when the server-side OPK count drops below 25, the client generates and uploads 75 new OPKs on its next connection — bringing the total back to 100. For users who go offline for extended periods (weeks), the server might exhaust all OPKs. This is acceptable — the degraded security is still very strong. The signed prekey rotation is more important to maintain: I'd rotate the signed prekey every 2 weeks and keep the previous one valid for 48 hours to handle in-flight messages. The server retains only the current and previous signed prekeys. Old signed prekeys are permanently deleted to limit the window of compromise.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["prekey_management", "opk_exhaustion", "fallback_security", "replenishment_threshold", "signed_prekey_rotation", "server_notification"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does group encryption work? The Double Ratchet is designed for 1:1 — how do you scale it to a group of 50 people?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "group_encryption" }
+    },
+    {
+      "role": "candidate",
+      "content": "Group encryption is significantly harder because the Double Ratchet's DH steps require pairwise key exchange — with 50 members, that's 1,225 pairwise sessions, and sending a message would require encrypting it 49 times. Signal's approach is the Sender Keys protocol. The idea: each group member generates a 'sender key' — a symmetric key plus a chain ratchet, similar to the symmetric ratchet in Double Ratchet. When Alice wants to send a message to the group, she encrypts it once with her sender key and sends the ciphertext to the server, which fans it out to all group members. Each member decrypts using Alice's sender key, which they received via a 1:1 Double Ratchet session with Alice when they joined the group. The sender key advances its chain ratchet with each message, providing forward secrecy. The tradeoffs compared to pairwise Double Ratchet: we lose per-message DH ratchet steps, so there's no post-compromise security per message. If Alice's sender key is compromised, the attacker can read all her future messages until the key is rotated. Mitigation: rotate sender keys periodically (every 1000 messages or 24 hours) and when any member is removed from the group. When a member is removed, all remaining members generate new sender keys and redistribute them — this ensures the departed member can't decrypt future messages. Scalability: a message in a 50-person group requires 1 encryption (with sender key) + 1 fan-out by the server, versus 49 encryptions with pairwise Double Ratchet. For a 1000-person group, this savings is critical. The downside is that sender key distribution still requires N pairwise sessions — adding a new member to a 50-person group means 49 pairwise key exchanges to give the new member everyone's sender keys.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["group_encryption", "sender_keys", "pairwise_scalability_problem", "sender_key_rotation", "member_removal", "forward_secrecy_tradeoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do users verify that they're actually talking to the right person and not a man-in-the-middle? What are safety numbers?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "key_verification" }
+    },
+    {
+      "role": "candidate",
+      "content": "The server distributes public keys (prekey bundles), so a compromised or malicious server could substitute its own keys — a classic man-in-the-middle attack. Safety numbers (Signal's term) provide out-of-band key verification. A safety number is computed as: hash(Alice_IK_public || Bob_IK_public), truncated and formatted as a human-readable number (e.g., 12345 67890 12345 67890 12345 67890) or rendered as a QR code. Both Alice and Bob independently compute this value. If they meet in person (or over a trusted channel like a phone call), they compare their safety numbers. If they match, they know neither party's identity key has been substituted. The number changes only if either party's identity key changes — which happens if: (a) the user reinstalls the app (new keys generated), (b) the user gets a new device, or (c) a man-in-the-middle attack is occurring. When the safety number changes, the app alerts the other party: 'Safety number with Bob has changed.' The user can choose to verify again or accept the new key. The UX challenge is that most users never verify safety numbers. Signal and WhatsApp show the alert but don't block communication. A more aggressive approach (used by some enterprise messaging apps) is 'trust on first use' (TOFU) with mandatory verification for certain contacts. A pragmatic middle ground: implement key transparency — a public, append-only log (similar to Certificate Transparency) where the server publishes all identity key changes. Clients can audit this log to detect if the server ever served different keys to different users for the same account. Google's Key Transparency project provides a framework for this.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["key_verification", "safety_numbers", "man_in_the_middle", "out_of_band_verification", "trust_on_first_use", "key_transparency", "certificate_transparency_analogy"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Final topic: how do users back up their encrypted messages without breaking the E2E security model?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "backup_encryption" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is one of the hardest problems in E2E encryption. If messages are stored only on the device and the device is lost, all history is gone. But if backups are stored in the cloud unencrypted, E2E is meaningless — law enforcement or hackers can access the backup. WhatsApp's solution (which I'd adopt): encrypted backups with a user-chosen key. The user sets a backup password (or uses a 64-digit encryption key). The message database is encrypted with AES-256-GCM using a key derived from the password via Argon2id (a memory-hard KDF that resists brute-force attacks). The encrypted backup is uploaded to Google Drive or iCloud. The backup encryption key is not stored on our servers — if the user forgets the password, the backup is unrecoverable. For usability, WhatsApp offers an alternative: store the backup key in a Hardware Security Module (HSM) cluster controlled by WhatsApp, protected by the user's PIN. The HSM enforces rate limiting on PIN attempts (10 attempts before permanent lockout), preventing brute force. The HSM approach is a compromise: the company theoretically has access to the HSM infrastructure, but the security properties are auditable, and the PIN attempt limiting makes brute force infeasible. The backup includes: the message database (all text, metadata, timestamps), media files (encrypted), and the key material needed to resume existing Double Ratchet sessions (so the restored device can continue conversations without re-establishing sessions). The risk: if the ratchet state is backed up and restored on a compromised device, it exposes future messages. Signal's approach is more conservative — they don't offer cloud backups at all, only local encrypted backups, prioritizing security over convenience. I'd offer the choice to users and clearly communicate the tradeoffs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["backup_encryption", "aes_256_gcm", "argon2id", "hsm_key_storage", "pin_rate_limiting", "ratchet_state_backup", "security_usability_tradeoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong deep dive on E2E encryption. You demonstrated solid understanding of the cryptographic protocols and the practical tradeoffs. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 72,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 4,
+      "api_design": 6,
+      "database_design": 5,
+      "caching_strategy": 4,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 9
+    },
+    "strengths": [
+      "Clear and accurate explanation of X3DH and Double Ratchet protocols with concrete key derivation steps",
+      "Strong treatment of group encryption tradeoffs with Sender Keys approach",
+      "Practical backup encryption design covering both password-based and HSM-based approaches"
+    ],
+    "weaknesses": [
+      "Did not discuss performance implications — encryption overhead per message, key exchange latency",
+      "No capacity estimation or discussion of how the key server scales"
+    ]
+  }
+}

@@ -1,0 +1,172 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "sde2",
+    "candidate_profile": "struggling",
+    "total_exchanges": 20,
+    "generation_id": "seed_020"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a rate limiter. Imagine you're building a service that protects an API from being overwhelmed by too many requests. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay... so a rate limiter limits how many requests someone can make, right? Um, I guess my question is — are we limiting per user or globally? And what happens when someone exceeds the limit — do we return an error?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["rate_limiting"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Per user, based on API key. When they exceed the limit, return HTTP 429 Too Many Requests. Let's say the limit is 100 requests per minute per user. We have 10 million active users and 50,000 requests per second across all users. How would you design this?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay so... I think we need a counter for each user. When a request comes in, we check the counter. If it's under 100, we increment it and let the request through. If it's 100 or more, we reject it. We reset the counter every minute.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["fixed_window_counter"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a fixed window counter approach. It works but has a problem — what happens at the boundary of two windows? Say a user sends 100 requests at 11:00:59 and another 100 at 11:01:00?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "fixed_window_counter" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh... they'd get 200 requests through in 2 seconds because the counter resets at 11:01:00. That's a problem. I'm not sure how to fix that. Maybe we could use a smaller window, like 1 second instead of 1 minute?",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["fixed_window_counter"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "A smaller window doesn't solve the boundary problem — it just makes the window smaller. Have you heard of the token bucket algorithm?",
+      "annotation": { "action": "hint", "phase": "high_level_design", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "I've heard the name but I'm not really sure how it works. Something with tokens?",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["token_bucket"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let me explain. Imagine a bucket that holds tokens. The bucket has a maximum capacity — say 100 tokens. Tokens are added to the bucket at a steady rate — say 100 per minute, which is about 1.67 per second. When a request arrives, it takes one token from the bucket. If the bucket is empty, the request is rejected. This naturally smooths out bursts. Can you build on this?",
+      "annotation": { "action": "teach", "phase": "high_level_design", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, that makes sense. So instead of resetting every minute, we're continuously adding tokens. If someone uses all 100 tokens in a burst, they have to wait for more tokens to accumulate. So we'd need to store for each user... the number of tokens remaining and the last time we added tokens?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["token_bucket"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right — you store the token count and the last refill timestamp. When a request comes in, you calculate how many tokens should have been added since the last refill, add them (up to the max), then try to consume one. Where would you store this state?",
+      "annotation": { "action": "guide", "phase": "deep_dive", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Maybe in a database? Like we have a table with user_id, token_count, and last_refill_time. When a request comes in, we query the table, calculate the new tokens, update it, and decide whether to allow the request.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["database_choice"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "At 50,000 requests per second, every request would need a database read and write. That's 100,000 database operations per second just for rate limiting. Do you think a traditional database can handle that?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's a lot... probably not. Maybe we should use something faster? Like an in-memory store? I've used Redis before for caching — could that work?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["redis_caching"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Redis is a great choice for this. It's in-memory, handles hundreds of thousands of operations per second, and has atomic operations. How would you implement the token bucket in Redis?",
+      "annotation": { "action": "guide", "phase": "deep_dive", "target_concept": "redis_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a Redis key for each user, like ratelimit:user123. The value would store the token count and timestamp. When a request comes in, I'd GET the key, calculate the new token count in my application code, then SET the updated value back.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["redis_caching", "token_bucket"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "There's a race condition there. What if two requests for the same user arrive at the same time? Both read 1 token remaining, both think they can proceed, and both decrement — now the count is -1. How do you handle that?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "race_condition" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh right, race condition. Um... maybe we could use a lock? Like a distributed lock so only one request at a time can check and update the token count?",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["distributed_lock"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "A distributed lock would work but it's slow — acquiring and releasing locks at 50K requests per second would be a bottleneck. Redis has a feature called Lua scripting where you can execute multiple commands atomically on the server side. The GET, calculate, and SET all happen in one atomic operation. Does that make sense?",
+      "annotation": { "action": "teach", "phase": "deep_dive", "target_concept": "lua_scripting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yeah, that makes sense. So the Lua script runs on the Redis server and handles the whole check-and-update atomically. That avoids the race condition without needing locks. I haven't written Lua scripts for Redis before, but I understand the concept — it's like a stored procedure.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["lua_scripting", "atomicity"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good analogy. Now, what happens if Redis goes down? All rate limiting stops working.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "single_point_of_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If Redis goes down... I guess we have two options. Either we block all requests, which is too aggressive, or we let all requests through, which defeats the purpose. Maybe we could have a backup Redis? Or maybe fall back to the database?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["single_point_of_failure", "failover"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The common approach is to fail open — let requests through if the rate limiter is down. The reasoning is that it's better to temporarily allow extra traffic than to block all traffic. You'd use Redis Sentinel or Redis Cluster for high availability. What about multiple API servers — if you have 10 servers behind a load balancer, do they all share one Redis?",
+      "annotation": { "action": "teach", "phase": "scaling_failures", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "I think they'd have to share the same Redis, right? Because if each server has its own counter, a user could send 100 requests to each server and get 1,000 requests through instead of 100. So a centralized Redis that all servers check against.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["distributed_rate_limiting", "centralized_state"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Correct. Let's wrap up. Can you summarize your design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. We use a token bucket algorithm stored in Redis. Each user has a key with their token count and last refill timestamp. When a request comes in, a Lua script on Redis atomically calculates new tokens based on elapsed time, checks if there's a token available, and decrements if so. All API servers share the same Redis cluster for consistent counting. If Redis goes down, we fail open. We return HTTP 429 with a Retry-After header when the limit is exceeded. For high availability, we use Redis Cluster with replicas.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["token_bucket", "redis_caching", "lua_scripting", "fail_open", "http_429"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thank you. You needed some guidance but were able to build on the concepts once explained. Thank you for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 30,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 3,
+      "capacity_estimation": 2,
+      "api_design": 3,
+      "database_design": 3,
+      "caching_strategy": 4,
+      "scalability": 3,
+      "failure_handling": 3,
+      "communication": 4
+    },
+    "strengths": [
+      "Was receptive to interviewer's guidance and built on taught concepts",
+      "Correctly identified the need for centralized state across API servers",
+      "Final summary showed understanding of the concepts covered during the interview"
+    ],
+    "weaknesses": [
+      "Didn't know what a token bucket algorithm is — a fundamental rate limiting concept",
+      "No capacity estimation or back-of-envelope math at all",
+      "Couldn't identify race conditions or propose atomic operations without prompting",
+      "Required significant interviewer guidance throughout — couldn't drive the design independently",
+      "No discussion of sliding window, leaky bucket, or any alternative algorithms"
+    ]
+  }
+}

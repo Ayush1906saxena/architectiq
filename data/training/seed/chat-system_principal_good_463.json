@@ -1,0 +1,376 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "principal",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_463"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Welcome. Today we'll design a real-time messaging system -- WhatsApp or Slack scale, 100 million DAU, 10 million concurrent WebSocket connections. I'd like to see how you approach this from both a technical and organizational perspective. How would you start?",
+      "annotation": {
+        "action": "opening",
+        "phase": "requirements",
+        "target_concept": "requirements_gathering"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Thanks. Let me start by scoping the problem. Core features: 1:1 messaging, group messaging with say up to 1000 members, delivery and read receipts, online presence, E2E encryption, and push notifications for offline users. Non-functional requirements: sub-500ms message delivery latency, strong message ordering per conversation, and high availability -- we can't afford more than minutes of downtime per year. Let me also think about scale. 100M DAU, if each user sends 40 messages a day, that's 4 billion messages daily, roughly 50K per second sustained. Peak is maybe 3x, so 150K messages per second. 10M concurrent WebSockets, at 50K per server, means roughly 200 WebSocket servers. Should I start with the high-level architecture?",
+      "annotation": {
+        "quality": "strong",
+        "concepts_mentioned": ["feature scoping", "latency SLA", "availability", "throughput estimation", "WebSocket server sizing"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good scoping. Yes, let's see the high-level architecture.",
+      "annotation": {
+        "action": "acknowledge",
+        "phase": "high_level_design",
+        "target_concept": "system_architecture"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, so I'd split this into several layers. At the edge, we have the WebSocket Gateway tier -- these are the stateful servers that hold client connections. Behind that, a Message Routing Service that knows how to get a message from sender to recipient. A Message Storage Service backed by a wide-column database like Cassandra, partitioned by conversation ID. A Presence Service that tracks who's online. A Notification Service for push notifications. And an Encryption Key Service that manages public key distribution for E2E encryption. The flow for sending a message: client sends over WebSocket to gateway, gateway forwards to the routing service, routing service persists the message, assigns a sequence number, then routes it to the recipient's gateway for delivery. If the recipient is offline, it triggers the notification service instead.",
+      "annotation": {
+        "quality": "strong",
+        "concepts_mentioned": ["WebSocket gateway", "message routing", "Cassandra", "presence service", "notification service", "key service", "sequence numbers"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid foundation. Let me dig into the WebSocket gateway. How does message routing work when the sender and recipient are on different gateway servers?",
+      "annotation": {
+        "action": "deepen",
+        "phase": "deep_dive",
+        "target_concept": "WebSocket_routing"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "So we need a way to map user IDs to their connected gateway server. I'd maintain a connection registry in Redis -- a hash map of user_id to gateway_server_id, updated on connect and disconnect. When the routing service needs to deliver a message to User B, it looks up B's gateway in Redis and publishes the message to that specific gateway. For the inter-server communication, I'd use a pub/sub layer. Each gateway subscribes to a channel identified by its own server ID. The routing service publishes to the appropriate channel. Redis pub/sub could work here, but at 10M connections and high throughput, I'd likely use something more robust like NATS or a custom pub/sub built on Kafka. The key insight is that the gateway servers are stateful for connections but stateless for message processing. They're just a conduit. If a gateway crashes, clients reconnect to a different one, the registry updates, and message flow resumes.",
+      "annotation": {
+        "quality": "strong",
+        "concepts_mentioned": ["connection registry", "Redis hash", "pub/sub routing", "NATS", "Kafka", "stateful connections", "stateless processing"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now, you mentioned migrating from one infrastructure pattern to another. Let's say this system initially used long polling and we want to migrate to WebSockets. How would you approach that migration?",
+      "annotation": {
+        "action": "probe",
+        "phase": "deep_dive",
+        "target_concept": "polling_to_websocket_migration"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, that's a big operational change. The fundamental challenge is that long polling is stateless and request-response oriented, while WebSockets are stateful and bidirectional. You can't do a simple swap. I think... we'd need to run both in parallel for a while. Deploy the new WebSocket gateway alongside the existing long polling servers. Use a feature flag on the client to gradually migrate users. Start with like 1% of users on WebSocket, monitor error rates and latency, then ramp up. The routing service needs to handle both: if a user is on WebSocket, deliver via the gateway; if they're on long polling, deliver via the traditional message queue that the polling endpoint reads from. The tricky part is... actually, I'm not sure about the sequencing. Do you migrate the mobile clients first or the web clients? And there's a period where the same user might have some devices on WebSocket and others on long polling...",
+      "annotation": {
+        "quality": "mediocre",
+        "concepts_mentioned": ["parallel operation", "feature flags", "gradual rollout", "dual delivery path"],
+        "depth": "surface",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "You trailed off there. What about the operational risks during migration? How do you ensure no messages are lost during the transition?",
+      "annotation": {
+        "action": "challenge",
+        "phase": "deep_dive",
+        "target_concept": "migration_safety"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, message loss during migration is the number one risk. I think the key is that both delivery paths read from the same durable message store. The WebSocket gateway and the long-polling endpoint are both just delivery mechanisms. Messages are persisted first, then delivered. So even if a delivery attempt fails during migration, the message is safe in storage and can be fetched on the next sync. We'd need comprehensive monitoring during the transition: compare message delivery rates between the two paths, track delivery latency percentiles, and alert on any drop in delivery success rate. We should also have a kill switch to instantly fall back all users to long polling if something goes wrong. But honestly, I haven't personally run a migration like this, so I might be missing some edge cases around connection state during the switchover.",
+      "annotation": {
+        "quality": "good",
+        "concepts_mentioned": ["durable message store", "delivery decoupled from storage", "monitoring", "kill switch", "fallback"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Reasonable approach. Let's talk about message ordering. How do you guarantee messages within a conversation appear in the correct order?",
+      "annotation": {
+        "action": "transition",
+        "phase": "deep_dive",
+        "target_concept": "message_ordering"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "For ordering, I'd assign a monotonically increasing sequence number per conversation. The routing service, when it processes a message for conversation X, atomically increments a counter and assigns it as the message's sequence number. I'd implement this counter using Redis INCR keyed by conversation ID. Alternatively, for stronger guarantees, we could use a dedicated sequencer service where each conversation is assigned to a specific partition, and within that partition, sequencing is single-threaded. This avoids any race conditions. Clients display messages sorted by sequence number, not by timestamp. When a client reconnects after being offline, it syncs by requesting all messages after its last known sequence number. For group chats, the same mechanism works -- all messages in the group go through the same sequencer partition, so they get a total order. The tradeoff is that the sequencer becomes a potential bottleneck. But since it's partitioned by conversation, the load is distributed. A single sequencer instance might handle 100K conversations and the sequencing operation is just an increment, so throughput should be in the millions per second.",
+      "annotation": {
+        "quality": "strong",
+        "concepts_mentioned": ["monotonic sequence numbers", "Redis INCR", "dedicated sequencer", "single-threaded partitions", "sync protocol", "throughput estimation"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good depth on ordering. Now let's talk about E2E encryption. How does it work in your design?",
+      "annotation": {
+        "action": "transition",
+        "phase": "deep_dive",
+        "target_concept": "e2e_encryption"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "E2E encryption means the server never sees plaintext message content. The standard approach, used by WhatsApp and Signal, is the Signal protocol. For 1:1 chats, each user generates identity keys and a set of prekeys and uploads the public portions to our key server. When Alice wants to message Bob for the first time, she fetches Bob's prekey bundle from the server, performs an X3DH key agreement to establish a shared secret, and then uses the Double Ratchet algorithm which derives a new symmetric key for each message. This provides forward secrecy -- compromising one key doesn't expose past or future messages. For groups, there are two main approaches. Sender Keys, where each member generates a chain key and distributes it to all other members via pairwise encrypted channels. This is efficient for sending -- one encryption per message regardless of group size -- but key distribution is O(N) when a member joins or leaves. The alternative is MLS, the IETF Messaging Layer Security standard, which uses tree-based key agreement for O(log N) key operations. The server's role is purely a key directory and message relay. We store encrypted blobs and metadata. This has implications for features like server-side search -- you can't search encrypted messages on the server.",
+      "annotation": {
+        "quality": "strong",
+        "concepts_mentioned": ["Signal protocol", "X3DH", "Double Ratchet", "forward secrecy", "Sender Keys", "MLS", "key distribution cost", "server-side search limitation"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Impressive crypto knowledge. Let me shift to an organizational question. You're the principal engineer overseeing this system. How would you structure the teams and define ownership boundaries?",
+      "annotation": {
+        "action": "probe",
+        "phase": "deep_dive",
+        "target_concept": "team_structure"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, team structure. Let me think about this. I'd probably have... a few teams. One for the real-time infrastructure -- WebSocket gateways, message routing, the sequencer. Another for storage and data. One for the client applications. And maybe a security team for the encryption stuff. I think the boundaries should follow the architecture boundaries, so each team owns a set of services. The real-time infra team would be the most critical, maybe 6-8 engineers. But I'm not sure how to handle the cross-cutting concerns. Like, who owns the delivery receipt logic? It touches the gateway, the routing service, and the client. Maybe we need a 'messaging features' team that builds on top of the platform teams?",
+      "annotation": {
+        "quality": "mediocre",
+        "concepts_mentioned": ["team boundaries", "platform teams", "cross-cutting concerns"],
+        "depth": "surface",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "You seem less certain here. What principles would you use to decide team boundaries? And how do you handle the tension between platform teams and feature teams?",
+      "annotation": {
+        "action": "challenge",
+        "phase": "deep_dive",
+        "target_concept": "org_design_principles"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Fair point, I was kind of winging it. Let me be more structured. The core principle should be that team boundaries align with service boundaries, and service boundaries should minimize cross-team dependencies for common changes. Conway's Law in reverse -- we design the org to get the architecture we want. So: a Connection Platform team owns the gateway and the connection registry. A Messaging Platform team owns routing, sequencing, and storage. A Notifications team owns push notifications and email. A Trust & Safety team handles abuse detection and reporting. And feature teams, like a Group Chat team, build end-to-end features by composing the platform services. For the delivery receipts question, I'd say the Messaging Platform team owns the server-side receipt pipeline, and the client teams own the UI rendering. The principle is: platform teams own the data path, feature teams own the user experience. But I'll be honest, org design isn't my strongest area. In my experience, the hardest part isn't the initial structure but evolving it as the system grows. I've seen teams that worked great at 20 engineers completely break down at 100.",
+      "annotation": {
+        "quality": "good",
+        "concepts_mentioned": ["Conway's Law", "service boundaries", "platform vs feature teams", "org evolution"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Honesty about your growth areas is appreciated. Let's talk about a build-vs-buy decision: push notification infrastructure. Would you build your own or use a third-party service?",
+      "annotation": {
+        "action": "probe",
+        "phase": "deep_dive",
+        "target_concept": "build_vs_buy_push"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, build vs buy for push notifications. So we have to use APNs and FCM regardless -- Apple and Google require you to go through their services. The question is whether we build our own orchestration layer on top of those, or use a third-party like OneSignal or Firebase Cloud Messaging wrappers. I think... at our scale of 100M DAU, we probably need to build our own. Third-party services add latency, another point of failure, and they get expensive at this volume. But the counter-argument is that push notification infrastructure is surprisingly complex -- rate limiting, retry logic, token management, feedback service processing, analytics. It's a lot of engineering investment for something that isn't our core differentiator. I'd probably start with a third-party for the first year while we have other priorities, then build in-house once we hit scaling or cost limits. But honestly, I'm not confident in that answer. It depends a lot on the specific vendor capabilities and our team's bandwidth.",
+      "annotation": {
+        "quality": "mediocre",
+        "concepts_mentioned": ["APNs", "FCM", "third-party services", "rate limiting", "token management"],
+        "depth": "surface",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "What factors would drive that decision? Can you be more specific about when you'd know it's time to build?",
+      "annotation": {
+        "action": "deepen",
+        "phase": "deep_dive",
+        "target_concept": "build_vs_buy_criteria"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "The key signals to build in-house would be: cost -- when the third-party bill exceeds the fully-loaded cost of a team to build and maintain it, maybe at around 3-5 engineers worth of spend. Reliability -- if we're hitting the third party's rate limits or their outages are causing our SLA violations. Feature gaps -- if we need capabilities they don't offer, like priority queuing for certain message types or custom retry strategies for E2E encrypted payloads. And latency -- if the extra hop through the vendor is measurably impacting delivery times. For a messaging app, push notification delivery time directly impacts the user experience. If users are getting notifications 2 seconds late compared to a competitor, that's a problem. So I'd instrument the whole pipeline and track end-to-end latency closely. If the vendor becomes the bottleneck, that's the trigger to build.",
+      "annotation": {
+        "quality": "good",
+        "concepts_mentioned": ["cost threshold", "reliability SLA", "feature gaps", "latency budget", "build trigger criteria"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Better. Let's move to scaling and failure modes. What happens during a regional outage? Say your US-East region goes down.",
+      "annotation": {
+        "action": "failure_probe",
+        "phase": "scaling_failures",
+        "target_concept": "regional_failure"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Regional outage is the big one. If US-East goes down, all users connected to that region lose their WebSocket connections. DNS-based failover kicks in to redirect new connections to the nearest healthy region, probably US-West. But the failover time for DNS can be minutes depending on TTL settings. I'd set aggressive TTLs of 30-60 seconds on the connection endpoint DNS records. Better yet, use anycast or a global load balancer like AWS Global Accelerator that can reroute in seconds without DNS. For message durability, if messages were being processed in US-East and the region dies, they could be lost if they were only in the regional Kafka. So message data needs to be replicated cross-region before we acknowledge to the sender. This adds latency to the send path but ensures durability. The tradeoff is: do we acknowledge after regional persistence (lower latency, risk of data loss on regional failure) or after cross-region replication (higher latency, no data loss)? For a messaging app, I'd lean toward cross-region replication before acknowledgment. Users can tolerate an extra 50-100ms on send, but they won't tolerate lost messages.",
+      "annotation": {
+        "quality": "strong",
+        "concepts_mentioned": ["DNS failover", "TTL tuning", "anycast", "Global Accelerator", "cross-region replication", "durability vs latency tradeoff"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good tradeoff analysis on regional durability. What about the thundering herd when a region recovers and millions of clients try to reconnect?",
+      "annotation": {
+        "action": "deepen",
+        "phase": "scaling_failures",
+        "target_concept": "thundering_herd"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "The thundering herd is dangerous because it can take down the recovering region again. Several mitigations. Client-side: exponential backoff with random jitter on reconnection. The jitter is critical -- without it, even exponential backoff causes waves. I'd add a random delay of 0 to 30 seconds on the first reconnection attempt. Server-side: connection admission control. The gateway should have a configurable maximum rate of new connections per second, and reject excess with a 'retry later' signal that includes a randomized backoff hint. Infrastructure-side: auto-scaling the gateway tier ahead of the reconnection storm. When we detect a regional recovery, we can proactively scale the connection tier to 150% of pre-outage capacity to absorb the burst. Also, we should not immediately redirect all traffic back to the recovered region. Gradually shift traffic back over 15-30 minutes using weighted routing. Let the recovered region warm up its caches and connection pool before taking full load.",
+      "annotation": {
+        "quality": "strong",
+        "concepts_mentioned": ["exponential backoff", "jitter", "admission control", "retry-after header", "proactive scaling", "gradual traffic shift", "cache warming"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid operational thinking. Let's talk about the presence system. How do you design it for 100M DAU without it becoming a bottleneck?",
+      "annotation": {
+        "action": "transition",
+        "phase": "deep_dive",
+        "target_concept": "presence_system"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Presence is deceptively expensive at scale. The naive approach of broadcasting status changes to all contacts creates a fanout explosion. With 100M users averaging 200 contacts each, a single online/offline event generates 200 notifications. At 5 state changes per user per day, that's 100 billion presence notifications per day, which dwarfs our message traffic. The solution: make presence subscription-based and lazy. A client only subscribes to the presence of users whose conversation is currently open on screen. This reduces the subscription cardinality from 'all contacts' to 'active conversations,' maybe 1-5 users at any time. Implementation: the gateway tracks which users each client is subscribed to. When a user's state changes, we look up their subscribers and notify only those. Subscribers are stored in Redis as a set per user. For the state itself, I'd use a heartbeat model: clients send heartbeats every 30 seconds via the WebSocket. The gateway updates a TTL key in Redis. If the TTL expires, the user is offline. This handles disconnects and crashes gracefully without explicit offline events. 'Last seen at' is updated once per session end, not per heartbeat, to minimize write load.",
+      "annotation": {
+        "quality": "strong",
+        "concepts_mentioned": ["fanout explosion", "subscription-based presence", "lazy evaluation", "heartbeat model", "TTL-based state", "write optimization"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Very clean presence design. Now, if you were setting the technical strategy for this system over the next 2 years, what would your top 3 priorities be and how would you communicate them to the VP of Eng?",
+      "annotation": {
+        "action": "probe",
+        "phase": "wrap_up",
+        "target_concept": "technical_strategy"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Two-year technical strategy... let me think. Priority one: reliability. At this scale, even 99.9% availability means 100K users affected at any given time. I'd push for 99.99% on the message delivery path. This means investing in multi-region active-active, automated failover, comprehensive chaos engineering. The business case is straightforward: every minute of downtime is in the news. Priority two: E2E encryption maturity. We need to move beyond basic 1:1 encryption to robust group encryption, ideally adopting MLS. Also need to build key backup and multi-device key sync, which are hard UX problems as much as technical ones. Users who lose their phone shouldn't lose their message history. Priority three: this is where I'm less sure. I think it's either platform extensibility, building APIs for bots and integrations like Slack did, or performance optimization, pushing message delivery latency below 100ms for same-region users. I'd probably frame it to the VP as: 'Reliability is table stakes, encryption is a competitive differentiator, and the third priority depends on whether we're competing with Slack on enterprise or WhatsApp on consumer.' But honestly, I'm better at the technical roadmap than the executive communication framing. I'd want to partner with product leadership to sharpen that third priority.",
+      "annotation": {
+        "quality": "good",
+        "concepts_mentioned": ["availability SLA", "chaos engineering", "MLS adoption", "key backup", "multi-device sync", "platform extensibility"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair self-assessment. One final question: what's the biggest technical risk in this system that could become an existential problem?",
+      "annotation": {
+        "action": "wrap_up",
+        "phase": "wrap_up",
+        "target_concept": "existential_risk"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "The biggest existential technical risk is a compromise of the E2E encryption system. If there's a flaw in our key management, a botched key rotation, or a vulnerability in our Signal protocol implementation, it could expose user messages at scale. Unlike a performance issue or even a data breach of metadata, a crypto failure destroys user trust in the core product promise. This is why I'd insist on regular third-party security audits of the crypto implementation, formal verification of critical code paths where feasible, and a bug bounty program specifically for the encryption layer. The second existential risk is a scaling failure in the connection tier during a global event -- like New Year's Eve when half the world is messaging at once. If the system buckles and users can't send messages for even 30 minutes, they'll switch to a competitor and never come back. This is why the connection tier needs 3-5x headroom beyond normal peak, and we need to load test regularly at 2x our expected peak. Those two risks, crypto failure and connection tier collapse, are the ones that would keep me up at night.",
+      "annotation": {
+        "quality": "strong",
+        "concepts_mentioned": ["crypto compromise", "security audits", "formal verification", "bug bounty", "peak capacity planning", "load testing", "user trust"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    }
+  ],
+  "scorecard": {
+    "overall": 68,
+    "passed": false,
+    "pass_bar": 80,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 8,
+      "api_design": 5,
+      "database_design": 6,
+      "caching_strategy": 6,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 6
+    },
+    "strengths": [
+      "Excellent technical architecture -- WebSocket routing, message ordering via sequencer, and presence system were all well-designed",
+      "Strong understanding of E2E encryption including Signal protocol, Sender Keys, and MLS with clear tradeoff analysis",
+      "Thoughtful failure mode analysis for regional outages and thundering herd with specific mitigation numbers",
+      "Honest self-assessment of weaker areas, demonstrating self-awareness"
+    ],
+    "weaknesses": [
+      "Stumbled on organizational design questions -- team boundaries were vague and lacked clear principles until prompted",
+      "Build-vs-buy analysis for push notifications was indecisive and lacked a strong framework",
+      "Migration from polling to WebSockets was hand-wavy with incomplete sequencing and missing edge case analysis",
+      "Executive communication framing was self-admittedly weak -- at principal level, this is expected to be a strength",
+      "No API design discussion -- never defined specific endpoints, protocols, or client-server contracts",
+      "Strategic thinking was present but not at the depth expected for a principal role -- more tactical than visionary"
+    ]
+  }
+}

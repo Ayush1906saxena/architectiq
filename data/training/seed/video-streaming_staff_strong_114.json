@@ -1,0 +1,169 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_114"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a video streaming platform like YouTube. It needs to handle both uploading and playing videos at scale. Where would you like to start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Before we start, let me clarify requirements. What's the expected scale — uploads per day and concurrent viewers? What video quality levels do we need? Do we need live streaming or just on-demand? What's the maximum video length and file size?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "quality_levels", "live_vs_vod", "file_size_limits"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500,000 uploads per day, 100 million concurrent viewers at peak. Multiple quality levels — 360p to 4K. On-demand only. Videos up to 12 hours, max 256GB per upload. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Most candidates focus on the playback side, but I think the upload pipeline is actually the harder engineering problem. Getting a 256GB file reliably from a user's browser to our servers, transcoding it into multiple formats, and making it available — that's where most of the complexity lives. I'd like to focus there first, then cover playback.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["upload_pipeline", "transcoding"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "I like that. Walk me through the upload flow.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "upload_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The upload happens in stages. First, the client requests an upload session: POST /api/v1/uploads with video metadata. The server returns an upload_id and a set of presigned URLs for chunked upload. Second, the client splits the file into chunks — I'd use 64MB chunks as a sweet spot between overhead and resumability. Third, the client uploads chunks in parallel to our object store (S3 or equivalent) using the presigned URLs. Each chunk upload is independent — if one fails, only that chunk is retried. Fourth, once all chunks are uploaded, the client calls POST /api/v1/uploads/{id}/complete, which triggers server-side reassembly and the processing pipeline.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chunked_upload", "presigned_urls", "resumable_upload", "parallel_upload", "object_store"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Why 64MB chunks? And what about users on slow connections?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "chunked_upload" }
+    },
+    {
+      "role": "candidate",
+      "content": "64MB balances two concerns. Too small (like 1MB) means too many HTTP requests — for a 256GB file, that's 256,000 requests, causing overhead from connection setup, authentication, and metadata. Too large (like 1GB) means a failure wastes more bandwidth on retry and requires more client memory. 64MB gives us about 4,000 chunks for a max-size file. For slow connections: the chunk size could be adaptive. The client starts with a smaller chunk size — say 8MB — and increases if uploads are succeeding quickly. We'd also implement upload progress tracking per chunk. If a chunk upload is interrupted, we use the Content-Range header to resume from where it left off — so even within a single chunk, we don't lose progress.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chunk_size_optimization", "adaptive_chunking", "resumable_upload", "content_range"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "After the chunks are uploaded, walk me through the server-side processing.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "processing_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The completion call triggers a processing pipeline. Step 1: Chunk Reassembly — a worker reads all chunks from S3 in order and produces the original file. This can be done with S3 multipart upload completion actually, since we uploaded as multipart parts. Step 2: Virus Scanning — the reassembled file is scanned using ClamAV or a commercial scanning service. We can't skip this — malicious files disguised as videos are common. Step 3: Content Validation — verify it's actually a video, extract metadata (duration, resolution, codec). Step 4: Transcoding — generate multiple quality renditions (360p, 720p, 1080p, 4K). Step 5: Thumbnail Generation — extract frames at regular intervals. Step 6: Content Moderation — ML model checks for prohibited content. Each step is an independent task in a job queue.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chunk_reassembly", "virus_scanning", "content_validation", "transcoding", "thumbnail_generation", "content_moderation", "job_queue"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the transcoding step? That's compute-intensive.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "transcoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Transcoding is the bottleneck of the pipeline. A 1-hour 4K video might take 4-8 hours of CPU time to transcode to all quality levels. At 500K uploads per day, assuming average 10 minutes per video and 4 output renditions, that's enormous compute. My approach: split the transcoding itself. A video is divided into segments — say 10-second segments — and each segment is transcoded independently across a fleet of workers. This is embarrassingly parallel. A 1-hour video becomes 360 segments, each transcoded into 4 quality levels — 1,440 tasks spread across hundreds of workers. After all segments are transcoded, a stitching step concatenates them. Using HLS or DASH format, the segments are already the final delivery format — no stitching needed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["transcoding", "parallel_transcoding", "segment_based_transcoding", "hls", "dash", "compute_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What infrastructure runs these transcoding workers?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "compute_infrastructure" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a mix. Baseline transcoding load runs on reserved GPU instances — transcoding benefits from hardware acceleration. For spikes — say a big event causes an upload surge — we burst to spot/preemptible instances. Since our work is segmented and idempotent, a spot instance being reclaimed just means that segment gets retried on another worker. Kubernetes with a job scheduler like Argo Workflows or Temporal manages the workflow. Each transcoding pod pulls a segment from the job queue, transcodes it, uploads the output to S3, and marks the task complete. The workflow orchestrator tracks completion of all segments and triggers the next pipeline stage.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gpu_transcoding", "spot_instances", "kubernetes", "workflow_orchestration", "idempotent_tasks"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the virus scanning step. That seems like a bottleneck too.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "virus_scanning" }
+    },
+    {
+      "role": "candidate",
+      "content": "Virus scanning a 256GB file is slow — potentially minutes. Two optimizations. First, we can scan chunks before reassembly. As each 64MB chunk is uploaded, a scanning worker picks it up immediately. Most malware is detectable at the chunk level. This parallelizes scanning with the upload itself — by the time the last chunk arrives, most chunks are already scanned. Second, for the reassembled file, we do a lighter pass — checking file header signatures, container format validity, and known malware patterns in video metadata. The full scan is resource-intensive, so I'd run a fleet of scanning workers with auto-scaling. Videos are not publicly available until scanning completes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["virus_scanning", "parallel_scanning", "chunk_level_scanning", "auto_scaling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's briefly cover the playback side. How does video delivery work?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "video_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Playback uses adaptive bitrate streaming — HLS or DASH. The transcoded video is stored as segments (typically 2-6 seconds each) at each quality level in S3. A manifest file lists all available segments and qualities. When a user plays a video, their player downloads the manifest and then requests segments one at a time. The player monitors bandwidth and buffer levels, switching quality levels dynamically. All segment requests go through a CDN — this is where the scale happens. 100M concurrent viewers at maybe 5 Mbps average is 500 Tbps of bandwidth. Only a global CDN like CloudFront, Akamai, or a custom CDN can handle that. Origin servers behind the CDN serve cache misses from S3.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["adaptive_bitrate", "hls", "dash", "cdn", "capacity_estimation", "segment_delivery"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500 Tbps is enormous. How do you optimize CDN costs?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "cdn_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several strategies. First, cache hit ratio is everything. The top 10% of videos likely account for 90% of views. Those should always be in CDN cache. We warm the CDN by proactively pushing trending videos to edge locations. Second, quality selection: lower default quality for mobile users on cellular — they can't tell the difference on a small screen, and it halves the bandwidth. Third, long-tail videos that are rarely watched don't need to be on the CDN at all — serve them directly from S3 with a simple Nginx cache in front. Fourth, we can build our own edge caching infrastructure in key ISPs using Open Connect-style partnerships — Netflix does this and it dramatically reduces transit costs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_optimization", "cache_warming", "quality_adaptation", "open_connect", "cost_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if an upload fails halfway through — say after 200 out of 4000 chunks?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "upload_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The upload session is durable. We store the upload state — which chunks have been received — in a database keyed by upload_id. When the user comes back (even hours later, from a different device), they call GET /api/v1/uploads/{id}/status which returns the list of completed chunk numbers. The client resumes uploading only the missing chunks. Upload sessions expire after 7 days to avoid indefinite storage of partial uploads. For the 200 chunks already uploaded to S3, they sit in an incomplete multipart upload — S3 has lifecycle policies to clean up incomplete multipart uploads after a configurable period. This resumability is critical for large files on unreliable connections.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["resumable_upload", "upload_session", "partial_upload_cleanup", "s3_lifecycle"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you track the processing pipeline status? A video goes through many stages.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "pipeline_tracking" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a state machine per video with states: Uploading, Scanning, Validating, Transcoding, Moderating, Ready, Failed, Rejected. Each pipeline stage updates the state in the video metadata database and emits an event to Kafka. A Pipeline Monitor service tracks all in-progress videos — it detects stuck videos (stuck in Transcoding for 4 hours for example), alerts on failure rate spikes, and provides the dashboard for the creator showing 'Your video is 60% processed.' The creator's upload page subscribes via WebSocket or SSE to get real-time progress updates. For debugging, each stage logs its output to a structured log tied to the video_id.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["state_machine", "pipeline_monitoring", "kafka", "websocket", "structured_logging"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final design considerations before we wrap up?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. First, deduplication — before transcoding, compute a perceptual hash of the video. If a near-duplicate already exists (re-upload or copyright issue), flag it for review. This saves compute on redundant transcoding. Second, pre-transcoding optimization — we should accept the original upload in any format but normalize it early in the pipeline (container format, audio codec) to simplify the transcoding matrix. Third, cost optimization — for the long tail of videos that get zero views, we could defer transcoding entirely and transcode on first view. Store the original and only pay for transcoding if someone actually watches it. At 500K uploads per day, many will never be watched.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["deduplication", "perceptual_hash", "lazy_transcoding", "cost_optimization", "format_normalization"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Really strong discussion. I appreciate the deep focus on the upload side — that's where real-world complexity lives. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 73,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 8,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Deep upload pipeline design — resumable uploads, parallel chunking, server-side reassembly",
+      "Parallel transcoding via segment splitting showed strong distributed systems thinking",
+      "Virus scanning pipeline with chunk-level parallel scanning was practical and well-reasoned"
+    ],
+    "weaknesses": [
+      "Playback side was relatively light — CDN caching strategy could have been deeper",
+      "Database design for video metadata and user data was not explicitly discussed"
+    ]
+  }
+}

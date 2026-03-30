@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "sde2",
+    "candidate_profile": "shows-potential",
+    "total_exchanges": 20,
+    "generation_id": "seed_344"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed system. Users follow others and see a timeline of posts from the people they follow. What are your initial thoughts?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with understanding the scale. How many users, and how many follows per user on average? What's the expected feed load latency?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["scale", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "200 million users, average 500 follows per user. Feed should load in under 300ms. About 50 million daily active users.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, let me think about this from first principles. When a user opens their feed, the naive approach is: find everyone they follow, fetch the latest tweets from each, merge and sort. So if I follow 500 people, I need to query 500 different users' tweets. Let me think about whether that works at scale...",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fan_out_on_read", "naive_approach"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Go ahead and work through that. Does it work?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do the math. If 1000 users each follow 500 people, querying 500 tables per feed load is 500K queries. That can't work. Even at 50 million DAU opening their feed 5 times per day, that's 250 million feed loads per day, each doing 500 queries = 125 billion database queries per day. That's about 1.4 million queries per second just for feed reads. And each query needs to sort and merge results. The database would melt. So we can't query on read — we need the feed to be pre-built somehow.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "fan_out_on_read_limitations", "qps_calculation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great reasoning. So how would you pre-build the feed?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "fan_out_on_write" }
+    },
+    {
+      "role": "candidate",
+      "content": "What if, when someone posts a tweet, we push it to all their followers' feeds right away? So when User A posts, and A has 1000 followers, we write that tweet reference into 1000 pre-built feed lists. Then when any follower opens the app, their feed is already assembled — just one read. This inverts the problem: instead of 500 reads per feed load, we do 1000 writes per tweet post. But far fewer people post than read, so the total work is much less. Let me verify: if 1% of users post per day, that's 2 million tweets. Average followers might be, say, 500, so that's 1 billion feed writes per day. At ~11,500 writes per second. That's way more manageable than 1.4 million read queries per second.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_on_write", "precomputed_feed", "write_amplification_analysis"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You derived fan-out on write from first principles. Nice. Where would you store these pre-built feeds?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "feed_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "The feed is a list of tweet IDs sorted by time. Each user needs their latest, say, 500 tweet IDs. At 8 bytes per tweet ID, that's 4KB per user. With 200 million users, that's 800GB total — fits in a Redis cluster. I'd use Redis sorted sets: key = feed:{user_id}, score = timestamp, value = tweet_id. When a new tweet is pushed, ZADD to each follower's sorted set. Trim to 500 entries with ZREMRANGEBYRANK. Feed read is a single ZREVRANGE — returns the latest N tweet IDs sorted. Then we hydrate the IDs into full tweet objects with a batch fetch from the tweet store.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_sorted_set", "feed_sizing", "hydration"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Walk me through the full write path — someone posts a tweet.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "write_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "User posts a tweet. The Tweet Service writes it to the tweet store (PostgreSQL or Cassandra — I'd use Cassandra for write-heavy workloads, partitioned by user_id). Then the Tweet Service publishes a 'new_tweet' event to a message queue. A Fan-out Service consumes the event, looks up the poster's followers from the social graph store, and for each follower, does a ZADD to their Redis sorted set. The fan-out is async so the poster gets an immediate response. If someone has thousands of followers, we process them in parallel batches.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["async_fanout", "message_queue", "social_graph", "parallel_processing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about a user with 10 million followers? The fan-out takes a long time.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "celebrity_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's a huge problem. 10 million ZADD operations even at 100K ops/sec takes 100 seconds. The tweet would be stale before most followers see it. I think we need a hybrid approach: for normal users (say under 5000 followers), do fan-out on write as designed. For celebrities, don't fan out — store their tweets separately. When a follower loads their feed, read the pre-built feed from Redis AND separately fetch the latest tweets from any celebrities they follow. Merge the two lists at read time. Since most users follow maybe 10-20 celebrities, the extra queries are manageable — 20 point queries is fast. The trade-off is slightly more complex read logic and a bit more read latency, but it avoids the impossible fan-out problem.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["celebrity_problem", "hybrid_fanout", "read_time_merge"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good insight. How do you store the social graph — the follower relationships?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "social_graph" }
+    },
+    {
+      "role": "candidate",
+      "content": "It's a directed graph. I need two lookups: who does this user follow (for building the read-time celebrity feed), and who follows this user (for the fan-out service). I'd store it in Cassandra with two tables — one partitioned by follower_id (for 'who do I follow') and one partitioned by followee_id (for 'who follows me'). Each follow creates two rows. Cassandra handles the wide rows well — a celebrity's 10 million followers are in one partition, but the fan-out service paginates through them. For the 'who do I follow' query, 500 entries per user is a small read.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["social_graph", "cassandra", "dual_table_pattern", "partition_design"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about tweet deletions?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "deletion" }
+    },
+    {
+      "role": "candidate",
+      "content": "Deleting from the tweet store is straightforward — soft delete with a 'deleted' flag. But the tweet ID is now in potentially millions of feed sorted sets. We can't fan-out the deletion — same problem as celebrity fan-out. Instead, I'd use lazy deletion. When hydrating a feed (converting tweet IDs to full tweet objects), we check the deleted flag. If deleted, we skip it and optionally remove it from that user's sorted set as a cleanup. Over time, deleted tweets get evicted as new tweets push them out of the 500-entry window. This means feeds might temporarily show a gap (49 instead of 50 results) but a simple backfill fetch fixes that.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["soft_delete", "lazy_deletion", "eventual_cleanup"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if Redis goes down? All feeds are lost.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "redis_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Redis Cluster with replicas is the first defense — automatic failover on node failure. But if the entire cluster goes down, we need a recovery strategy. The feeds can be rebuilt from the source data: for each user, query their followees from the social graph, fetch the latest tweets from each followee from the tweet store, merge and sort. But doing this for 200M users simultaneously would crush the database. So we'd rebuild lazily — when a user opens the app and their feed is missing, we rebuild it on demand. A background job also rebuilds feeds proactively, starting with the most active users. During recovery, we might serve slightly stale feeds with a notice that we're updating.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_cluster", "lazy_rebuilding", "on_demand_recovery", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add a few things. Push notifications or WebSocket for real-time feed updates for active users — so they don't need to refresh. Content moderation filtering before tweets enter the fan-out pipeline. And monitoring: fan-out queue depth (are we keeping up?), feed load latency p99, Redis memory usage, and cache hit rates. Looking back, I'm glad I started by computing why the naive approach doesn't work. It made the fan-out on write decision feel natural rather than just something I'd memorized.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["real_time_updates", "content_moderation", "monitoring"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The way you derived fan-out on write through quantitative reasoning was exactly what shows engineering maturity. Strong interview for your level. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 63,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 8,
+      "api_design": 5,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 6,
+      "communication": 7
+    },
+    "strengths": [
+      "Independently derived fan-out on write through quantitative reasoning — didn't rely on memorized solutions",
+      "Strong first-principles thinking throughout, computing feasibility before committing to approaches",
+      "Good hybrid solution for the celebrity problem with practical merge strategy"
+    ],
+    "weaknesses": [
+      "No API design discussion — didn't cover feed API, posting API, or pagination",
+      "Limited failure handling — Redis recovery was discussed only when prompted",
+      "Didn't discuss feed ranking or relevance beyond chronological sorting"
+    ]
+  }
+}

@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "senior",
+    "candidate_profile": "interviewer-introduces-constraints",
+    "total_exchanges": 22,
+    "generation_id": "seed_084"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a video streaming platform — something like YouTube or Netflix. Users upload videos, other users watch them. What do you need to know?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few key questions. What's the expected scale — daily active viewers and video uploads per day? Are we focusing on on-demand video or live streaming as well? What's the target video quality — do we need adaptive bitrate streaming? What's our storage budget? And what geographies do we need to serve?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "live_streaming", "adaptive_bitrate", "storage", "geographic_distribution"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "100 million daily viewers, 500,000 new videos uploaded per day. On-demand only for now. Yes to adaptive bitrate. Storage — let's work within reasonable cloud costs. Global audience, primarily North America, Europe, and Asia. Go ahead and design it.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do capacity estimation first. 500K uploads per day — if average video is 10 minutes at 1080p raw, that's roughly 1.5GB per video, so 750TB of raw uploads per day. After transcoding to multiple bitrates (1080p, 720p, 480p, 360p), each video generates about 4x the original size in total, so roughly 3PB of new content per day. That's massive — we'd need to be aggressive about storage tiering and CDN strategy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "transcoding", "storage_tiering"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. Walk me through the architecture for the upload and processing pipeline.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "upload_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The upload flow: user uploads through our API, which streams the video directly to an object store — S3 or GCS. We use multipart upload for large files with resumable uploads so users don't lose progress on network drops. Once the upload completes, we publish an event to a message queue. A transcoding service picks up the job — it pulls the raw video, transcodes it into multiple bitrates and resolutions using something like FFmpeg. Each variant is segmented into small chunks — typically 2-6 second segments for HLS or DASH adaptive streaming. The segments are written back to the object store. Metadata — title, duration, thumbnail timestamps, available qualities — is written to the metadata database. Finally, we push the most popular content to CDN edge caches.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["upload_pipeline", "object_storage", "transcoding", "adaptive_bitrate", "hls", "cdn_redirect"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now here's a curveball — we also need to support live streaming. Creators should be able to go live and thousands of viewers watch in real time. How does that change your design?",
+      "annotation": { "action": "introduce_constraint", "phase": "deep_dive", "target_concept": "live_streaming" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's a significant change. Live streaming inverts the pipeline. Instead of upload-then-transcode, we need real-time transcoding. The creator streams via RTMP to an ingest server. The ingest server passes the stream to a live transcoding service that produces multiple bitrate variants in real time — this requires GPU-accelerated transcoding to keep up. The transcoded segments are written to a live origin server and immediately available for CDN distribution. Viewers use HLS or DASH, but with very short segments — 1-2 seconds — and a small buffer to minimize live delay. The key difference: there's no time for multi-pass encoding optimization, so live video quality is lower than VOD at the same bitrate.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["live_streaming", "rtmp", "transcoding", "cdn_redirect", "adaptive_bitrate"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the case where 500,000 viewers are watching the same live stream simultaneously? That's a thundering herd problem at the origin.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cdn_scalability" }
+    },
+    {
+      "role": "candidate",
+      "content": "The CDN handles this naturally. When a new segment is produced, the first viewer request at each CDN edge node triggers a cache miss and fetches from origin. Subsequent requests from the same edge node are served from cache. With a global CDN like CloudFront with hundreds of edge locations, the origin sees maybe a few hundred requests per segment (one per edge node), not 500K. For extremely popular streams, we can add a CDN shield — an intermediate caching layer between edge and origin that further reduces origin load. The origin server itself should handle the CDN pull model, not push — so it's only responding to cache miss requests.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_redirect", "cdn_scalability", "caching_layers"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Another constraint — the budget is tight. No CDN for the initial launch. How do you serve video without a CDN?",
+      "annotation": { "action": "introduce_constraint", "phase": "deep_dive", "target_concept": "no_cdn" }
+    },
+    {
+      "role": "candidate",
+      "content": "Ouch. Without a CDN, we're serving every byte from our own infrastructure. Okay — here's how I'd handle it. First, use multiple regional origin servers with anycast DNS to route users to the nearest one. This gives us some geographic distribution without a CDN. Second, aggressive caching — Nginx or Varnish reverse proxies in front of the object store, caching hot video segments in memory. Third, reduce bandwidth: lower default quality — start everyone at 480p and only serve higher quality on explicit request. Fourth, limit concurrent viewers for live streams initially — if we can't handle 500K, cap at 10K and queue the rest. Fifth, use peer-to-peer distribution for live streams — WebRTC-based mesh where viewers relay segments to each other. This is technically complex but can reduce origin bandwidth by 60-80%.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["anycast_dns", "reverse_proxy", "caching_layers", "bandwidth_optimization", "p2p_distribution"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting — the P2P approach is creative. Let's go back to the normal design. Tell me about the video playback path — user hits play, what happens?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "playback_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "User hits play. The client requests the video manifest — an HLS .m3u8 or DASH .mpd file — from our API. The manifest lists all available quality levels and the segment URLs. The client's player — using hls.js or similar — starts with a quality level based on estimated bandwidth. It requests the first segment from the CDN. As segments download, the player measures actual throughput and adjusts quality up or down — this is adaptive bitrate. Each segment request goes to the nearest CDN edge. If it's a cache miss, the edge fetches from origin and caches it. Popular videos stay cached; long-tail videos may require origin fetches. The player maintains a playback buffer — typically 30 seconds ahead — to smooth over network fluctuations.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["adaptive_bitrate", "hls", "cdn_redirect", "playback_buffer"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "New constraint — we need to support offline downloads. Users in India and Southeast Asia have unreliable connectivity and want to download videos on Wi-Fi for later viewing. What changes?",
+      "annotation": { "action": "introduce_constraint", "phase": "deep_dive", "target_concept": "offline_downloads" }
+    },
+    {
+      "role": "candidate",
+      "content": "For offline downloads, the client downloads all segments of a chosen quality level to local storage. A few considerations: DRM — we can't let users just save unencrypted video files. We'd use Widevine (Android) and FairPlay (iOS) encryption. The downloaded segments are encrypted; the license key has an expiration — say 48 hours — after which the device must re-validate online. Download management: the app downloads segments sequentially in the background, supports pause/resume, and shows download progress. We'd also need to track downloads server-side for licensing compliance — how many devices each user has downloaded to. Storage optimization: offer quality selection (720p download is ~300MB for a 2-hour movie versus 1.5GB for 1080p) and auto-delete watched downloads.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["offline_downloads", "drm", "encryption", "license_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about the metadata and search side. How do users find videos?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "search_and_discovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two discovery paths: search and recommendation. For search, we index video metadata (title, description, tags, auto-generated captions) in Elasticsearch. The search query goes through a query understanding layer — spell correction, synonym expansion, query intent classification — before hitting the search index. Results are ranked by a combination of text relevance and engagement signals (view count, like ratio, recency). For recommendations, we use a two-stage approach: a candidate generation model that retrieves a few hundred candidates from a large corpus, then a ranking model that scores them based on user history and engagement predictions. The recommendation service runs on a separate infrastructure because it's computationally expensive — matrix factorization or neural collaborative filtering models.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["search", "elasticsearch", "recommendation_system", "ml_ranking"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Final constraint — regulatory requirement. Videos uploaded in the EU must be stored in EU data centers and never replicated to non-EU regions. How does this affect your CDN and storage architecture?",
+      "annotation": { "action": "introduce_constraint", "phase": "scaling_failures", "target_concept": "data_residency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Data residency is a real concern — GDPR-adjacent requirements. For storage: EU-uploaded videos are stored in EU object storage buckets only. The metadata database tags each video with its residency region. For CDN: EU-only content can still be served from CDN edge nodes globally — the CDN cache is ephemeral, not permanent storage, so technically the data residency requirement applies to the origin, not the cache. But if the legal interpretation is stricter, we'd configure the CDN to only cache EU content at EU edge nodes. This degrades latency for non-EU viewers watching EU content. The transcoding pipeline also needs to run in the EU for EU content — we'd route transcoding jobs to the correct regional cluster based on the video's origin. The tricky part is content that involves both EU and non-EU creators — like a collaboration — where we'd need clear rules about which region governs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_residency", "gdpr", "cdn_redirect", "geographic_distribution"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Alright, we're out of time. What are the top three things you'd monitor in this system?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "First: video start time (time from play click to first frame) and rebuffering ratio — these directly measure user experience. If rebuffering goes above 1%, users leave. Second: transcoding pipeline lag — time from upload to video availability. If this exceeds 30 minutes, creators are unhappy. Third: CDN cache hit ratio by region — if it drops below 90%, we're over-spending on origin bandwidth and under-serving users. I'd also monitor error rates on the playback path, storage costs trending, and content moderation queue depth, but those are secondary.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "video_quality_metrics", "cdn_redirect"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You adapted well every time I threw a new constraint at you. That flexibility is important in real system design. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 67,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 5,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 6,
+      "communication": 8
+    },
+    "strengths": [
+      "Adapted well to four mid-interview constraint changes without losing composure",
+      "Creative solution for no-CDN scenario including P2P distribution",
+      "Good understanding of video-specific concerns: DRM, adaptive bitrate, transcoding pipeline"
+    ],
+    "weaknesses": [
+      "Database design was barely covered — no discussion of metadata schema or data modeling",
+      "Failure scenarios were not explored — what happens when transcoding fails, or segments are corrupted?",
+      "Search and recommendation discussion was surface-level compared to other areas"
+    ]
+  }
+}

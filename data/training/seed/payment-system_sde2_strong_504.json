@@ -1,0 +1,171 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "sde2",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_504"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Hey! Today we're going to design a payment processing system, similar to Stripe. We'll work through this together. Don't worry about getting everything perfect -- I'm more interested in how you think. What questions come to mind first?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great, I have a few questions. First, what's the scope -- are we building the full payment gateway that talks to card networks, or the merchant-facing API layer that orchestrates payments? Second, what payment methods should we support -- just cards or also things like ACH and digital wallets? Third, what's the target transaction volume? And fourth, do we need to handle payouts to merchants or just the charge side?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payment_gateway", "payment_methods", "transaction_volume", "payouts"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great questions! Let's focus on the merchant-facing API layer -- like Stripe's API. Cards only for now. Target is 50K transactions per day, growing to 500K in a year. Focus on the charge side today, not payouts. What's your approach?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scope" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, so 50K transactions per day is about 0.6 TPS average, but payment traffic is spiky -- during sales events it could be 10-20x peak, so maybe 6-12 TPS. At 500K/day we're looking at roughly 6 TPS average and maybe 60-120 TPS peak. These are well within what a single database can handle, so we don't need to worry about sharding yet, but we should design for horizontal scaling. The most critical requirement is correctness -- we cannot double-charge a customer or lose a payment. I'd say reliability and idempotency are the foundations here.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "peak_traffic", "horizontal_scaling", "idempotency", "reliability"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Love that you jumped to idempotency right away. Let's start with the API. What endpoints would you expose to merchants?",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd model it around the standard card payment lifecycle. First, merchants need to securely collect card details, so we need a tokenization endpoint: POST /v1/tokens -- the merchant's frontend sends card details directly to us (never to their server for PCI compliance), and we return a token. Then the core payment flow has two steps. POST /v1/charges/authorize with the token, amount, currency, and merchant ID -- this places a hold on the customer's card. POST /v1/charges/{id}/capture to actually capture the authorized amount. We'd also need POST /v1/charges/{id}/refund for refunds, and GET /v1/charges/{id} to check status. Separating authorize and capture is important because it lets merchants verify inventory or check for fraud before capturing the funds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tokenization", "authorize_capture", "pci_compliance", "api_design", "refund"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice! You mentioned tokenization for PCI compliance. Can you explain what that protects against and how it works?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "tokenization" }
+    },
+    {
+      "role": "candidate",
+      "content": "PCI DSS requires any entity that stores, processes, or transmits cardholder data to meet strict security standards. Tokenization lets the merchant avoid handling raw card numbers entirely. Here's the flow: the merchant's checkout page loads our JavaScript SDK. When the customer enters their card number, our SDK sends it directly to our servers over TLS -- it never touches the merchant's backend. We validate the card, store the encrypted card details in a PCI-compliant vault, and return a token like tok_abc123 to the merchant. The merchant then uses this token in their authorize call. The token is useless to an attacker without access to our vault. This means the merchant only needs SAQ-A level PCI compliance instead of the much more expensive SAQ-D.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pci_dss", "tokenization", "card_vault", "encryption", "saq_levels"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a solid understanding. Now walk me through the internal architecture. What services and data stores do you envision?",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": "system_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "I see a few core services. The API Gateway handles authentication, rate limiting, and request routing. The Payment Service is the orchestrator -- it manages the payment state machine. The Token Service handles tokenization and the card vault, isolated in its own PCI-scoped environment. The Payment Gateway Adapter talks to downstream card networks and processors -- abstracting away the differences between Visa, Mastercard, etc. For data stores, the Payment Service uses a relational database -- PostgreSQL -- because payments need ACID transactions. The schema would have a payments table with columns like payment_id, merchant_id, amount, currency, status, token_id, idempotency_key, created_at, and updated_at. Status transitions follow a state machine: created -> authorized -> captured -> settled, with branches for failed, refunded, and disputed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_gateway", "payment_service", "token_service", "gateway_adapter", "state_machine", "acid", "postgresql", "schema_design"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned idempotency earlier. How exactly would you implement it?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "idempotency" }
+    },
+    {
+      "role": "candidate",
+      "content": "The merchant includes an Idempotency-Key header with each request -- typically a UUID they generate. On our side, when we receive a request, we first check if we've seen this idempotency key before. If yes, we return the stored response without re-executing the operation. If no, we process the request and store the response keyed by the idempotency key. Implementation-wise, I'd add a unique constraint on idempotency_key in the payments table. When the Payment Service starts processing, it does an INSERT with the idempotency key. If a duplicate key violation occurs, it knows this is a retry and fetches the existing result. The critical part is that the idempotency key check and the payment creation must be in the same database transaction -- otherwise there's a race condition where two concurrent requests with the same key both pass the check.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency_key", "unique_constraint", "race_condition", "atomic_operation", "database_transaction"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good catch on the race condition. Now let's talk about what happens when things go wrong. The merchant sends an authorize request, we call the card network, and the network times out. What do you do?",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "timeout_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is tricky because a timeout is ambiguous -- the authorization might have succeeded, failed, or still be in progress. We can't just retry blindly because we might double-authorize. Here's my approach: first, we set the payment status to 'pending_authorization' before calling the network. If the call times out, we don't immediately return failure to the merchant. Instead, we return a status of 'pending' and tell them to poll or wait for a webhook. In the background, we have a reconciliation worker that picks up pending payments. It queries the card network's status API to check what happened. If the authorization went through, we update to 'authorized.' If it failed or doesn't exist, we update to 'failed.' If the status API also times out, we retry with exponential backoff. The key insight is: we never guess. We always verify with the source of truth before changing state.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["timeout_handling", "pending_state", "reconciliation", "status_api", "exponential_backoff", "source_of_truth"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. What about the opposite problem -- the card network authorizes the charge, but our service crashes before persisting the result?",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "crash_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Since we set the status to 'pending_authorization' before making the external call, and that write is durable in PostgreSQL, the same reconciliation worker handles this. On service restart, it finds payments stuck in 'pending_authorization' for longer than a threshold -- say 2 minutes. It queries the card network to check the actual outcome and updates accordingly. The idempotency key ensures that if we had sent the authorization request before crashing, we can safely re-send it and the network returns the same result. If the authorization succeeded, we record it. If it didn't, we fail it. The customer is never double-charged because the idempotency key on the card network side prevents duplicate authorizations.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["crash_recovery", "reconciliation", "durable_state", "idempotency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You're handling edge cases really well. Let's zoom out a bit. How would you handle the scenario where the merchant's webhook endpoint is down and they miss a payment status update?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "webhook_reliability" }
+    },
+    {
+      "role": "candidate",
+      "content": "Webhooks are inherently unreliable since we're calling someone else's server. I'd implement a retry strategy with exponential backoff -- retry at 1 minute, 5 minutes, 30 minutes, 2 hours, up to 24 hours. Each attempt is logged. The webhook payload includes an event_id so the merchant can deduplicate on their end. We also expose a GET /v1/events endpoint where merchants can poll for missed events -- this is a pull-based fallback for the push mechanism. If all retries fail, we'd surface this in the merchant's dashboard as an alert. Stripe does exactly this: webhooks for real-time notification, but merchants should always have a reconciliation process that polls for status rather than relying solely on webhooks.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["webhook_retry", "exponential_backoff", "event_deduplication", "pull_fallback", "reconciliation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice. Let's talk about the database. With 500K transactions a day, how does the payments table look after a year?",
+      "annotation": { "action": "scaling_probe", "phase": "scaling_failures", "target_concept": "data_growth" }
+    },
+    {
+      "role": "candidate",
+      "content": "500K per day times 365 is about 182 million rows in a year. Each row is maybe 500 bytes with indexes, so the table is around 90GB of raw data, plus indexes could double that to 180GB. PostgreSQL can handle this on a single node with proper indexing, but queries on older records will slow down. I'd add a composite index on (merchant_id, created_at) for the most common query pattern -- merchants looking at their recent transactions. For the reconciliation worker, an index on (status, updated_at) to find stuck payments efficiently. After a year, I'd consider partitioning the table by month using PostgreSQL's native partitioning. Old partitions can be moved to cheaper storage or archived. We'd keep the last 3 months hot and archive the rest.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_growth", "indexing_strategy", "table_partitioning", "archival", "query_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Smart. What about financial auditing? Regulators might need a complete, tamper-evident history of every payment.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "audit_trail" }
+    },
+    {
+      "role": "candidate",
+      "content": "For auditing, we need an immutable event log. Instead of just updating the status column in the payments table, every state transition is recorded in a payment_events table: event_id, payment_id, event_type (authorized, captured, refunded), old_status, new_status, timestamp, actor (system or user), and a metadata JSON column for details. This table is append-only -- no updates or deletes. For tamper evidence, each event could include a hash of the previous event, forming a hash chain. If anyone modifies a historical record, the chain breaks. We'd also stream these events to an immutable data lake -- something like S3 with object lock -- for long-term regulatory retention. Financial regulations typically require 7 years of records.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["audit_trail", "event_log", "append_only", "hash_chain", "regulatory_retention", "immutable_storage"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great answer. One more scenario -- what happens if a merchant's API key is compromised? How do you limit the blast radius?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "security" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several layers of defense. First, API keys should be scoped -- a publishable key for frontend tokenization that can only create tokens, and a secret key for server-side operations like charges. If the publishable key leaks, an attacker can only tokenize cards, not charge them. Second, merchants can configure IP allowlists so the secret key only works from their server IPs. Third, we support per-key spending limits -- max amount per transaction, max total per day. Fourth, if a key is compromised, the merchant can instantly revoke it through the dashboard, and we invalidate it immediately in our API gateway cache. Fifth, all charge attempts are logged with IP and metadata, so anomalous patterns trigger automated fraud detection alerts. The key insight is defense in depth -- no single control is sufficient.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["key_scoping", "ip_allowlist", "spending_limits", "key_revocation", "fraud_detection", "defense_in_depth"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "If traffic grows 100x beyond your initial estimate, what's the first bottleneck and how do you address it?",
+      "annotation": { "action": "scaling_probe", "phase": "scaling_failures", "target_concept": "scaling_bottleneck" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 100x -- 50 million transactions a day, about 600 TPS average, maybe 6,000 TPS peak -- the first bottleneck is PostgreSQL writes. The payment creation and status updates generate significant write load with all the indexes. I'd address this in stages. First, read replicas for the merchant-facing query traffic -- dashboards, reports, transaction lookups. That offloads reads from the primary. Second, if write throughput is still a problem, shard the payments table by merchant_id. Most queries are merchant-scoped anyway, so this is a natural shard key. Each shard handles a subset of merchants. Third, the stateless services -- API gateway, Payment Service -- scale horizontally behind a load balancer. The token vault might need its own scaling strategy since it has strict security isolation requirements.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_replicas", "sharding", "horizontal_scaling", "shard_key_selection", "write_bottleneck"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Really solid interview. You asked the right scoping questions, arrived at idempotency on your own, handled failure scenarios thoughtfully, and even considered auditing and security. Well done, and thanks for your time!",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 75,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 7,
+      "api_design": 9,
+      "database_design": 8,
+      "caching_strategy": 5,
+      "scalability": 7,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Independently identified idempotency as a foundational requirement before being prompted",
+      "Strong API design with proper authorize-capture separation and clear PCI tokenization reasoning",
+      "Excellent failure handling -- timeout ambiguity, crash recovery via reconciliation, webhook reliability with pull-based fallback",
+      "Thoughtful audit trail design with append-only event log and hash chain for tamper evidence"
+    ],
+    "weaknesses": [
+      "No discussion of caching strategy -- could have mentioned caching merchant configs or token lookups",
+      "Did not discuss multi-region deployment or disaster recovery for the payment system",
+      "Fraud detection was mentioned briefly but not designed in detail"
+    ]
+  }
+}

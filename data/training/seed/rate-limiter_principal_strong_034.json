@@ -1,0 +1,179 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "principal",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_034"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiting system. Think about something that could be used across a large-scale API platform — multiple services, multiple regions. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several questions. First, what's the scope — are we rate limiting per API key, per user, per IP, or some combination? Second, what are the rate limiting rules — fixed window, sliding window, token bucket? Do different API endpoints have different limits? Third, are we multi-region, and if so, do rate limits need to be globally enforced or can they be per-region? Finally, what's the acceptable error margin — is it okay to occasionally allow a request that should be throttled?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting_granularity", "rate_limiting_algorithms", "multi_region", "error_margin"], "depth": "deep", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Rate limit per API key, but support per-endpoint overrides. Multi-region — 5 regions globally. Limits should be globally enforced, meaning a customer's total requests across all regions count toward their limit. Some margin is acceptable — up to 5% over-admission. Rules should be configurable per tier.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "multi_region_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "That 5% margin is important — it tells me we don't need perfectly synchronized counters across regions in real time, which would be prohibitively expensive. Let me also ask: what's our expected scale in terms of API requests per second globally? And how many unique API keys are we tracking?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["global_synchronization", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "1 million API requests per second globally, approximately 500,000 active API keys. Go ahead with the design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me frame the architecture at three levels. First, where does rate limiting execute — API gateway layer, application layer, or both? Second, how do we count and synchronize across regions? Third, how do we configure and update rules? For the execution layer, I'd place rate limiting at the API gateway. This is the first thing a request hits, so we reject early before burning compute on authentication, routing, and business logic. We'd use something like Envoy or Kong with a custom rate limiting filter. The alternative — application layer — gives more context-aware limiting but consumes more resources before rejecting. For our use case, gateway-level is the right default, with the option to add application-layer limiting for specific high-value endpoints where we need request-body-level rules.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_gateway", "rate_limiting_placement", "envoy"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good framing. Now the hard part — how do you synchronize rate limit counters across 5 regions?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "multi_region_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where the 5% margin is key. I'd use a token bucket algorithm with local-plus-global synchronization. Each region gets a local token bucket with a fraction of the global limit. If a customer's global limit is 1,000 requests per second, and they distribute traffic evenly across 5 regions, each region gets 200 tokens per second locally. The local bucket can be checked in-memory or via a regional Redis — sub-millisecond latency, no cross-region call. Periodically — say every 1-2 seconds — each region reports its consumption to a global synchronization service, and the global service rebalances token allocations across regions. If one region is consuming more, it gets a larger share. This is the key insight: we don't synchronize per-request, we synchronize periodically and use local enforcement.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "local_global_sync", "token_rebalancing", "multi_region_rate_limiting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a customer shifts their traffic pattern — say they were sending 80% of requests to US-East and suddenly shift to EU-West?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "token_rebalancing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good edge case. During the transition, EU-West's local bucket runs out quickly because it only has a small allocation. Requests start getting rejected in EU-West while US-East's bucket is underutilized. The global sync cycle — 1-2 seconds later — detects this imbalance and reallocates tokens: EU-West gets more, US-East gets less. So there's a 1-2 second window where we're over-rejecting in one region and under-utilizing in another. To mitigate this, I'd add a 'burst' capacity — each region's local bucket allows a small burst beyond its allocation, say 10% extra, borrowing against future sync cycles. The global service reconciles this in the next sync. Within the 5% error margin, this works well.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["burst_capacity", "token_rebalancing", "traffic_shift"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the global synchronization service work? Isn't that a single point of failure?",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "global_sync_service" }
+    },
+    {
+      "role": "candidate",
+      "content": "It would be if we built it naively. The global sync service doesn't need to be a single instance — it's a lightweight service that aggregates consumption reports and computes new allocations. I'd run it as a replicated service with leader election via etcd or ZooKeeper. If the leader fails, a new one is elected within seconds. During the gap, each region continues with its last-known allocation. If the global sync is down for an extended period, we fall back to a conservative mode — each region enforces 1/N of the global limit, where N is the number of regions. This ensures we never exceed the global limit, though we might under-utilize capacity if traffic is unevenly distributed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leader_election", "graceful_degradation", "fallback_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the local enforcement layer. You mentioned Redis. At 1M requests per second globally, what's the load on each regional Redis?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "redis_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Assuming roughly even distribution, each region handles 200K requests per second. Each request needs a Redis operation — either DECR on the token count or a Lua script for the token bucket logic. A single Redis instance can handle about 100-200K operations per second, so we're right at the edge. I'd use Redis Cluster with 2-3 shards per region, partitioned by API key hash. This gives us headroom and redundancy. The Lua script would atomically check and decrement the token count, returning whether the request is allowed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_cluster", "lua_scripting", "partitioning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the rule configuration system? How do operators update rate limits?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "rule_configuration" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd build a configuration service backed by a database — PostgreSQL is fine here since writes are infrequent. Operators define rules through an admin API or dashboard: per-tier defaults, per-key overrides, per-endpoint limits. The config service publishes changes to all regions via a message bus — Kafka or even a simple pub/sub system. Each region's rate limiter caches the rules locally and refreshes on config change events. For safety, I'd add a validation layer that prevents accidentally setting limits to zero or absurdly high values, and an audit log for all changes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["configuration_management", "config_propagation", "audit_logging", "validation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle graceful degradation when rate limiting infrastructure itself has issues? You don't want a rate limiter outage to bring down the entire API platform.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "graceful_degradation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Critical point. The cardinal rule is: fail open, not fail closed. If the rate limiting layer is degraded — Redis is down, the sync service is unreachable — we let requests through rather than rejecting everything. A rate limiter that blocks all traffic is worse than no rate limiter. Specifically: if regional Redis is down, the gateway skips rate limit checks and forwards requests. We'd set a circuit breaker that opens after N consecutive Redis failures. Meanwhile, we alert the ops team aggressively. For partial failures — say one Redis shard is down — we only skip rate limiting for keys assigned to that shard. I'd also have a kill switch that lets ops disable rate limiting entirely in an emergency.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fail_open", "circuit_breaker", "graceful_degradation", "kill_switch"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What about monitoring? How do you know the rate limiter is working correctly?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several layers of monitoring. First, operational metrics: Redis latency, sync service health, rule propagation lag, circuit breaker state. Second, business metrics: total requests allowed vs rejected per API key, per region, and globally. Rejection rates broken down by status — over-limit vs misconfigured rules. Third, correctness metrics: compare actual admission rates against configured limits. If a customer's limit is 1,000 RPS and we're consistently admitting 1,200, something is wrong. I'd set up alerts on: rejection rate spikes (could indicate an attack or a misconfiguration), admission over-limit exceeding our 5% margin, sync service latency exceeding 5 seconds, and circuit breaker activations. For dashboards, I'd want a real-time view of top consumers, rate-limited customers, and cross-region distribution.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "alerting", "operational_metrics", "business_metrics", "correctness_metrics"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle a DDoS scenario where a single API key is sending 100x their limit?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "ddos_protection" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 100x the limit, we're dealing with a potential abuse scenario. The rate limiter handles the normal case — rejecting excess requests with 429 status codes. But at extreme volumes, even processing and rejecting requests consumes resources. I'd add a tiered defense: first tier is the normal token bucket — rejects with 429 once the limit is exceeded. Second tier: if a key exceeds 10x its limit for more than 30 seconds, we push a block rule to the API gateway that drops requests before any processing — essentially a connection-level reject. Third tier: for sustained abuse, push an IP-level block to the edge CDN or firewall layer. This escalation keeps the rate limiter from being overwhelmed by the sheer volume of reject decisions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ddos_protection", "tiered_defense", "edge_blocking", "abuse_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss the customer-facing side. How do you communicate rate limits to API consumers?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Standard HTTP headers. On every response — allowed or rejected — include: X-RateLimit-Limit (the maximum allowed), X-RateLimit-Remaining (tokens left in current window), X-RateLimit-Reset (when the window resets, as a Unix timestamp). On rejection, return 429 Too Many Requests with a Retry-After header indicating when to retry. This lets clients implement backoff intelligently. I'd also provide a dedicated endpoint — GET /rate-limit-status — where clients can check their current usage without consuming a token. Good API design means your customers can self-serve when they hit limits instead of opening support tickets.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_headers", "api_design", "retry_after", "developer_experience"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "One more scenario: a new customer onboards and immediately sends a burst of 50,000 requests in the first second. Their limit is 1,000 RPS. How does your system handle the cold start?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "cold_start" }
+    },
+    {
+      "role": "candidate",
+      "content": "Interesting edge case. On cold start, there's no existing token bucket for this key in Redis. The first request triggers bucket creation — initialize with the configured limit. A naive implementation would allow the full burst because the bucket starts full. Better: when creating a new bucket, I'd initialize it with tokens proportional to the elapsed time in the current window. If we're 0.5 seconds into the window, start with 500 tokens, not 1,000. For the 50,000-request burst, only the first ~1,000 (or fewer depending on window position) get through, and the remaining 49,000 get 429s. The bucket creation itself needs to be atomic — use Redis SETNX to prevent race conditions where multiple requests simultaneously try to create the bucket.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cold_start", "atomic_initialization", "burst_handling", "setnx"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great depth throughout. Anything you'd add as a final thought?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. First, I'd invest in a shadow mode — new rate limiting rules run in observe-only mode before enforcement, so we can see the impact without actually rejecting traffic. Second, I'd build a quota management system that lets sales teams adjust limits without engineering involvement, with appropriate guardrails. Third, for the long term, I'd consider adaptive rate limiting that automatically adjusts limits based on system capacity — if our backend is under stress, temporarily lower limits to protect the system. This turns the rate limiter from a static policy enforcer into a dynamic system health tool.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["shadow_mode", "quota_management", "adaptive_rate_limiting", "system_health"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. You demonstrated strong systems thinking and practical multi-region experience. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 82,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 8,
+      "api_design": 9,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Excellent multi-region design with local-plus-global token bucket synchronization",
+      "Strong failure handling philosophy — fail open, tiered defense against abuse",
+      "Comprehensive monitoring strategy covering operational, business, and correctness metrics"
+    ],
+    "weaknesses": [
+      "Could have discussed more about the data model and storage layer specifics",
+      "Didn't address testing strategy for verifying rate limiting accuracy"
+    ]
+  }
+}

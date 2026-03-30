@@ -1,0 +1,230 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_464"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Welcome. Today we're designing a social media feed system — think Twitter or Instagram. You'll be designing the home timeline. What questions do you have before we begin?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. I'd like to understand the scale first. How many daily active users are we targeting? What's the expected read-to-write ratio? Is the feed chronological or algorithmically ranked? And do we have a latency budget for loading the feed?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["requirements_gathering", "scale", "latency", "read_write_ratio"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500 million DAU. Some celebrities have 50 million or more followers. Feed should load under 200ms. It's primarily chronological with a relevance layer. Users post about 600 million items per day.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. Let me estimate some numbers. 600M posts per day is roughly 7,000 writes per second. If each DAU checks their feed about 10 times a day, that's 5 billion reads per day, around 58,000 reads per second. So the system is extremely read-heavy. Average user follows maybe 300 accounts. Storage-wise, if each post is about 1KB including metadata, that's 600GB of new data per day, or roughly 220TB per year before replication.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "read_write_ratio", "storage_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good estimates. Walk me through your high-level architecture.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The core idea is fan-out on write. When a user posts, we push that post ID into the pre-computed timelines of all their followers. Each user has a timeline stored in something like Redis — a sorted set or list of post IDs. On read, we just fetch the pre-computed timeline from the cache, hydrate the post objects, and return. This avoids doing expensive aggregation queries at read time, which matters since reads vastly outnumber writes. But here's the problem — if a celebrity with 50 million followers posts, we'd need to push that post into 50 million timelines. That's a massive write amplification. So for high-follower accounts, we skip the fan-out and instead merge their posts at read time. It's a hybrid approach — fan-out on write for normal users, fan-out on read for celebrities.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_on_write", "fan_out_on_read", "hybrid_fanout", "celebrity_problem", "write_amplification", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You identified the celebrity problem unprompted — nice. How do you decide the threshold between fan-out on write and fan-out on read?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "celebrity_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd set a follower threshold — maybe 100K or 500K followers. Above that, the account is treated as a 'celebrity' and excluded from fan-out on write. The threshold could be tuned based on operational metrics — specifically, we'd look at the fan-out queue lag. If fan-out workers start falling behind, we might lower the threshold. We'd store this as a flag on the user profile. It could also factor in posting frequency — a celebrity who tweets 50 times a day causes more amplification than one who posts once a week.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["celebrity_problem", "fan_out_threshold", "operational_tuning"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Makes sense. Tell me about the fan-out service internals. How does it process events?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "fan_out_on_write" }
+    },
+    {
+      "role": "candidate",
+      "content": "The post creation service writes the post to the database and publishes an event to Kafka. The fan-out service consumes from Kafka, partitioned by author user ID. For each event, it looks up the author's follower list — this is cached since it doesn't change often. Then it pushes the post ID into each follower's timeline in Redis using LPUSH, and trims old entries with LTRIM to keep timelines at a manageable size, maybe 1000 entries. The workers are stateless and horizontally scalable. If a user has 10K followers, that's 10K Redis writes per post. We can batch these into Redis pipelines to reduce round trips.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka", "fan_out_on_write", "redis_caching", "horizontal_scaling", "pipeline_batching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now at read time, how do you merge the pre-computed timeline with the celebrity posts?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "timeline_merge" }
+    },
+    {
+      "role": "candidate",
+      "content": "At read time, the timeline service does two parallel fetches. First, it grabs the user's pre-computed timeline from Redis — that's a list of post IDs from non-celebrity accounts they follow. Second, it queries the recent posts from each celebrity account the user follows. If a user follows 10 celebrities, that's 10 small queries. We cache each celebrity's recent posts separately in Redis since they're queried frequently. Then we merge both lists by timestamp — essentially a k-way merge. The merged result is the final timeline. We then hydrate the post objects from a post cache.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["timeline_merge", "parallel_fetch", "k_way_merge", "celebrity_cache"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about IDs. How do you generate post IDs and what properties should they have?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "snowflake_ids" }
+    },
+    {
+      "role": "candidate",
+      "content": "We need IDs that are unique, roughly time-ordered, and generated without coordination. Twitter's Snowflake approach works well here — a 64-bit ID composed of a timestamp in the high bits, a machine or worker ID in the middle, and a sequence counter in the low bits. The time-ordering is critical because it lets us sort posts chronologically just by comparing IDs, which is efficient for the timeline. It also means we can do range queries on IDs to get posts from a particular time window. No need for a centralized sequence generator since each worker generates IDs independently.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["snowflake_ids", "distributed_id_generation", "time_ordering"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now, you mentioned a relevance layer. Walk me through how you'd rank the feed.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "feed_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, so after we get the chronological list of candidate posts, we'd pass them through a ranking model. The model would use features like: how often the viewer interacts with the author, how many likes and retweets the post has gotten, recency, whether the post has media, and maybe the content type. Something like a gradient-boosted tree or a lightweight neural network that can score posts quickly. The ranking shouldn't dramatically reorder things since we said it's primarily chronological, but it can boost highly relevant posts up a few positions.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["feed_ranking", "ml_model", "engagement_metrics"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Can you be more specific about the ML pipeline? Where does the model run, how is it trained, how do you handle feature freshness?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "feed_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, that's a good question. The model would run as a separate ranking service that the timeline service calls with the candidate post IDs and user context. For training... I think we'd use implicit feedback — posts that a user liked, retweeted, or spent time viewing are positive signals. The training data would be collected from user interaction logs. Feature freshness is tricky — engagement counts change rapidly. I guess we'd have a near-real-time feature store that updates counts every few seconds? Honestly, I'm more comfortable with the infrastructure side than the ML pipeline specifics. I know it's important but the details of feature engineering and model serving at this scale are areas I'd need to partner with an ML team on.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["ml_pipeline", "feature_store", "implicit_feedback"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair enough. Let's move to caching. You've mentioned Redis for timelines. Walk me through your full caching strategy.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "caching_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several layers. First, timeline caches in Redis — lists of post IDs per user, capped at 1000. Second, a post object cache — once we have the IDs we need to hydrate them. I'd use Memcached for this since it's a simple key-value lookup with high throughput. Popular posts would have excellent hit rates. Third, user profile cache — for rendering author info alongside posts. Fourth, celebrity timeline cache — recent posts per celebrity, read by many users. For sizing: 500M DAU times 1000 post IDs at 8 bytes each is about 4TB for timeline caches. We'd shard Redis across many nodes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["caching_strategy", "redis_caching", "memcached", "cache_sizing", "multi_layer_cache"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about cache invalidation? Say a user deletes a post that's been fanned out to millions of timelines.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "cache_invalidation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, that's a hard one. We can't go back and remove the post ID from every follower's timeline cache — that would be as expensive as the original fan-out. I think... we'd delete the post from the post object cache and the database. When a timeline is rendered and we try to hydrate the post IDs, the deleted post would return a cache miss, and on database lookup it would be marked deleted, so we skip it. It's eventually consistent but probably fine for deletes. For edits, we'd invalidate the post object cache entry so the next read fetches the updated version.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cache_invalidation", "lazy_deletion", "eventual_consistency"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about a thundering herd scenario? A celebrity post goes viral, the post cache entry expires, and thousands of requests simultaneously miss the cache.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "cache_invalidation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, thundering herd. We could use a few approaches... one is locking — when a cache miss happens, only one request goes to the database and the others wait. Something like a distributed lock or a single-flight pattern. Another is to not set a TTL on hot objects and instead use an event-driven invalidation — only invalidate when the post changes. That way popular posts don't expire. But I'm not entirely sure about the implementation details of the locking mechanism at this scale. Maybe a local lock per application server rather than a distributed lock? I think there are also approaches using stale-while-revalidate semantics where you serve slightly stale data while refreshing in the background.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["thundering_herd", "cache_locking", "stale_while_revalidate"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You're on the right track with single-flight and stale-while-revalidate. Let's shift to failure scenarios. What happens if the Redis cluster for timelines goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the entire timeline cache is unavailable, we degrade to fan-out on read for everyone. The timeline service fetches the user's follow list, queries each followed account's recent posts from the database or the post cache, and merges them. This will be much slower — probably 500ms to a second — so we'd reduce the timeline size, maybe show 20 posts instead of 50, and disable non-essential features like retweet rendering. We'd put up a degraded experience banner. For durability, the Redis cluster should have replicas per shard and we might use Redis persistence (RDB snapshots or AOF) so recovery doesn't require rebuilding all timelines from the database.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_failure", "graceful_degradation", "fan_out_on_read", "redis_persistence", "redis_cluster"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How would you handle real-time updates — a user's feed updating live without refreshing?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "real_time_updates" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a WebSocket or long-polling connection between the client and a notification service. When a new post is fanned out to a user's timeline, the fan-out service also publishes a lightweight notification event — just the post ID and a snippet. The notification service routes this to the user's active connection. The client then shows a 'new posts available' indicator rather than auto-inserting posts, since auto-insertion while scrolling is disruptive. When the user clicks it, the client fetches the updated timeline from the API. For scale, we'd need connection management — 500M DAU with maybe 20% online at any time means 100M concurrent WebSocket connections distributed across many edge servers.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["real_time_updates", "websocket", "long_polling", "connection_management"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you detect trending topics in this system?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "trending_topics" }
+    },
+    {
+      "role": "candidate",
+      "content": "For trending topics, I'd use a stream processing approach. Every post goes through a pipeline that extracts hashtags and notable terms. We'd count occurrences in sliding windows — say 15-minute and 1-hour windows — and compare the current rate to a historical baseline. Topics that are spiking above their normal rate are flagged as trending. I've heard of using count-min sketch data structures for this kind of approximate frequency counting at high throughput, though I haven't implemented one myself. The trending results would be cached and refreshed every 30 seconds or so.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["trending_topics", "stream_processing", "sliding_window", "count_min_sketch"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned count-min sketch. Can you explain how it works and why it's useful here?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "count_min_sketch" }
+    },
+    {
+      "role": "candidate",
+      "content": "A count-min sketch is a probabilistic data structure for frequency estimation. It uses multiple hash functions and a 2D array of counters. When you see an item, you hash it with each function and increment the corresponding counters. To query the count, you take the minimum across all hash functions — that's where the 'min' comes from. It can overcount but never undercount. It's useful here because we have millions of distinct hashtags and terms flowing through per minute, and we don't need exact counts — approximate is fine for trending detection. The memory footprint is fixed regardless of how many distinct items we see.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["count_min_sketch", "probabilistic_data_structure", "frequency_estimation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid. Let's talk about the database layer. What's your schema and sharding approach?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the posts table, I'd use MySQL sharded by post ID — the Snowflake ID makes range-based sharding natural since it embeds the timestamp. Schema: post_id (bigint, PK), author_id (bigint, indexed), content (varchar 280), media_urls (json), created_at (timestamp), deleted (boolean). For the social graph: a follows table sharded by follower_id with columns follower_id, followee_id, created_at. We index by (follower_id, followee_id) for checking if a follow exists, and we'd have a reverse index or a separate table sharded by followee_id for looking up a user's followers efficiently. Likes and retweets would be in separate tables sharded by post_id.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["database_design", "sharding_strategy", "schema_design", "social_graph", "indexing"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the case where a user's follow list is sharded by follower_id but the fan-out service needs to look up all followers of a given author?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good point — that's a cross-shard query if the follows table is only sharded by follower_id. For the fan-out use case, we need the reverse lookup — given an author, find all followers. I'd maintain a separate table or index sharded by followee_id specifically for this. It's a form of dual-write: when someone follows a user, we write to both the follower-sharded table and the followee-sharded table. The consistency between them is managed through the same Kafka event that triggers both writes. There's some denormalization cost but the read patterns are so different that it's worth it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_strategy", "denormalization", "dual_write", "cross_shard_query"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good thinking. Last question — if you had more time, what would you add or improve?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. First, I'd design the content delivery pipeline more carefully — images and videos through a CDN with adaptive quality. Second, a more robust abuse detection system — spam filtering, bot detection, content moderation. Third, search functionality using an inverted index like Elasticsearch. Fourth, I'd add comprehensive observability — fan-out lag metrics, cache hit rates, p99 timeline load latency, and circuit breakers between services. Finally, the feed ranking ML pipeline deserves a deeper design — I covered the basics but a production system would need an online/offline feature store, A/B testing framework, and feedback loops.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cdn", "content_moderation", "search", "observability", "ml_pipeline", "ab_testing"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good session. You showed strong instincts on the core architecture — especially the hybrid fan-out and the celebrity problem. Your caching and failure handling were solid. The ranking and cache invalidation areas had room for more depth. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 67,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 8,
+      "api_design": 5,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 7
+    },
+    "strengths": [
+      "Identified the celebrity fan-out problem independently and proposed hybrid approach without prompting",
+      "Strong capacity estimation with concrete numbers for QPS, storage, and cache sizing",
+      "Good understanding of Snowflake IDs and their properties for timeline ordering"
+    ],
+    "weaknesses": [
+      "Feed ranking discussion remained surface-level — couldn't articulate ML pipeline details like feature stores or model serving",
+      "Cache invalidation discussion lacked depth on thundering herd mitigation — mentioned approaches but unsure about implementation",
+      "Never discussed API design — no mention of cursor-based pagination, response format, or endpoint structure"
+    ]
+  }
+}

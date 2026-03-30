@@ -1,0 +1,130 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "senior",
+    "candidate_profile": "reconciliation-mismatch",
+    "total_exchanges": 20,
+    "generation_id": "seed_376"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a payment system. Today I want to focus on reconciliation — what happens when your records disagree with the payment gateway. First, give me the basic transaction recording flow.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "transaction_recording" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each payment transaction flows through: create order, authorize payment, capture payment, and settle. We maintain a ledger of every transaction with its state, amount, timestamps, and external reference IDs from the payment gateway. Every state transition is logged as an immutable event in a transaction event log. We also store the gateway's response for each API call — the response code, reference number, and any error messages. This gives us a complete audit trail of what we asked the gateway to do and what they said happened.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["transaction_ledger", "event_log", "audit_trail", "gateway_response"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now here's the scenario: your daily reconciliation job runs at 6 AM. It downloads the previous day's settlement file from the payment gateway and compares it against your internal records. It finds 47 mismatches. Some transactions where you say 'paid' but the gateway says 'failed.' Others where you say 'failed' but the gateway says 'paid.' Walk me through your investigation process.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "reconciliation_mismatch" }
+    },
+    {
+      "role": "candidate",
+      "content": "First, classify the 47 mismatches into categories. Category A: we say paid, gateway says failed — this means we think we collected money but didn't. The customer got the product/service but wasn't actually charged. We're losing money. Category B: we say failed, gateway says paid — the customer was charged but our system shows the payment failed. The customer might have been charged without receiving what they paid for, or they got a refund they shouldn't have. Category C: both say paid but amounts differ — potential currency conversion issues or partial captures. Category D: we have no record at all but the gateway shows a charge — orphaned transactions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["mismatch_classification", "revenue_loss", "customer_impact", "orphaned_transactions"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good categorization. Let's dig into Category A: 15 transactions where you say 'paid' but the gateway says 'failed.' What are the likely root causes?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "false_positive_paid" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several possibilities. First, race condition in capture: we sent the capture request, our code interpreted an ambiguous gateway response (like a timeout) as success, and recorded 'paid.' But the gateway never actually processed the capture. Second, post-authorization failure: the authorization succeeded, we recorded the auth as 'paid' (treating auth as capture by mistake — a bug), but the actual capture was never sent or was declined. Third, reversal: the gateway initially approved the charge but then reversed it — perhaps due to a fraud flag, insufficient funds discovered during settlement, or a chargeback. Our system wasn't notified of the reversal. Fourth, test transactions: someone in development mode processed against the live gateway with test credentials that auto-fail at settlement.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["race_condition", "timeout_misinterpretation", "post_auth_failure", "reversal", "test_contamination"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you investigate which of these causes applies to each of the 15 transactions?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "investigation_process" }
+    },
+    {
+      "role": "candidate",
+      "content": "Pull the full event trail for each transaction. For each one, I want to see: (1) the raw HTTP request we sent to the gateway, (2) the raw HTTP response we received, (3) the timestamp and state transition in our system, and (4) the corresponding entry in the gateway's settlement file. Specifically, check: did we get a clear 'approved' response or a timeout? What HTTP status code did we receive? Did the gateway return a transaction reference ID? If we got a reference ID but the gateway says failed, query the gateway's real-time API with that reference ID for the current status — the settlement file might be stale or have a processing lag. I'd automate this: for each mismatched transaction, call the gateway's inquiry API, compare the real-time status with the settlement file, and triage accordingly.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["event_trail", "raw_request_logging", "gateway_inquiry", "automated_triage"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now Category B: 20 transactions where you say 'failed' but the gateway says 'paid.' The customer was charged but your system doesn't know. This is worse, right?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "false_negative_paid" }
+    },
+    {
+      "role": "candidate",
+      "content": "Much worse from a customer trust perspective. The customer sees a charge on their credit card statement but our system shows their order as unpaid or cancelled. They might have been asked to pay again, leading to a double charge. Root causes: our server crashed between sending the capture request and receiving the response (the partial failure scenario), so we recorded the attempt as failed. Or we received the success response but a bug or database failure prevented us from persisting the state update. Or there was a retry storm: our first capture attempt succeeded at the gateway, we thought it timed out, we retried with a different idempotency key (a bug — the key should be the same), and now we have two successful charges. Our system only knows about the second one.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["customer_impact", "partial_failure", "double_charge", "idempotency_bug"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "For these 20 transactions, what's the immediate action? The customer was charged — you owe them either the product or a refund.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "immediate_remediation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Immediate triage based on order fulfillment status. For each transaction: check if the order was fulfilled despite the payment being recorded as failed. If the order was fulfilled (product shipped, service delivered), then we just need to fix our records — update the payment status to 'paid' and reconcile the ledger. No customer impact. If the order was NOT fulfilled (cancelled due to 'payment failure'), we have two options: (a) fulfill the order now if possible, and notify the customer that their order is being processed, or (b) issue an immediate refund and apologize. The choice depends on the product — digital goods can be delivered instantly, physical goods might have a shipping delay. For any case with a potential double-charge, refund the duplicate immediately and don't wait for manual review.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["triage_by_fulfillment", "record_correction", "automatic_refund", "customer_notification"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you prevent these mismatches in the first place? What system design changes would reduce the 47 to near zero?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "prevention" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several design principles. First, never interpret ambiguous responses as success. Timeouts, connection errors, and 5xx responses should all result in an 'unknown' state, not 'paid' or 'failed.' The unknown state triggers an async verification flow that queries the gateway until it gets a definitive answer. Second, consistent idempotency keys: generate the key once per payment intent and reuse it across all retries. Store it in the database before making the first API call. Third, real-time reconciliation: don't wait for the daily batch. After every capture, schedule a verification check 5 minutes later that queries the gateway's API to confirm the transaction status matches our records. This catches mismatches within minutes, not hours. Fourth, use webhooks from the gateway as an additional signal — most gateways send payment confirmations asynchronously.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ambiguous_response_handling", "idempotency_keys", "real_time_reconciliation", "webhook_confirmation", "unknown_state"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned an 'unknown' state. What if the transaction stays in 'unknown' for hours because the gateway's API is also down?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "unknown_state_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "The 'unknown' state needs escalation tiers. Tier 1 (0-5 minutes): automatic retry of the gateway inquiry every 30 seconds. Tier 2 (5-30 minutes): reduce retry frequency to every 2 minutes, send an alert to the on-call engineer. Tier 3 (30 minutes - 4 hours): alert to the payments team, consider the business impact. If the customer is waiting for order confirmation, show them 'Payment is being verified' rather than a success or failure. Tier 4 (4+ hours): manually reach out to the gateway provider's support. For the customer, if their order is time-sensitive, we might choose to fulfill optimistically — ship the order, and if the payment turns out to have failed, treat it as a business loss we can recover later. The 'unknown' state should never silently become 'failed' — that path leads to Category B mismatches.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["escalation_tiers", "retry_strategy", "customer_communication", "optimistic_fulfillment"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you design the reconciliation system itself? The 6 AM batch job seems fragile.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "reconciliation_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd replace the single daily batch with a continuous reconciliation pipeline. Ingest the gateway's transaction events in near-real-time via webhooks or streaming APIs. Each event is matched against our internal records using the gateway reference ID. Mismatches are detected within seconds, not hours. For the daily settlement file, still process it as a batch — it's the gateway's final source of truth — but by then, most mismatches should already be caught and resolved by the real-time pipeline. The settlement file becomes a verification step rather than the primary detection mechanism. I'd also add a T+7 reconciliation pass that catches chargebacks, reversals, and delayed settlement adjustments that appear days after the original transaction.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["continuous_reconciliation", "streaming_reconciliation", "multi_pass_reconciliation", "chargeback_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You showed strong understanding of reconciliation processes and mismatch investigation. The escalation tiers for the unknown state were well thought out. I would have liked more depth on the automated triage pipeline and metrics around acceptable mismatch rates. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 72,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 5,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 5,
+      "scalability": 6,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent mismatch classification and systematic investigation process",
+      "Strong escalation tier design for unknown payment states",
+      "Good evolution from batch to continuous reconciliation"
+    ],
+    "weaknesses": [
+      "No capacity estimation — didn't size the reconciliation pipeline or discuss throughput",
+      "Automated triage logic was described conceptually but not implemented in detail",
+      "Didn't discuss regulatory requirements for payment record accuracy or audit compliance"
+    ]
+  }
+}

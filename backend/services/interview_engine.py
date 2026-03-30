@@ -4,7 +4,8 @@ Coordinates all 4 layers: Analyzer → Tracker → Strategist → Speaker
 Plus scoring via the Scorer.
 """
 import json
-import uuid
+import secrets
+import time
 from pathlib import Path
 
 from config import settings
@@ -13,84 +14,111 @@ from services.interview_tracker import InterviewTracker
 from services.interview_strategist import interview_strategist
 from services.interview_speaker import interview_speaker
 from services.interview_scorer import interview_scorer
+from middleware.security import sanitize_for_prompt, sanitize_path_component
 
 
-# In-memory session store (production: use Redis or DB)
+# ── Session Store with TTL and Limits ─────────────────────────
+
+MAX_SESSIONS = 500                    # max concurrent sessions
+SESSION_TTL_SECONDS = 60 * 60         # 1 hour
+MAX_MESSAGES_PER_SESSION = 60         # max exchanges before forced end
+MAX_MESSAGE_LENGTH = 5000             # max chars per user message
+
 _sessions: dict[str, dict] = {}
+
+
+def _cleanup_stale_sessions():
+    """Remove sessions older than TTL. Called periodically."""
+    now = time.monotonic()
+    stale = [
+        sid for sid, s in _sessions.items()
+        if now - s.get("created_at", 0) > SESSION_TTL_SECONDS
+    ]
+    for sid in stale:
+        _sessions.pop(sid, None)
 
 
 def _load_knowledge_graph(problem_id: str) -> dict:
     """Load the knowledge graph for a problem."""
-    path = Path(settings.content_dir) / "knowledge-graphs" / f"{problem_id}.json"
+    safe_id = sanitize_path_component(problem_id)
+    path = Path(settings.content_dir) / "knowledge-graphs" / f"{safe_id}.json"
     if path.exists():
         with open(path) as f:
             return json.load(f)
-
-    # Fallback: minimal graph
-    return {
-        "problem": problem_id,
-        "concepts": {},
-        "concept_rubric_map": {},
-    }
+    return {"problem": safe_id, "concepts": {}, "concept_rubric_map": {}}
 
 
 def _load_challenge_info(problem_id: str) -> dict:
     """Load challenge metadata."""
-    path = Path(settings.content_dir) / "challenges" / f"{problem_id}.json"
+    safe_id = sanitize_path_component(problem_id)
+    path = Path(settings.content_dir) / "challenges" / f"{safe_id}.json"
     if path.exists():
         with open(path) as f:
             return json.load(f)
-    return {"title": problem_id.replace("-", " ").title(), "requirements": []}
+    return {"title": safe_id.replace("-", " ").title(), "requirements": []}
+
+
+# ── Valid problem IDs (whitelist) ─────────────────────────────
+
+def _get_valid_problem_ids() -> set[str]:
+    challenges_dir = Path(settings.content_dir) / "challenges"
+    if challenges_dir.exists():
+        return {p.stem for p in challenges_dir.glob("*.json")}
+    return set()
 
 
 class InterviewEngine:
     def _get_random_problem(self) -> str:
-        """Pick a random problem from available challenges."""
         import random
-        challenges_dir = Path(settings.content_dir) / "challenges"
-        if challenges_dir.exists():
-            problems = [p.stem for p in challenges_dir.glob("*.json")]
-            if problems:
-                return random.choice(problems)
-        return "url-shortener"
+        valid = _get_valid_problem_ids()
+        return random.choice(list(valid)) if valid else "url-shortener"
 
-    async def start_session(
-        self, problem_id: str, career_level: str
-    ) -> dict:
-        """Start a new interview session. Returns session_id + opening message."""
-        session_id = str(uuid.uuid4())[:8]
+    async def start_session(self, problem_id: str, career_level: str) -> dict:
+        """Start a new interview session."""
+        # Cleanup stale sessions first
+        _cleanup_stale_sessions()
 
-        # Normalize career level
-        career_level = career_level.lower()
+        # Enforce session limit
+        if len(_sessions) >= MAX_SESSIONS:
+            raise ValueError("Server is at capacity. Please try again later.")
+
+        # Cryptographically secure session ID (32 hex chars = 128 bits)
+        session_id = secrets.token_hex(16)
+
+        # Validate career level
+        career_level = career_level.lower().strip()
         if career_level not in ("sde2", "senior", "staff", "principal", "vp"):
             career_level = "senior"
 
-        # Random problem selection
+        # Validate problem ID against whitelist
         if problem_id == "random":
             problem_id = self._get_random_problem()
+        else:
+            valid_ids = _get_valid_problem_ids()
+            safe_id = sanitize_path_component(problem_id)
+            if safe_id not in valid_ids:
+                raise ValueError(f"Unknown problem: {problem_id}")
+            problem_id = safe_id
 
-        # Load knowledge graph and challenge info
         graph = _load_knowledge_graph(problem_id)
         challenge = _load_challenge_info(problem_id)
 
-        # Create tracker
         tracker = InterviewTracker(
             knowledge_graph=graph,
             career_level=career_level,
         )
 
-        # Generate opening message
         opening = await interview_speaker.generate_opening(
             problem_title=challenge.get("title", problem_id),
             tracker=tracker,
         )
 
-        # Store session
         _sessions[session_id] = {
             "tracker": tracker,
             "problem_id": problem_id,
             "challenge": challenge,
             "messages": [{"role": "assistant", "content": opening}],
+            "created_at": time.monotonic(),
         }
 
         return {
@@ -109,7 +137,23 @@ class InterviewEngine:
 
         tracker: InterviewTracker = session["tracker"]
 
-        # Record user message
+        # Enforce message length
+        user_message = user_message[:MAX_MESSAGE_LENGTH]
+
+        # Enforce max messages per session
+        if len(session["messages"]) >= MAX_MESSAGES_PER_SESSION:
+            scorecard = interview_scorer.score(tracker)
+            return {
+                "reply": "We've reached the end of our time. Let me put together your evaluation.",
+                "state": tracker.to_state_dict(),
+                "is_complete": True,
+                "scorecard": scorecard,
+            }
+
+        # Sanitize for prompt injection before any LLM processing
+        sanitized_message = sanitize_for_prompt(user_message)
+
+        # Record user message (store original for display, use sanitized for LLM)
         session["messages"].append({"role": "user", "content": user_message})
 
         # Check if interview is complete
@@ -122,14 +166,15 @@ class InterviewEngine:
                 "scorecard": scorecard,
             }
 
-        # LAYER 1: Analyze the response
-        analysis = await response_analyzer.analyze(user_message, session["problem_id"])
+        # LAYER 1: Analyze the response (uses sanitized input)
+        analysis = await response_analyzer.analyze(sanitized_message, session["problem_id"])
+        analysis_dict = analysis.to_dict()
 
         # LAYER 2: Update tracker state
-        tracker.update(analysis.to_dict())
+        tracker.update(analysis_dict)
 
         # LAYER 3: Decide next action
-        action = interview_strategist.decide_next_action(tracker)
+        action = interview_strategist.decide_next_action(tracker, analysis_dict)
 
         # Check if action is end_interview
         if action.action_type == "end_interview":
@@ -146,7 +191,6 @@ class InterviewEngine:
         # LAYER 4: Generate natural language response
         reply = await interview_speaker.generate_response(action, tracker)
 
-        # Record assistant message
         session["messages"].append({"role": "assistant", "content": reply})
 
         return {
@@ -158,14 +202,12 @@ class InterviewEngine:
         }
 
     def get_scorecard(self, session_id: str) -> dict | None:
-        """Get the scorecard for a completed session."""
         session = _sessions.get(session_id)
         if not session:
             return None
         return interview_scorer.score(session["tracker"])
 
     def get_session_state(self, session_id: str) -> dict | None:
-        """Get current session state."""
         session = _sessions.get(session_id)
         if not session:
             return None
@@ -177,7 +219,6 @@ class InterviewEngine:
         }
 
     def list_problems(self) -> list[dict]:
-        """List available interview problems with metadata."""
         challenges_dir = Path(settings.content_dir) / "challenges"
         problems = []
         if challenges_dir.exists():

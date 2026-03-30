@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "senior",
+    "candidate_profile": "slow-start-finishes-strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_333"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service like bit.ly. We need to handle significant scale. What questions do you have before we begin?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Um, okay. So we need to shorten URLs. I guess the main thing is... how many URLs are we talking about?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["qps"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good start. Let's say 100 million new URLs per day, 100:1 read-to-write ratio. What other requirements matter?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right. I think we need a database and some kind of hashing. Maybe we can use MD5 to generate short codes?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["database_choice"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's not jump to solutions yet. Are there other requirements you'd want to clarify? Think about the user experience.",
+      "annotation": { "action": "redirect", "phase": "requirements", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh, sure. Do we support custom aliases? And I guess there's some latency requirement for the redirect?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["custom_aliases", "latency"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes to custom aliases. P99 redirect latency under 50ms. Let's move to the high-level design. Walk me through how the system works.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "So, the user sends a URL, we store it in a database with a short code, and when someone visits the short code we look it up and redirect. We'd have a web server in front.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["api_design"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's the basic idea. Can you be more specific about the components? What sits between the user and the database?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "load_balancing" }
+    },
+    {
+      "role": "candidate",
+      "content": "A load balancer and... some app servers. And we probably need a cache for the reads since there are so many.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["load_balancing", "redis_caching"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've listed the components but I'm not seeing how they connect. How does a redirect request actually flow through the system? Can you trace it step by step?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me restart. I was thinking about this wrong. I've been listing components when I should be thinking about data flows and design constraints. Let me restructure. We have two core flows: write and read. For writes — POST /api/v1/urls with the long URL. The load balancer routes to an app server, which generates a unique short code. The key challenge is generating unique codes at 1,150 writes per second — that's 100M divided by 86,400. We store the mapping in a database and return the short URL. For reads — GET /{shortCode} hits the load balancer, app server checks Redis cache first. At 115,000 reads per second, we absolutely need caching. On cache hit, return 302 redirect immediately. On miss, query the database, populate cache with a TTL, then redirect. The 302 vs 301 choice matters: 302 lets us track analytics, 301 is faster for users but we lose visibility.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "load_balancing", "redis_caching", "qps_calculation", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a much clearer picture. Tell me more about the short code generation. You mentioned uniqueness — how do you ensure that at scale?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "base62_encoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question. A 7-character base62 code gives us 62^7 = 3.5 trillion unique codes — plenty of headroom for even years of operation at 100M/day. For generation, I'd avoid MD5 — my earlier instinct was wrong because hash collisions require expensive retry logic. Instead, I'd use a range-based ID allocator. A coordination service hands out ranges of sequential IDs to each app server — say 100,000 IDs at a time. Each server generates locally from its range, no coordination needed per-request. Then we base62 encode the ID. To prevent guessability, I'd apply a lightweight bijective scramble — a Feistel cipher on the integer — before encoding. Same uniqueness guarantee, but codes look random.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["base62_encoding", "collision_handling", "snowflake_id"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent recovery. Now let's talk about the database layer. What would you choose and how would you handle the scale?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "The access pattern is simple key-value lookups — shortCode to longURL. I'd use PostgreSQL with a B-tree index on the short_code column. At the current write rate, a single primary handles it fine. For reads, we add 2-3 read replicas behind the cache. But the real question is long-term growth. At 100M URLs/day, after 3 years we have 100 billion rows. We need horizontal sharding. I'd shard by hash of the short_code — this distributes load evenly and every query includes the shard key. Starting with 32 shards, each holds about 3 billion rows over 3 years. Using consistent hashing means we can add shards later with minimal data movement.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "sharding_strategy", "consistent_hashing", "read_replicas"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong. Let's talk about caching in more detail. How do you size the cache and handle cache invalidation?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "redis_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "For sizing, the 80/20 rule applies — 20% of URLs drive 80% of traffic. 20% of 100M daily URLs is 20M URLs. At roughly 500 bytes per record, that's 10GB per day's hot set. A Redis cluster with 3 nodes of 16GB each gives us comfortable headroom plus replication. For invalidation — URL shortener mappings are essentially immutable once created. The long URL doesn't change. So we don't really have a cache invalidation problem in the traditional sense. We set a TTL of 24 hours on cache entries and let LRU handle eviction. The only case needing explicit invalidation is URL deletion or expiration, which we handle by publishing a delete event that the cache subscribes to.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "cache_eviction", "cache_aside"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when an entire Redis node fails?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If a Redis node fails, its shard's keys become uncached and all those requests hit the database — a partial thundering herd. My defense is multi-layered: First, Redis Cluster with replicas means automatic failover in seconds; the replica promotes to primary. Second, I'd add a small in-process LRU cache on each app server — maybe 1GB — as an L1 cache. During Redis failover, this absorbs the hottest URLs. Third, a circuit breaker detects the elevated miss rate and activates request coalescing — multiple concurrent requests for the same key get collapsed into a single DB query. This prevents the database from being overwhelmed during the brief failover window.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_failure", "single_point_of_failure", "circuit_breaker"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's thorough. How would you handle analytics without impacting redirect latency?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "analytics_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "Analytics must be fully decoupled from the redirect path. On each redirect, the app server asynchronously publishes a click event to Kafka — shortCode, timestamp, IP, user-agent, referrer. A stream processing layer, say Flink or a Kafka Streams app, consumes these events, enriches them with geo-IP data, and writes aggregated metrics to ClickHouse for time-series analytics. The redirect returns immediately after the cache/DB lookup; the Kafka publish is fire-and-forget with an in-memory buffer. If Kafka is temporarily unavailable, we buffer locally and retry, but never block the redirect. This also lets us add new analytics dimensions later by just updating the consumer, without touching the redirect path.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["analytics_pipeline", "kafka", "async", "stream_processing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost out of time. Any final thoughts on the design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few additions for production readiness. Rate limiting on the creation API — token bucket per API key to prevent abuse. A CDN layer for the most popular redirects so they resolve at the edge without hitting our infrastructure at all. A background cleanup job that handles expired URLs — scans by TTL and purges from both cache and database. And geographic distribution: if we serve globally, we'd want regional deployments with a global DNS routing layer. Each region has its own cache and read replicas, writes go to a primary region and replicate outward. Finally, comprehensive monitoring — cache hit ratio, p99 redirect latency, database query latency, and Kafka consumer lag for analytics freshness.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "cdn_redirect", "monitoring", "geo_distribution"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "I appreciate how you restructured your approach midway through. The second half of this interview was very strong. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 68,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 6
+    },
+    "strengths": [
+      "Remarkable self-correction — recognized shallow approach and restructured completely",
+      "Strong depth in second half covering caching, sharding, and failure handling",
+      "Good analytical thinking once momentum built, including Feistel cipher for code scrambling"
+    ],
+    "weaknesses": [
+      "First eight exchanges were surface-level and unfocused",
+      "Initially jumped to solutions (MD5) before understanding requirements",
+      "Slow to engage with the problem — needed interviewer prompting repeatedly early on"
+    ]
+  }
+}

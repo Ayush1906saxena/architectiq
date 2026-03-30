@@ -1,0 +1,172 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "wrong-assumptions",
+    "total_exchanges": 22,
+    "generation_id": "seed_410"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed system. Users follow other users and see a timeline of posts from people they follow, sorted by recency. What clarifying questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, let me clarify a few things. What's the scale — how many users and how many posts per day? Is the feed purely chronological or is there ranking/recommendation? Do we need to support media (images, video) or just text? And what's the target latency for loading a feed?",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["scale", "feed_ranking", "media_support", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500 million users total, 200 million daily active. 100 million new posts per day. Purely chronological for now. Text only to keep it simple. Feed load latency under 500ms. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great. So let me think about the data model. Each user follows some number of other users. From my experience, most social media users follow a relatively small number of people — I'd say the average user follows maybe 50-100 accounts. So for the feed, when a user opens their timeline, we can just query: get the latest posts from all the accounts this user follows, merge them, and sort by timestamp. A simple fan-out-on-read approach.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["fan_out_on_read", "follower_count_assumption"], "depth": "surface", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Okay, walk me through the fan-out-on-read approach in detail.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "fan_out_on_read" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. When a user requests their feed, the app server: 1) Gets the list of user IDs this person follows from a Follow table. 2) For each followed user, queries their recent posts — say the last 20 posts from each. 3) Merges all these posts in memory, sorts by timestamp, takes the top 50, and returns. With an average of 75 follows per user, that's 75 queries to the Posts table, but they can be parallelized. We'd index the Posts table on (user_id, created_at DESC) so each query is just an index scan. And we cache the results aggressively.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["fan_out_on_read", "parallel_queries", "index_design", "caching"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You're assuming users follow about 75 people on average. What about users who follow 5,000 people?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "fan_out_on_read" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, 5,000 follows. That's 5,000 parallel queries to the Posts table. That's a lot but still manageable — we could batch them. Use an IN clause to get posts from multiple users at once, or shard the queries. It would be slower, but with good caching and connection pooling, we could probably still hit the 500ms target. These power users would be a small percentage.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["batch_queries", "connection_pooling"], "depth": "surface", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let me challenge your core assumption. On Twitter, users like Elon Musk or Barack Obama have 50 million followers. When they post a tweet, what happens in your design?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "celebrity_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh... 50 million followers. So in fan-out-on-read, the celebrity's post would need to appear in 50 million users' feeds. That's not a problem for fan-out-on-read actually — each user queries the celebrity's posts individually. But wait... the celebrity's post row gets read 50 million times. That's a massive hot key problem on the Posts table. Even with caching, the cache for that user's posts would be hammered.",
+      "annotation": { "quality": "mixed", "concepts_mentioned": ["hot_key", "celebrity_problem", "cache_pressure"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right. And what about the alternative — fan-out-on-write? Would that work for celebrities?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "fan_out_on_write" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fan-out-on-write means when someone posts, we pre-compute the feed by writing the post to every follower's timeline cache. For a regular user with 200 followers, that's 200 writes — fast and cheap. But for someone with 50 million followers, that's 50 million writes per tweet. If they tweet 10 times a day, that's 500 million writes. The write amplification is insane. And the latency to deliver a tweet would be huge — minutes, not seconds. So... neither approach works cleanly for celebrities.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["fan_out_on_write", "write_amplification", "delivery_latency"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "So your initial assumption that users have a small, roughly equal number of followers led you down a path that doesn't work. How would you redesign this knowing what you know now?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "hybrid_approach" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, I need a hybrid approach. Let me split users into two categories based on follower count. Regular users (say, under 10,000 followers): use fan-out-on-write. When they post, write to all followers' timeline caches. This is fast and keeps feeds pre-computed for the majority of users. Celebrity users (over 10,000 followers): use fan-out-on-read. Their posts are NOT pre-distributed. Instead, when a user loads their feed, they get their pre-computed timeline from the cache AND separately fetch recent posts from any celebrities they follow. Then merge and sort.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["hybrid_approach", "fan_out_on_write", "fan_out_on_read", "celebrity_threshold"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Better. Walk me through the data stores for this hybrid approach.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay. I need several data stores. Posts table in a sharded SQL or NoSQL store — each post with post_id, user_id, content, timestamp. Sharded by user_id. Follow graph — who follows whom. This could be in a graph database or a simple table. For the pre-computed timelines, I'd use Redis sorted sets. Key is user_id:timeline, members are post_ids, scores are timestamps. When a regular user posts, a fan-out worker writes to each follower's sorted set. When reading, fetch from the sorted set, then also fetch celebrity posts separately and merge.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["sharding_strategy", "redis_sorted_set", "follow_graph", "fan_out_worker"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How much memory does Redis need for all these pre-computed timelines?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me estimate. 200 million DAU, each with a timeline of say 500 recent posts (post IDs and timestamps). Each entry in the sorted set is about 16 bytes (8 byte post ID + 8 byte score). 500 entries per user = 8 KB per user. Plus Redis overhead, maybe 12 KB per user. 200M * 12 KB = 2.4 TB. That's a lot but feasible with a Redis cluster of, say, 50 nodes each with 64 GB RAM. Though that's expensive. We could trim timelines to 200 posts to cut it down to about 1 TB.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["capacity_estimation", "redis_cluster", "memory_optimization"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about users who haven't logged in for months? Should we maintain their timeline cache?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cache_eviction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good point — no. We should only maintain timelines for active users. Inactive users' timelines can be evicted. When they come back, we rebuild their timeline on the fly — fetch recent posts from everyone they follow (fan-out-on-read as a fallback) and then reactivate the fan-out-on-write pipeline for them. We'd use a TTL on the Redis keys — say 7 days of inactivity and the timeline gets expired. This could cut our memory needs significantly since only 200M out of 500M users are active.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["cache_eviction", "timeline_reconstruction", "ttl", "active_user_optimization"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the fan-out-on-write work? A user posts — walk me through the pipeline.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "fan_out_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a user creates a post: 1) Write the post to the Posts store. 2) Publish an event to a message queue — Kafka, with the topic partitioned by user_id. 3) A fleet of fan-out workers consume from Kafka. 4) Each worker looks up the poster's follower list. 5) For each follower who has an active timeline in Redis, the worker LPUSHes the post_id to their timeline sorted set. 6) Trim the sorted set to keep only the latest 500 entries. For a user with 5,000 followers, this takes a few hundred milliseconds. The fan-out is async — the user sees their post immediately, and followers see it within seconds.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["kafka", "fan_out_worker", "async_processing", "timeline_trimming"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if a fan-out worker dies mid-way through processing a celebrity who just crossed the threshold? Say they have 9,999 followers.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "worker_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If a worker dies mid-fan-out, some followers got the post and some didn't. With Kafka, we can replay from the last committed offset. But that means some followers might get the post written twice — which is fine, since writing the same post_id to a sorted set is idempotent (same score, same member). So the fix is: don't commit the Kafka offset until the entire fan-out is complete. On restart, the worker re-processes the message from scratch. Idempotent writes make this safe.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["idempotent_writes", "kafka_offsets", "worker_recovery"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running short. Any final improvements you'd make?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things: add a CDN for serving static content and reducing load on the API servers. Implement pagination with cursor-based pagination using post_id or timestamp. Add monitoring on fan-out lag — the time between post creation and it appearing in followers' feeds. And I'd want to revisit my initial assumption about follower distribution — I should have asked about the distribution up front rather than assuming it's uniform.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["cdn", "cursor_pagination", "monitoring", "self_reflection"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That self-awareness is good. The key lesson here is: in system design, always question your assumptions early. The follower distribution is THE defining characteristic of this problem, and assuming it away led to 15 minutes of wasted design time. Thanks for the discussion.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 48,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 4,
+      "capacity_estimation": 6,
+      "api_design": 5,
+      "database_design": 5,
+      "caching_strategy": 6,
+      "scalability": 4,
+      "failure_handling": 5,
+      "communication": 5
+    },
+    "strengths": [
+      "Recovered reasonably well with a hybrid approach once the assumption was challenged",
+      "Good understanding of fan-out-on-write mechanics and idempotent processing",
+      "Showed self-awareness about the flawed assumption at the end"
+    ],
+    "weaknesses": [
+      "Critical wrong assumption about follower distribution — should have asked or considered power-law distribution",
+      "Wasted 15 minutes on a design that doesn't work for the core use case",
+      "Didn't proactively identify the celebrity problem — one of the most well-known challenges in feed systems",
+      "Hybrid design was adequate but lacked depth — didn't explore the merging logic or ranking",
+      "For a senior candidate, should have known about the celebrity problem from the start"
+    ]
+  }
+}

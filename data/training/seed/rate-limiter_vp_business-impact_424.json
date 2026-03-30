@@ -1,0 +1,172 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "vp",
+    "candidate_profile": "business-impact",
+    "total_exchanges": 20,
+    "generation_id": "seed_424"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "I'd like you to design a distributed rate limiting system. This is for an API platform serving thousands of customers. How would you approach it?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Rate limiting is how we monetize our API. Let me frame this from a business perspective first. Free tier: 100 requests per minute. Pro: 10,000 requests per minute. Enterprise: custom negotiated limits. The rate limiter IS the billing system — every denied request is either a conversion opportunity or a churn risk. The technical design needs to serve this business reality.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monetization", "tiered_pricing", "rate_limiting", "business_alignment"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a strong business framing. What questions do you have about the technical requirements?",
+      "annotation": { "action": "probe", "phase": "requirements", "target_concept": "requirements_gathering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several. How many API customers are we supporting — thousands or hundreds of thousands? What's our total request volume across all customers? Do we need to rate limit by multiple dimensions — per customer, per endpoint, per IP? What's the acceptable accuracy tolerance — is it okay to occasionally allow 101 requests when the limit is 100, or do we need strict enforcement? And critically: what happens when the rate limiter itself fails — do we fail open and allow all traffic, or fail closed and reject everything?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_dimensional_limiting", "accuracy_tolerance", "fail_open_vs_closed", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "50,000 API customers, roughly 2 million requests per second total. Multiple dimensions needed. Some tolerance is fine — within 5%. And the fail-open versus fail-closed question is yours to decide. Walk me through the architecture.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 2M RPS, the rate limiter is on the critical path of every request. Latency budget: sub-1ms, because it's overhead added to every API call. Let me lay out the architecture in three layers. Layer one: a local in-process rate limiter on each API gateway node using a token bucket algorithm — this handles the common case with zero network overhead. Layer two: a distributed synchronization layer using Redis to coordinate counts across gateway nodes — this provides accuracy. Layer three: a configuration and policy service that maps customer tiers to rate limit rules and pushes updates in real-time. The local limiter handles 95% of decisions; Redis is the source of truth for near-limit decisions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "distributed_rate_limiting", "redis", "api_gateway", "latency_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the local limiter coordinate with Redis? What's the synchronization model?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "distributed_synchronization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each gateway node maintains a local token bucket per customer. Periodically — every 100ms — it syncs with Redis. The sync is a Lua script that atomically reads the global count, adjusts it, and returns the updated value. Between syncs, the local limiter makes optimistic decisions. If a customer is well below their limit — say at 40% utilization — the local limiter approves without consulting Redis. As the customer approaches 80% of their limit, the sync frequency increases to every 10ms for better accuracy. This adaptive sync reduces Redis load by 90% compared to checking Redis on every request, while maintaining the 5% accuracy tolerance you specified. I call this the 'graduated consistency' pattern.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_synchronization", "lua_scripting", "adaptive_consistency", "optimistic_decisions"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting pattern. How do you handle the fail-open versus fail-closed decision?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a business decision disguised as a technical one. If we fail closed — reject all traffic when the rate limiter is down — we're causing an outage for every customer. That's a revenue and reputation catastrophe. If we fail open, some customers might exceed their limits temporarily. The cost of over-serving is typically much lower than the cost of downtime. So my default is fail open, with caveats. For free tier: fail open, absolutely — worst case they get extra free usage. For enterprise: fail open with a generous buffer — they're paying us, don't break their service. The exception: if we have abuse-prevention rate limits — like DDoS protection — those should fail closed because the cost of allowing abuse is existential. The local token bucket gives us natural fail-open behavior — if Redis is unreachable, the local limiter keeps working with its last known state.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["failure_handling", "fail_open_vs_closed", "business_impact_analysis", "graceful_degradation"], "depth": "strategic", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You said the rate limiter is the billing system. Can you elaborate on that integration?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "billing_integration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Every rate-limited response is a billing event. When a free-tier customer hits their 100 req/min limit, the 429 response should include a body that says: 'You've reached your limit. Upgrade to Pro for 100x more capacity at $X/month.' That 429 page is our highest-converting sales page. For usage-based pricing customers, the rate limiter feeds a metering pipeline. Every request is counted and emitted as a usage event to Kafka. A billing aggregator consumes these events, computes hourly/daily usage, and feeds the invoicing system. The rate limiter and the billing meter must use the exact same counting mechanism — if a customer sees 10,000 requests in their dashboard but gets billed for 10,500, we lose trust. I'd have the Redis counter serve both rate limiting and metering, with the metering pipeline reading from the same atomic counters.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["billing_integration", "usage_metering", "kafka", "conversion_optimization", "data_consistency"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the enterprise tier where customers negotiate custom limits?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "configuration_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Enterprise customers need flexible, multi-dimensional rate limits. Not just 'X requests per minute' but 'X requests per minute to the search endpoint, Y requests per minute to the write endpoint, Z requests per second burst, and a daily quota of W total requests.' I'd model this as a rate limit policy document — essentially a JSON schema defining rules per customer. Policies are stored in a configuration service backed by a strongly consistent store like etcd. When a policy changes — say a sales rep upgrades a customer's limits mid-contract — it propagates to all gateway nodes within seconds via a watch mechanism. The critical design point: policy changes should take effect immediately without deploying code. This is a product requirement because our sales team needs to close deals by saying 'I can increase your limits right now while we're on the phone.'",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["configuration_management", "policy_engine", "etcd", "dynamic_configuration", "sales_enablement"], "depth": "strategic", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about observability? How do customers and your own team monitor rate limiting?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "observability" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two audiences, two dashboards. For customers: a real-time usage dashboard showing current utilization as a percentage of their limit, historical usage patterns, and alerts when they're approaching thresholds — at 80% we send a warning email, at 95% a push notification. This is also a sales tool — the dashboard subtly shows 'You've been at 90%+ capacity 14 times this month. Consider upgrading.' For our internal team: we need to see rate limiter health metrics — Redis latency, sync lag between local and global counters, the distribution of requests across tiers, and critically: 429 rates by customer. A sudden spike in 429s for an enterprise customer should page the account team, not just engineering. I'd also track 'near-miss' metrics — requests that were within 5% of the limit — because these predict future tier upgrades.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["observability", "monitoring", "alerting", "customer_dashboard", "predictive_analytics"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss a scaling challenge. A single enterprise customer suddenly does 10x their normal traffic. How does the system behave?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "burst_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where business context matters enormously. If Nike launches a Super Bowl campaign and their API traffic spikes 10x, we don't want to rate-limit them into an outage during their biggest moment. My approach: enterprise customers get a burst allowance — typically 3x their sustained limit for up to 5 minutes. This is implemented as a dual token bucket: one for sustained rate, one for burst. Beyond the burst allowance, we soft-limit — we start returning 429s with a Retry-After header, but we also trigger an automated alert to the account manager: 'Nike is exceeding limits. Call them about an upgrade.' Simultaneously, the system auto-scales the resources allocated to that customer's partition. The worst outcome isn't a customer exceeding limits — it's a customer's production system failing because we rate-limited them during their peak moment. That customer churns.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["burst_handling", "dual_token_bucket", "auto_scaling", "customer_retention", "graceful_degradation"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you prevent one customer's burst from affecting other customers?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "resource_isolation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Noisy neighbor is the fundamental multi-tenant problem. Three isolation mechanisms. First, at the gateway layer, each customer's requests are routed to a specific subset of backend servers using consistent hashing on customer_id — a burst from one customer doesn't starve others of gateway connections. Second, Redis keyspace is partitioned by customer tier — enterprise customers use a dedicated Redis cluster, so a hot free-tier customer's counters don't share memory with enterprise. Third, we implement fair queuing at the gateway — when total system load exceeds 80%, each customer gets a guaranteed share of capacity proportional to their tier. Think of it as weighted fair queuing: enterprise customers get 10x the share of free customers. This ensures that even under extreme load, paying customers experience consistent performance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["resource_isolation", "noisy_neighbor", "consistent_hashing", "fair_queuing", "weighted_scheduling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's your testing strategy for a system this critical?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "testing_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rate limiters are deceptively hard to test because correctness depends on timing. My strategy has four layers. Unit tests: verify token bucket math — refill rates, burst handling, edge cases around window boundaries. Integration tests: spin up a real Redis and verify distributed synchronization accuracy under controlled load. Load tests: weekly automated load tests that simulate our actual customer distribution — 50K customers with realistic traffic patterns — and verify that accuracy stays within 5% at full production scale. Chaos tests: randomly kill Redis nodes, introduce network partitions between gateway and Redis, and verify fail-open behavior. The most important test: a production shadow mode where we run the new rate limiter alongside the old one, comparing decisions without enforcing — if they diverge by more than 1%, we investigate before promoting.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["testing_strategy", "chaos_engineering", "shadow_mode", "load_testing", "integration_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you think about the ROI of building this in-house versus using an off-the-shelf solution like Kong or Envoy's rate limiting?",
+      "annotation": { "action": "challenge", "phase": "wrap_up", "target_concept": "build_vs_buy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question — and it depends on where we are as a company. If rate limiting is a commodity feature protecting our API, use Kong or Envoy — they're excellent for standard per-IP or per-key limiting. But in our case, the rate limiter is a revenue driver — it's tightly coupled to billing, pricing tiers, and customer conversion. That business logic can't be expressed in Kong configuration files. I'd use Envoy as the gateway for TLS termination and basic routing, but implement the rate limiting logic in a custom service that Envoy calls via ext_authz. This gives us Envoy's battle-tested networking with our custom business logic. The build cost is maybe 3 engineer-months for the initial version, but the revenue impact of getting tier management, billing integration, and customer experience right is worth millions. The key principle: buy commodity infrastructure, build competitive differentiators.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["build_vs_buy", "envoy", "ext_authz", "competitive_differentiation", "roi_analysis"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last question: what metrics would you track to measure the success of this rate limiting system?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": "success_metrics" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd track metrics across three dimensions. Technical health: rate limiter latency p50/p99, accuracy deviation from configured limits, Redis cluster health, and sync lag. Business impact: conversion rate from free to paid triggered by rate limit encounters, revenue from usage-based billing, churn rate correlated with rate-limit events, and customer support tickets related to rate limiting. Platform efficiency: cost per million rate-limit decisions, percentage of decisions made locally versus requiring Redis, and infrastructure headroom — how close we are to needing the next scaling step. The north star metric: net revenue retention correlated with rate limit design changes. If we raise free-tier limits by 50% and NRR goes up because more developers hit the 'aha moment,' that's a win worth more than the infrastructure cost.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["success_metrics", "business_metrics", "technical_metrics", "net_revenue_retention", "data_driven_decisions"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Really strong interview. You consistently connected technical decisions to business outcomes, which is exactly the lens we need at this level. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 82,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 8,
+      "api_design": 8,
+      "database_design": 7,
+      "caching_strategy": 9,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9,
+      "strategic_thinking": 10,
+      "business_acumen": 10,
+      "organizational_awareness": 8
+    },
+    "strengths": [
+      "Exceptional integration of rate limiting with billing and monetization strategy",
+      "Novel 'graduated consistency' pattern balancing accuracy with performance",
+      "Strong business impact analysis on fail-open vs fail-closed decisions"
+    ],
+    "weaknesses": [
+      "Could have explored database design for the metering and billing pipeline in more depth",
+      "Didn't address global/multi-region rate limiting challenges for geographically distributed customers"
+    ]
+  }
+}

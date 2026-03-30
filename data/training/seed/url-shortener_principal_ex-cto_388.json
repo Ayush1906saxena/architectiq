@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "principal",
+    "candidate_profile": "ex-cto",
+    "total_exchanges": 20,
+    "generation_id": "seed_388"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service like bit.ly. It needs to handle large scale. How would you approach this?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "As a former CTO, I'd start by asking: is this a greenfield build or are we replacing an existing system? Because the design is radically different if we're migrating 500 million existing short URLs from a legacy system versus building from zero. Also, what's the team size and timeline? If I have 3 engineers and 8 weeks, I'm making very different architectural choices than if I have 20 engineers and 6 months.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["migration_strategy", "team_structure", "build_timeline", "organizational_constraints"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's say we're migrating from an existing in-house solution that has 200 million URLs. Team of 8 engineers, 4-month timeline. 50 million new URLs per month, 100:1 read-to-write ratio.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, that changes the prioritization significantly. The migration is the hardest part, not the new system design. Let me outline how I'd structure the project. Phase 1 (weeks 1-4): Build the new system with shadow reads. Deploy the new URL shortener service, but it only handles writes — new URLs go to both the old and new system. Reads still hit the old system. This validates our write path with zero risk. Phase 2 (weeks 5-8): Migrate existing data. Bulk-copy the 200M URLs from the old system to the new one. At 10K records/sec migration throughput, that's about 5.5 hours. During migration, any reads for URLs not yet migrated fall back to the old system. Phase 3 (weeks 9-12): Gradual traffic cutover. Route 1% of reads to the new system, monitor error rates and latency, ramp to 10%, 50%, 100% over 3 weeks. Phase 4 (weeks 13-16): Decommission old system. But keep it in read-only mode for 4 more weeks as a safety net. The technical design of the URL shortener itself is straightforward — I'd assign 2 engineers to that. The migration orchestration and dual-write logic is where I'd put 4 engineers. The remaining 2 handle monitoring, testing, and the migration tooling.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["migration_strategy", "phased_rollout", "shadow_reads", "team_allocation", "dual_write", "project_planning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Smart project structuring. Now let's talk about the actual system design for the new URL shortener.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "For a system at 50M URLs/month — about 19 writes/sec and 1,900 reads/sec — the technical design is not the challenge. The challenge is making the right build-vs-buy decisions to minimize engineering time and operational burden. For the datastore: I'd use Amazon DynamoDB. Not because it's the theoretically optimal choice, but because it eliminates database operations entirely — no provisioning, no backups, no failover management. With on-demand pricing at this volume, it's maybe $500/month. The 2 engineers who would otherwise manage PostgreSQL replication and backup jobs can work on features instead. For caching: CloudFront as the CDN layer for redirect caching. Again, managed service, no Redis cluster to operate. For compute: containerized services on ECS Fargate. No EC2 instances to patch, no AMIs to manage. For the API: API Gateway in front of our services. Built-in rate limiting, API keys, and usage metrics. Every choice here is optimized for a team of 8 engineers. If I had 50 engineers, I might choose differently — maybe a self-hosted PostgreSQL cluster for more control. But with 8 engineers, operational burden is the enemy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["build_vs_buy", "managed_services", "team_size_optimization", "dynamodb", "operational_burden"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Aren't you concerned about vendor lock-in with all-AWS?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "vendor_lock_in" }
+    },
+    {
+      "role": "candidate",
+      "content": "I've heard this argument at every company I've led, and my answer is always the same: vendor lock-in is a real concern, but premature multi-cloud is a bigger risk. The cost of abstracting away AWS-specific services — building a database abstraction layer, a generic caching interface, a portable compute layer — is 2-3 months of engineering time and ongoing maintenance. For a team of 8, that's 25-35% of our capacity for an entire quarter, spent on optionality we may never need. My strategy: use AWS-native services, but keep the business logic decoupled from the infrastructure. Our URL shortening logic should be in a clean service layer that doesn't import AWS SDKs directly. If we ever need to migrate (in my experience, fewer than 10% of companies actually do), the migration is painful but bounded — it's a rewrite of the infrastructure layer, not the business logic. The real lock-in risk is DynamoDB's data model. To mitigate: keep the DynamoDB schema simple enough that it maps to any key-value store. No DynamoDB-specific features like streams or complex GSIs unless absolutely necessary.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["vendor_lock_in", "multi_cloud", "abstraction_layers", "engineering_capacity", "pragmatic_architecture"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Tell me about the URL shortening logic — encoding and collision handling.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "base62_encoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "For ID generation, I'd use the existing short codes from the legacy system as-is for migrated URLs — don't re-encode them. Redirects to existing short URLs must continue to work. For new URLs: generate a random 7-character base62 code. 62^7 = 3.5 trillion possible codes. With 200M existing URLs + 50M/month growth, even after 10 years we'd have about 6 billion URLs — less than 0.2% of the namespace. Collision probability is negligible, but we check anyway with a conditional write (DynamoDB PutItem with attribute_not_exists). On the rare collision, generate a new code and retry. Why random instead of sequential? The legacy system used sequential IDs and customers complained that their short URLs were predictable. Random codes also distribute more evenly across DynamoDB partitions, avoiding hot partitions. One operational consideration: we need a way to reserve or block certain short codes — profanity, trademarks, confusable strings (0/O, 1/l/I). I'd maintain a blocklist checked at creation time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["base62_encoding", "collision_handling", "migration_compatibility", "blocklist", "partition_distribution"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the dual-write during migration? Writing to both old and new systems seems risky.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "dual_write" }
+    },
+    {
+      "role": "candidate",
+      "content": "Dual writes are indeed risky — if one system succeeds and the other fails, you have inconsistency. My approach: the new system is the source of truth for new URLs from day one. We don't actually dual-write — we write to the new system first, and asynchronously replicate to the old system via a change event. If the async replication fails, no big deal — the old system has stale data, but reads are still going to the old system for old URLs (which are unaffected) and to the new system for new URLs. The critical piece is the routing layer: a thin proxy that examines the short code and decides whether to route to the old or new system. Short codes matching the legacy format go to the old system. New-format codes go to the new system. During the bulk migration, as each batch of URLs is successfully copied to the new system, we update the routing table to redirect those codes to the new system. This is a strangler fig pattern — the new system gradually takes over from the old one without any big-bang cutover.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dual_write", "strangler_fig", "routing_proxy", "migration_strategy", "eventual_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's your testing strategy for the migration?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "testing_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Migration testing is where I'd spend the most QA effort. Three layers. Shadow testing: before we migrate any production data, replay 24 hours of production read traffic against the new system (with migrated data in a staging environment) and compare responses. Every redirect should return the same destination URL. Any mismatch is a bug. I'd expect zero mismatches — this is a simple key-value lookup, after all. Data integrity verification: after each migration batch, run a consistency checker that samples 1% of migrated URLs and verifies the data matches between old and new systems. If sample verification passes, spot-check the full dataset with checksums. Canary testing: during the traffic cutover phase, run both systems in parallel for 1% of traffic. Compare the responses. Log any differences but serve the new system's response. If the difference rate exceeds 0.01% in any 1-hour window, automatically roll back to the old system. One lesson from my CTO experience: the migration will have bugs we can't predict. The rollback plan is more important than the migration plan. At every phase, we must be able to revert to the old system within 5 minutes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["shadow_testing", "data_integrity", "canary_testing", "rollback_plan", "migration_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the hiring plan? You mentioned 8 engineers — what skills do you need?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "team_structure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Assuming I'm hiring from scratch: 2 senior backend engineers who've worked with DynamoDB and AWS at scale — they own the core URL shortener service. 1 senior infrastructure engineer who knows Terraform/CDK, CI/CD, and monitoring — they own the deployment pipeline and observability stack. 2 senior backend engineers who've done data migrations before — they own the migration orchestration, routing proxy, and consistency checking. 1 senior frontend/fullstack engineer for the dashboard and admin tools. 1 QA/test engineer focused on the migration testing framework. 1 tech lead/architect (me or a strong staff engineer) who coordinates across workstreams and makes architectural decisions. The critical hire: the migration engineers. Migration experience is rare and valuable. I've seen junior engineers underestimate migration complexity by 5x. If I can't find experienced migration engineers, I'd hire strong generalists and pair them with an external consultant who's done large-scale data migrations before. Budget that at $50K for 2 months of consulting.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["team_structure", "hiring_plan", "skill_requirements", "migration_expertise"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the ongoing operational cost of this system once it's live?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "operational_cost" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me break it down. DynamoDB: 200M+ URLs at ~500 bytes each = 100GB storage ($25/month). 19 writes/sec + 1,900 reads/sec on-demand = about $200/month. CloudFront: at 1,900 reads/sec, many served from cache, maybe 500 origin requests/sec. CloudFront cost depends on transfer — roughly $500/month. ECS Fargate: 3 tasks running 24/7 (2 for redundancy + 1 for headroom) at 1 vCPU, 2GB RAM each = about $150/month. API Gateway: at 50M requests/month (writes) + some admin traffic = about $50/month. Monitoring (CloudWatch, alarms): $50/month. Total infrastructure: approximately $975/month. Call it $1,000/month. Now the important number: engineering time for maintenance. With managed services, I'd estimate 0.25 FTE (10 hours/week) for on-call, updates, and minor improvements. At a fully loaded engineer cost of $250K/year, that's about $5,200/month in people cost. Total cost of ownership: about $6,200/month. If we'd self-hosted everything with PostgreSQL, Redis, and EC2, the infrastructure might be $800/month (cheaper), but the engineering maintenance would be 0.75 FTE ($15,600/month) due to database administration, security patching, and capacity planning. The managed approach saves $10K/month in people cost for an extra $200/month in infrastructure cost.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["operational_cost", "total_cost_of_ownership", "managed_vs_self_hosted", "engineering_cost"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the biggest risk to this project?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "risk_assessment" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three risks in priority order. Risk 1: migration data corruption. If we lose or corrupt even 0.01% of the 200M existing URLs, that's 20,000 broken short URLs in production. Some of those might be in printed materials, QR codes, or high-profile marketing campaigns that can never be updated. Mitigation: comprehensive integrity verification at every stage, immutable backups of the old system, and a fast rollback path. Risk 2: the legacy system has undocumented behaviors that we don't replicate. Maybe the old system handles certain URL patterns differently, or has redirect chains, or applies rate limits that we don't know about. Mitigation: shadow testing with production traffic for at least 2 weeks before any cutover. Risk 3: timeline slippage. Migrations always take longer than planned. If we're at week 12 and only 50% of traffic has migrated, the old system is still running, we're paying for two systems, and the team is exhausted. Mitigation: build the go/no-go decision for each phase into the project plan. If Phase 2 isn't done by week 8, we pause and reassess before starting Phase 3.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["risk_assessment", "data_integrity", "legacy_behavior", "timeline_management", "go_no_go_criteria"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The meta-lesson from my CTO experience: the hardest part of system design isn't the system — it's the people and process around the system. This project needs a clear RACI matrix, weekly milestone reviews, a dedicated Slack channel for migration issues, and executive stakeholder updates every 2 weeks. The technical design is a solved problem. The execution — coordinating 8 engineers across 4 phases with a hard dependency on a legacy system owned by another team — that's where projects like this fail. I'd also establish success criteria upfront: migration is 'done' when 100% of traffic is on the new system with zero data discrepancies, the old system is decommissioned, and we've operated the new system incident-free for 2 weeks.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["project_management", "stakeholder_management", "success_criteria", "team_coordination"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Your principal-level thinking really came through — the migration strategy, team structure, cost analysis, and risk management were exactly right. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 81,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 10,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 6,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 10
+    },
+    "strengths": [
+      "Exceptional project-level thinking — phased migration plan, team allocation, hiring strategy, timeline management",
+      "Strong build-vs-buy analysis with quantified total cost of ownership including engineering hours",
+      "Mature risk assessment with concrete mitigations and go/no-go criteria"
+    ],
+    "weaknesses": [
+      "Technical depth was lighter than expected for a principal — encoding, caching, and scaling were adequate but not deep",
+      "API design was mentioned but not specified — no endpoint definitions or data contracts",
+      "Didn't explore failure scenarios in the new system deeply enough — mostly focused on migration risks"
+    ]
+  }
+}

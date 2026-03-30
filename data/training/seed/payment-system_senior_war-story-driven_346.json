@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "senior",
+    "candidate_profile": "war-story-driven",
+    "total_exchanges": 22,
+    "generation_id": "seed_346"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a payment processing system — a gateway that handles credit card transactions for merchants. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I've worked on payment systems for the last four years, so I have a lot of opinions here. Let me ask the critical questions: What TPS are we targeting? Are we PCI DSS compliant or aiming for it? Are we the merchant-facing gateway or the acquiring processor? And — this matters a lot — do we need to support refunds, partial captures, and multi-currency?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["throughput", "pci_compliance", "refunds", "multi_currency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Merchant-facing gateway. 5,000 TPS peak. PCI Level 1. Full lifecycle: auth, capture, refund. Multi-currency. Walk me through your design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The single most important thing I've learned in payments: every transaction is a state machine, and you never, ever lose the state. We had a double-charge that cost us $50K. Here's what happened: a timeout between our service and the processor. Our code caught the timeout, assumed the charge failed, and retried. But the first charge had actually succeeded — the ack was lost. Customer was charged twice. The root cause was treating payment as a stateless request-response. It's not. It's a stateful workflow.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["state_machine", "double_charge", "timeout_handling", "stateful_workflow"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a great motivating example. How does the state machine work?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "state_machine" }
+    },
+    {
+      "role": "candidate",
+      "content": "States: INITIATED -> PROCESSING -> AUTHORIZED -> CAPTURE_REQUESTED -> CAPTURED -> SETTLED. Branch states: DECLINED, VOIDED, REFUND_REQUESTED, REFUNDED, ERROR. Every state transition is an atomic database operation with a WHERE clause on the current state — UPDATE payment SET state = 'AUTHORIZED' WHERE id = ? AND state = 'PROCESSING'. This prevents impossible transitions. After our $50K incident, we added a PENDING_RESOLUTION state for timeouts. When a processor call times out, we move to PENDING_RESOLUTION instead of FAILED. A reconciliation job queries the processor's status API to determine the actual outcome and transitions to either AUTHORIZED or FAILED. We never assume the outcome of an ambiguous operation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["state_machine", "conditional_updates", "timeout_resolution", "reconciliation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you prevent the double-charge from your war story?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "idempotency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Idempotency at every layer. Layer 1: the merchant sends an Idempotency-Key header with each request. We store it in a unique index. Duplicate requests return the original response. Layer 2: our internal payment_id is used as the idempotency key when calling the processor. If we need to retry a timed-out call, we send the same payment_id. Good processors deduplicate on their end. Layer 3: for processors that DON'T support idempotency (and trust me, some don't), we check the payment's current state before retrying. If it's in PENDING_RESOLUTION, we query the processor's status API first: 'Did payment XYZ go through?' Only if they say no do we retry. After the $50K incident, we also added a dead man's switch: if a payment is in PROCESSING for more than 60 seconds, an alert fires and a human reviews it before any retry happens.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency", "multi_layer_deduplication", "status_check_before_retry", "human_review"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong. Walk me through the high-level architecture — the full request flow.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "system_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Merchant sends POST /v1/charges with card token, amount, currency, idempotency key. Hits our API Gateway (rate limiting, authentication, idempotency check). Passes to the Payment Orchestrator, which creates the payment record in INITIATED state. The Orchestrator calls the Fraud Service — we once had a fraud ring that ran $200K in stolen cards through our system in 2 hours before we caught it. The Fraud Service runs rule checks (velocity, blocklist) and ML scoring under 100ms. If approved, the Orchestrator calls the Processor Router, which selects the optimal processor based on card network, geography, and processor health. The Router calls the selected processor's API via a Processor Adapter (abstracting different processor protocols). The response updates the payment state. Finally, we return the result to the merchant. The whole flow is logged to an immutable audit trail — every state transition, every external call, every decision.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_gateway", "payment_orchestrator", "fraud_service", "processor_routing", "audit_trail"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about the processor routing. You mentioned it selects the optimal processor.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "processor_routing" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is one of the highest-leverage optimizations we built. We route based on: card network (Visa, Mastercard — some processors have better rates per network), issuing country vs processor country (domestic transactions have higher approval rates — we saw a 4% improvement by routing EU cards to EU processors), real-time success rate (we track each processor's approval rate in a 5-minute sliding window and shift traffic away from degraded processors), and cost (processing fees range from 0.5% to 3% — even a 0.1% optimization at scale saves millions). We had an incident where Processor A's approval rate dropped from 95% to 60% over 30 minutes due to an internal issue on their side. Our automatic routing detected the degradation after 5 minutes and shifted 80% of traffic to Processor B. The merchants barely noticed. Without smart routing, that would have been 35% of transactions failing for 30 minutes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["smart_routing", "success_rate_tracking", "automatic_failover", "cost_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle PCI compliance for card data?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "pci_compliance" }
+    },
+    {
+      "role": "candidate",
+      "content": "PCI compliance is the most expensive part of running a payment system — not in hardware, but in audit and process overhead. We learned to minimize scope ruthlessly. The merchant never sends us a raw card number. They use our client-side SDK (JavaScript or mobile) that sends the card directly to our Tokenization Service over TLS. The service returns a single-use token. The merchant's server only ever sees the token. Inside our infrastructure, the Tokenization Service and the Processor Adapter live in a PCI-isolated network segment — separate VPC, separate access controls, separate logging. Card data is encrypted at rest using AES-256 with keys managed by an HSM. Only the Processor Adapter can decrypt, and only at the moment of sending to the processor. We reduced our PCI audit scope from the entire infrastructure to just these two services. Audit time dropped from 6 months to 6 weeks.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pci_scope_reduction", "tokenization", "network_segmentation", "hsm", "encryption_at_rest"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about refunds? You mentioned full lifecycle.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "refund_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Refunds are deceptively complex. A refund is itself a financial transaction with its own state machine: REFUND_INITIATED -> REFUND_PROCESSING -> REFUND_COMPLETED (or REFUND_FAILED). It references the original payment_id. Important constraints: you can't refund more than the captured amount (sounds obvious, but we had a bug where partial refunds weren't summed correctly, and a merchant refunded 120% of a charge). Refund timing matters too: within 24 hours of capture, we do a void instead — it reverses the auth and the customer never sees the charge on their statement. After 24 hours, it's a proper refund that appears as a credit. Multi-currency adds another wrinkle: if the original charge was $100 but the refund happens 30 days later, the exchange rate has changed. We refund the original amount in the original currency, but the merchant's payout is in their settlement currency at the current rate. This means a refund can cost the merchant more than the original charge due to exchange rate movement. We show this clearly in the merchant dashboard.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["refund_state_machine", "void_vs_refund", "partial_refund_validation", "multi_currency_refunds", "exchange_rate_risk"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle settlement and reconciliation?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "settlement" }
+    },
+    {
+      "role": "candidate",
+      "content": "Settlement is where the money actually moves, and it's where most payment companies have their worst bugs — because it's batch, it's async, and discrepancies are easy to miss. We batch captured payments by processor and send settlement files (usually end of day). The processor sends back a settlement report listing which transactions were funded. Our Reconciliation Service does a three-way match: our payment records, the processor's settlement report, and the merchant's expected payouts. Discrepancies fall into categories: amount mismatches (usually currency rounding — we had a bug where we rounded differently than the processor, causing a $0.01 difference on 10% of transactions, which added up to $50K/month), missing transactions (we show captured, processor doesn't — usually due to our record being out of sync), and chargebacks (the cardholder disputed). We learned to run reconciliation continuously, not just at settlement time. Every hour, we compare our state with the processor's state via their API. This catches issues within hours instead of days.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["settlement", "three_way_reconciliation", "rounding_bugs", "continuous_reconciliation", "chargebacks"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you scale the database? 5,000 TPS with strong consistency.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "database_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "For payments, I'd never compromise on consistency — eventual consistency means potential double charges or lost money. PostgreSQL with synchronous replication. At 5K TPS, a single well-tuned Postgres instance handles it (we benchmarked 15K TPS on an r5.4xlarge with our payment schema). For headroom, I'd shard by merchant_id. Each merchant's transactions are on one shard — their state machine transitions are local. With 10 shards, each handles 500 TPS with massive headroom. The one cross-shard concern is idempotency key lookup — we handle this with a separate lightweight service (Redis-backed) that maps idempotency_key -> (payment_id, shard_id). For the settlement batch process, each shard runs its own batch independently since settlements are per-processor and we can group by shard. Read replicas serve the merchant dashboard queries to keep analytical workloads off the primary.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["strong_consistency", "postgresql", "sharding_by_merchant", "idempotency_routing", "read_replicas"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the most important monitoring in a payment system?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "I've been on-call for payment systems and there are specific metrics that predict problems before customers notice. Authorization success rate per processor, per card network, per 5-minute window — a drop of even 2% means something is wrong. Latency at each stage: API to fraud check, fraud check to processor call, processor response time. Payment state age: any payment in PROCESSING for more than 30 seconds gets flagged; in PENDING_RESOLUTION for more than 10 minutes gets escalated. Reconciliation discrepancy rate — should be below 0.01% of transactions. Fraud score distribution shifts — if the median fraud score suddenly jumps, either real fraud increased or the model is miscalibrated. We built a 'payment health dashboard' that I wish I'd had from day one. The number of times I've been paged at 3 AM for an issue that was visible in metrics 30 minutes earlier is too many.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "authorization_success_rate", "state_age_monitoring", "reconciliation_metrics", "fraud_score_monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Two things from hard experience. First: always have a kill switch for each processor. When Processor A had a catastrophic failure that started returning random success responses for failed charges, we needed to cut them off instantly. A feature flag per processor in our routing config, deployable in under 30 seconds, has saved us multiple times. Second: every payment system needs a ledger — a double-entry accounting system that records every money movement as debits and credits. Your ledger balance should always match your actual bank balance. When it doesn't (and it will), the discrepancy report is how you find the bug. We found a $1.2M discrepancy once that turned out to be a timezone bug in our settlement batching. The ledger caught it in 24 hours. Without it, we might not have noticed for weeks.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kill_switch", "feature_flags", "double_entry_ledger", "financial_controls"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Every design decision backed by a real incident or lesson learned. This was one of the most compelling payment system interviews I've conducted. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 78,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 5,
+      "scalability": 7,
+      "failure_handling": 10,
+      "communication": 9
+    },
+    "strengths": [
+      "Every design decision motivated by real production incidents — extremely compelling and credible",
+      "Exceptional failure handling born from battle-tested experience including double-charge prevention",
+      "Deep domain expertise covering settlement, reconciliation, refunds, and multi-currency edge cases"
+    ],
+    "weaknesses": [
+      "No caching strategy discussed — payment systems can benefit from intelligent caching of merchant configs and routing decisions",
+      "Limited discussion of multi-region deployment for disaster recovery",
+      "Could have discussed webhook delivery to merchants more thoroughly"
+    ]
+  }
+}

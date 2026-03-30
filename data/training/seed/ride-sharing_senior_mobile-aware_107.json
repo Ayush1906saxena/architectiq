@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "senior",
+    "candidate_profile": "mobile-aware",
+    "total_exchanges": 24,
+    "generation_id": "seed_107"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing platform like Uber. Riders request rides, drivers accept, and trips are tracked in real-time. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few questions, and I want to think about this from the mobile client perspective since that's where riders and drivers actually experience the system. What's our target market — US-only or global? I ask because in many developing markets, users have low-end Android phones with 2GB RAM, unstable 3G connections, and limited data plans. That constrains the client architecture significantly. Also, what's our concurrent scale?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["mobile_constraints", "market_scope", "network_conditions"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Global market including developing regions. 1 million concurrent active drivers, 500K concurrent trips. Good thinking about device constraints — keep that lens throughout.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "mobile_constraints" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the driver app's GPS and connection management, because that's the most battery and data-sensitive component. Drivers run our app all day — 8-12 hours. GPS is the biggest battery drain on mobile. We can't use high-accuracy GPS mode continuously — that drains the battery in 3-4 hours. Instead, I'd use adaptive GPS frequency: when the driver is idle (no active trip), we use the fused location provider on Android — it combines GPS, WiFi, and cell tower triangulation at low power. Update every 10-15 seconds, accuracy within 50 meters. When the driver has an active trip or is en route to pickup, we switch to high-accuracy GPS at 3-second intervals. This alone extends battery life from 4 hours to 10+ hours.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gps_optimization", "battery_management", "fused_location", "adaptive_frequency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Smart battery optimization. How do location updates get to the server?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "location_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The driver app maintains a WebSocket connection to our edge servers. But WebSocket has a mobile-specific challenge: when the phone switches from WiFi to cellular — or between cell towers while driving — the TCP connection drops. The mobile app needs to handle this gracefully. I'd implement a connection manager that: detects network changes via Android's ConnectivityManager or iOS's NWPathMonitor, buffers location updates locally when disconnected (in a SQLite ring buffer of 100 entries), reconnects with exponential backoff (starting at 1 second, max 30 seconds), and replays buffered updates on reconnect so the server has continuous location history.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket", "network_switching", "local_buffering", "reconnection", "exponential_backoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about when the app goes to the background? On iOS especially, apps get killed quickly.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "app_backgrounding" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is one of the hardest mobile problems. On iOS, when the app is backgrounded, the OS suspends it within seconds. The WebSocket dies. For drivers, we use iOS's location services background mode — the app registers as a location-tracking app, which lets it receive location updates in the background. On each location update callback, we have about 10 seconds of execution time to send the update to the server via a lightweight HTTPS POST (not WebSocket — we can't maintain persistent connections in background). On Android, we run a foreground service with a persistent notification ('You're online as a driver'), which prevents the OS from killing us. For riders during an active trip, we use silent push notifications from APNS/FCM to wake the app periodically and pull trip status updates.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["app_backgrounding", "ios_background_modes", "foreground_service", "silent_push_notifications"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent mobile depth. Let's talk about the server-side architecture — how does matching work?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ride_matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Driver locations are stored in a Redis geospatial index, updated every time we receive a location from a driver. When a rider requests a ride, the matching service does a GEORADIUS query to find available drivers within a 3km radius. We rank by estimated pickup time — not just distance, because a driver 500m away stuck in traffic might take longer than one 2km away on a highway. The matching service sends a ride offer to the best driver via their WebSocket connection. The driver has 15 seconds to accept. But here's the mobile consideration: if the driver's app is in background mode and using HTTP POST for locations, they won't receive the WebSocket offer. So we also send a high-priority push notification via FCM/APNS that wakes the app and brings it to foreground.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_geospatial", "ride_matching", "eta_calculation", "push_notifications"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the rider see the driver approaching on the map?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "real_time_tracking" }
+    },
+    {
+      "role": "candidate",
+      "content": "The rider's app receives the driver's location updates via WebSocket. But we need to optimize for data usage — in markets like India, users pay per MB. Raw location updates at 3-second intervals for a 10-minute wait is 200 updates * 100 bytes = 20KB — acceptable. But we can do better: on the server side, we only forward updates when the driver has moved more than 20 meters from the last forwarded position (dead-reckoning filter). This reduces updates by 50-70% during slow traffic. On the client side, we interpolate between received positions for smooth animation — using the heading and speed from the last update to predict intermediate positions. The map SDK handles rendering. For low-end phones, we reduce map tile quality and limit the visible radius to save GPU and memory.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_optimization", "dead_reckoning", "client_interpolation", "low_end_device_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about offline mode? Drivers in areas with poor connectivity.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "offline_mode" }
+    },
+    {
+      "role": "candidate",
+      "content": "Offline mode is essential for global markets. The driver app needs to work even with intermittent connectivity. Offline-capable features: the current trip details are cached locally — pickup/dropoff addresses, rider contact info, map of the route (we pre-download the route tiles when connectivity is available). Navigation works offline using the cached route. Location tracking continues via GPS — updates are buffered and synced when connectivity returns. Trip state changes (started, completed) are recorded locally and synced later. The server treats the driver's state as 'last known' during offline periods. For payments, we handle this with a grace period — the trip fare is calculated server-side once the trip data syncs, even if the sync is delayed by minutes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["offline_mode", "local_caching", "offline_navigation", "eventual_sync", "grace_period"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss the database design for trip and location data.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Trip data in PostgreSQL — it's transactional and we need ACID for payment-related fields. Trip table: trip_id, rider_id, driver_id, status, pickup_location, dropoff_location, fare_amount, payment_status, created_at, completed_at. For the location trace — the GPS breadcrumbs during a trip — that's high-volume write data. At 1 update/3 sec for 500K active trips = 167K writes/sec. I'd use Cassandra partitioned by trip_id, clustered by timestamp. After the trip, the location trace is used for fare calculation, route replay, and dispute resolution, then archived to S3 after 90 days. We keep the location data minimal on write: trip_id, timestamp, lat, lng, speed, heading — about 50 bytes per record.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["postgresql", "cassandra", "database_design", "capacity_estimation", "data_archival"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if the payment fails after the trip is completed?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "payment_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The rider's payment method is pre-authorized at trip request time — we place a hold for the estimated fare. After trip completion, we capture the actual amount. If capture fails (card declined, insufficient funds after the hold expired), we retry twice over 24 hours. If still failing, the trip goes into a PAYMENT_PENDING state. The rider sees a notification: 'Please update your payment method.' They can't request new rides until the outstanding balance is settled. For the driver, we still pay them from the platform's float — the driver shouldn't be penalized for the rider's payment issue. On the mobile app side, the payment failure triggers an in-app banner with a deep link to the payment settings screen. We also send a push notification and an email as a fallback.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pre_authorization", "payment_failure", "retry_logic", "driver_protection", "in_app_notifications"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the surge pricing calculation?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing is computed server-side based on real-time supply-demand ratio per geographic zone. On the mobile side, the key consideration is communicating this clearly. The rider app shows the surge multiplier before confirming the ride — with the estimated fare prominently displayed. We require explicit confirmation: 'Your ride will cost 2.3x the normal rate.' This isn't just good UX — it's legally required in some jurisdictions. The fare shown at confirmation is locked in — even if surge changes while the rider is confirming, they pay the displayed price. This prevents the frustrating experience of the price changing while you're tapping 'Confirm.' The lock duration is 5 minutes, after which the rider needs to refresh.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_pricing", "fare_locking", "ux_considerations", "legal_compliance"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about data usage optimization for the mobile apps overall?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "data_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several strategies. Protocol Buffers instead of JSON for all API communication — typically 3-5x smaller payloads. Image compression: driver and rider profile photos served as WebP at appropriate resolution for the device screen — a thumbnail on low-end phones, higher res on flagships. Map tiles are the biggest data consumer. We use vector tiles instead of raster tiles — 10x smaller. Pre-cache the city-level map for the driver's home region on WiFi. For the WebSocket protocol, we use a binary format with delta encoding — only send changed fields in location updates. Total data usage target: under 50MB per 8-hour driver shift. In comparison, a naive implementation easily consumes 500MB+.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["protobuf", "image_compression", "vector_tiles", "delta_encoding", "data_usage_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final additions?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Safety features from the mobile perspective: an SOS button that shares the rider's live location with emergency contacts and optionally calls local emergency services. Trip sharing — the rider can share a live trip link with friends. Driver identity verification with periodic selfie checks against the registered photo. And crash detection using the phone's accelerometer — if the app detects a sudden deceleration pattern consistent with a collision, it prompts 'Are you okay?' and alerts support if no response. These aren't just features — they're table stakes for a ride-sharing app and need to work even on low-end devices and poor networks.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["safety_features", "crash_detection", "trip_sharing", "driver_verification"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Your mobile-first thinking was genuinely refreshing. Most candidates focus purely on the backend. The battery optimization, offline mode, and data usage considerations showed real practical experience. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 71,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 6,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 6,
+      "scalability": 6,
+      "failure_handling": 7,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional mobile awareness — battery management, GPS optimization, app backgrounding, offline mode",
+      "Practical data usage optimization with concrete savings numbers",
+      "Safety features and UX considerations showed product-engineering hybrid thinking"
+    ],
+    "weaknesses": [
+      "Server-side scalability was not deeply explored — matching algorithm and database sharding were surface-level",
+      "No capacity estimation for backend systems — Kafka sizing, Redis cluster sizing not discussed",
+      "Caching strategy was limited to client-side; server-side caching patterns not explored"
+    ]
+  }
+}

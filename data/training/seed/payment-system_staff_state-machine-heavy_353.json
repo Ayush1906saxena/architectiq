@@ -1,0 +1,169 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "staff",
+    "candidate_profile": "state-machine-heavy",
+    "total_exchanges": 22,
+    "generation_id": "seed_353"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a payment processing system — think Stripe or Adyen. I'd like you to focus on the payment lifecycle and state management. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several important questions. What payment methods do we need to support — cards, bank transfers, wallets? Do we need to support both authorize-then-capture and immediate charge flows? What about partial captures, refunds, and chargebacks? What currencies and regions? And what's our target for transaction processing latency?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payment_methods", "auth_capture", "refunds", "chargebacks", "multi_currency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Card payments only for now. Support both auth-capture and immediate charge. Full and partial refunds. Need to handle chargebacks. USD and EUR initially. Latency under 2 seconds for authorization. Focus on the state machine.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "payment_state_machine" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me define the complete payment state machine. The states are: CREATED, PENDING_AUTH, AUTHORIZED, AUTH_FAILED, PENDING_CAPTURE, CAPTURED, CAPTURE_FAILED, PENDING_SETTLE, SETTLED, PARTIALLY_REFUNDED, FULLY_REFUNDED, VOIDED, DISPUTED, and CHARGEBACK_LOST. Each state has strict transitions with constraints. Let me walk through the lifecycle.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payment_state_machine", "state_transitions", "payment_lifecycle"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Start with the authorization flow.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "authorization_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "State 1: CREATED. When a merchant submits a payment request, we create a payment record with an idempotency_key. Constraints: amount > 0, valid currency, valid card token. The idempotency_key prevents duplicate charges — if the same key is submitted twice, we return the existing payment. Transition: CREATED → PENDING_AUTH. We send an authorization request to the card network (Visa/Mastercard) via the issuing bank. This transition is triggered by calling our internal AuthorizationService. State 2: PENDING_AUTH. The payment is waiting for the card network response. Timeout: 30 seconds. If no response, we move to a TIMEOUT sub-state and retry once. Transition on success: PENDING_AUTH → AUTHORIZED. We store the auth_code returned by the issuer. Transition on failure: PENDING_AUTH → AUTH_FAILED. Store decline_code (e.g., insufficient_funds, card_expired, fraud_suspected). AUTH_FAILED is a terminal state for this payment — the merchant must create a new payment to retry.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency", "authorization", "timeout_handling", "decline_codes", "terminal_state"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now the capture flow.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "capture_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "State 3: AUTHORIZED. The card issuer has reserved the funds. Constraints: authorization is valid for a limited time — typically 7 days for e-commerce (can vary by card network). We store auth_expires_at. From AUTHORIZED, three transitions are possible: (a) AUTHORIZED → PENDING_CAPTURE: merchant requests capture. Constraint: capture_amount <= authorized_amount. Partial capture is allowed (e.g., authorized $100, capture $80 because one item was out of stock). (b) AUTHORIZED → VOIDED: merchant cancels the payment before capture. This releases the hold on the cardholder's funds. Constraint: must be within auth validity period. (c) AUTHORIZED → AUTH_EXPIRED: a background job checks auth_expires_at daily and transitions expired authorizations. AUTH_EXPIRED is terminal — merchant must re-authorize. State 4: PENDING_CAPTURE. We send the capture request to the card network. Timeout: 60 seconds. Transition on success: PENDING_CAPTURE → CAPTURED. Transition on failure: PENDING_CAPTURE → CAPTURE_FAILED. The auth is still valid — the merchant can retry capture.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["authorization_validity", "partial_capture", "void", "auth_expiry", "capture_retry"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through settlement and refunds.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "settlement_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "State 5: CAPTURED. Funds have been committed but not yet transferred. Transition: CAPTURED → PENDING_SETTLE. Settlement happens in batch — typically once per day. Our settlement service collects all CAPTURED payments, nets them (total captures - total refunds for the day), and submits to the acquiring bank. State 6: PENDING_SETTLE. Batch is submitted, waiting for confirmation. This usually takes 1-2 business days. Transition: PENDING_SETTLE → SETTLED. Funds have been transferred to the merchant's bank account. Now for refunds: from CAPTURED or SETTLED state, the merchant can request a refund. CAPTURED → PARTIALLY_REFUNDED or FULLY_REFUNDED (pre-settlement refund is easier — just a reversal). SETTLED → PARTIALLY_REFUNDED or FULLY_REFUNDED (post-settlement refund requires actually pushing funds back). Constraint: total_refunded <= captured_amount. Each refund is a separate entity with its own state machine (REFUND_CREATED → REFUND_PENDING → REFUND_COMPLETED or REFUND_FAILED), linked to the parent payment.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["settlement", "batch_processing", "netting", "partial_refund", "refund_state_machine"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the dispute and chargeback flow?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "chargeback_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "Chargebacks are initiated externally — the cardholder disputes the charge with their bank. From SETTLED or PARTIALLY_REFUNDED: transition to DISPUTED when we receive a chargeback notification from the card network. In DISPUTED state: the disputed amount is debited from the merchant's next settlement (the merchant loses the money immediately). The merchant has 7-30 days to submit evidence (receipts, shipping proof, etc.). Transitions from DISPUTED: (a) DISPUTED → SETTLED: we win the dispute. The previously debited amount is credited back in the next settlement. (b) DISPUTED → CHARGEBACK_LOST: we lose the dispute. Additionally, we incur a chargeback fee ($15-25 per chargeback). Terminal state. (c) DISPUTED → DISPUTED (second chargeback/pre-arbitration): rare but possible escalation. Constraint: if chargeback_rate for a merchant exceeds 1% of transactions, we flag the merchant for review — card networks penalize acquiring banks with high chargeback rates.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chargeback", "dispute_evidence", "chargeback_fee", "merchant_risk", "card_network_penalties"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you implement this state machine in code? How do you ensure only valid transitions happen?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "state_machine_implementation" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd implement it as an explicit transition table. In code: a Map<(CurrentState, Event), (NextState, Guard, Action)>. Example entries: (CREATED, AUTHORIZE) → (PENDING_AUTH, guard: amount > 0 && card_valid, action: send_auth_to_network). (AUTHORIZED, CAPTURE) → (PENDING_CAPTURE, guard: capture_amount <= auth_amount && !auth_expired, action: send_capture_to_network). (AUTHORIZED, VOID) → (VOIDED, guard: !auth_expired, action: send_void_to_network). Any transition not in the table is rejected — attempting CREATED → CAPTURED throws an IllegalStateTransitionException. The transition is executed within a database transaction: BEGIN; SELECT * FROM payments WHERE id = ? FOR UPDATE (pessimistic lock); validate guard conditions; UPDATE payments SET state = ?, updated_at = NOW(); INSERT INTO payment_events (payment_id, from_state, to_state, event, metadata); COMMIT. The payment_events table is an immutable audit log — every state change is recorded with timestamp and metadata.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["transition_table", "guard_conditions", "pessimistic_locking", "audit_log", "database_transaction"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when the system crashes midway through a state transition — say after sending the auth request to the network but before updating the database?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "crash_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the classic dual-write problem. The state in our database and the state at the card network can become inconsistent. My approach: never update the database BEFORE calling the external service, and always use a reconciliation mechanism. The flow: (1) Update state to PENDING_AUTH and record the request (idempotency key, timestamp) in the database FIRST. (2) Call the card network. (3) On response, update to AUTHORIZED or AUTH_FAILED. If we crash between step 1 and step 2: on restart, a recovery job finds all payments in PENDING_AUTH older than 5 minutes and retries the auth request using the same idempotency key (the network deduplicates). If we crash between step 2 and step 3: the network processed the auth, but our DB still says PENDING_AUTH. The recovery job queries the network's status API: 'what happened to auth request with idempotency key X?' and updates accordingly. This is the saga pattern with compensating transactions. The key invariant: PENDING_* states are always transient. If any payment is in a PENDING_* state for more than 5 minutes, the recovery job investigates.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dual_write_problem", "saga_pattern", "idempotency", "recovery_job", "compensating_transaction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the case where the network times out? You don't know if the auth succeeded or not.",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "timeout_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Timeouts are the hardest case — the payment is in a Schrodinger state. My approach: (1) After timeout (30 seconds), we do NOT assume failure. We transition to a PENDING_AUTH_UNKNOWN state. (2) Immediately query the network's status API. If it returns a definitive result, update accordingly. (3) If the status API also times out or returns 'processing', we schedule retries: check at 1 minute, 5 minutes, 15 minutes, 1 hour. (4) If after 24 hours we still can't get a definitive answer, we attempt a void/reversal as a safety measure — better to cancel a potentially authorized payment than to accidentally double-charge. (5) We return HTTP 202 Accepted to the merchant with a webhook callback URL. When we finally resolve the state, we send a webhook notification. The merchant's UI shows 'Processing' until we resolve. This is critical: we never tell the merchant 'approved' or 'declined' unless we're certain.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["timeout_handling", "unknown_state", "status_polling", "safety_void", "webhook_notification", "eventual_resolution"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. How do you prevent double-charging in a distributed system with retries?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "idempotency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Idempotency at every layer. Layer 1 — API level: the merchant includes an idempotency_key in every request. We store it: CREATE UNIQUE INDEX ON payments(merchant_id, idempotency_key). If a duplicate arrives, we return the existing payment's status. Layer 2 — our system to card network: every auth/capture request includes our payment_id as the network's reference ID. If we retry due to timeout, the network sees the same reference and deduplicates. Layer 3 — internal retries: the recovery job uses SELECT ... WHERE state = 'PENDING_AUTH' AND updated_at < NOW() - INTERVAL '5 minutes' FOR UPDATE SKIP LOCKED. The SKIP LOCKED prevents two recovery workers from picking up the same payment. Layer 4 — database level: state transitions use optimistic concurrency: UPDATE payments SET state = 'AUTHORIZED', version = version + 1 WHERE id = ? AND state = 'PENDING_AUTH' AND version = ?. If affected rows = 0, someone else already transitioned it — we reload and check.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency", "unique_constraint", "reference_deduplication", "skip_locked", "optimistic_concurrency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the immediate charge flow vs auth-capture? Does it use the same state machine?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "immediate_charge" }
+    },
+    {
+      "role": "candidate",
+      "content": "Same state machine, but some states are traversed instantly. For immediate charge: CREATED → PENDING_AUTH → AUTHORIZED → PENDING_CAPTURE → CAPTURED. The auth and capture happen in a single API call to the network (a 'sale' transaction). In our state machine, we still transition through both states for consistency, but the AUTHORIZED state has a lifetime of zero — we immediately trigger capture. The merchant specifies capture_method: 'automatic' or 'manual' when creating the payment. Automatic = immediate charge (sale). Manual = auth-only, capture later. In the transition table, when capture_method = 'automatic' and state transitions to AUTHORIZED, we automatically enqueue a CAPTURE event. This keeps the state machine uniform — the same audit trail, same failure handling, same reconciliation. The only difference is whether the merchant or the system triggers the capture transition.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["immediate_charge", "sale_transaction", "capture_method", "uniform_state_machine", "auto_capture"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about monitoring the state machine in production. How do you detect stuck payments?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Every PENDING_* state has a maximum expected duration: PENDING_AUTH = 30 seconds, PENDING_CAPTURE = 60 seconds, PENDING_SETTLE = 3 business days. Monitoring: a dashboard shows a histogram of payments by state. PENDING_* states should have near-zero counts — if PENDING_AUTH has more than 100 payments older than 5 minutes, that's a P1 alert. Metrics I'd track: (1) State transition rate per minute — sudden drop means processing is stuck. (2) Time-in-state distribution — P50 and P99 for each state. If P99 of PENDING_AUTH exceeds 10 seconds, the card network might be degraded. (3) Auth approval rate — baseline 85-90%. If it drops below 80%, something is wrong (our requests might be malformed, or a card network is having issues). (4) Chargeback rate per merchant — alert above 0.5%. (5) Orphaned payments — payments in terminal PENDING_* states found by the recovery job indicate systematic issues.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "state_duration_alerts", "transition_rate", "approval_rate", "chargeback_monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great depth on the state machine. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three additions. First, I'd implement a state machine visualization tool that shows the current state of any payment with its complete event history — invaluable for debugging and customer support. Second, for testing, I'd build a state machine fuzzer that generates random sequences of events and verifies that no invalid transition is ever accepted, and that every reachable state has at least one exit path (no deadlocks). Third, I'd consider event sourcing for the payment store: instead of updating the payment row in place, every state change is appended as an immutable event. The current state is derived by replaying events. This gives us perfect auditability (required for PCI compliance), time-travel debugging, and the ability to rebuild read models. The payment_events table I mentioned earlier is essentially this — the payments table becomes a materialized view of the event stream.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["state_visualization", "fuzzing", "event_sourcing", "pci_compliance", "time_travel_debugging"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. Your state machine design was thorough and production-ready. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 80,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 5,
+      "api_design": 7,
+      "database_design": 9,
+      "caching_strategy": 4,
+      "scalability": 7,
+      "failure_handling": 10,
+      "communication": 9
+    },
+    "strengths": [
+      "Comprehensive payment state machine with every transition, guard condition, and failure mode defined",
+      "Excellent crash recovery design using saga pattern with compensating transactions",
+      "Multi-layer idempotency strategy covering API, network, recovery, and database levels"
+    ],
+    "weaknesses": [
+      "No capacity estimation — throughput, storage, and infrastructure sizing were not discussed",
+      "Caching strategy was not mentioned — payment data caching or rate limiting cache"
+    ]
+  }
+}

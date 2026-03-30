@@ -1,0 +1,139 @@
+{
+  "metadata": {
+    "problem_id": "message-queue",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_042"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed message queue like Apache Kafka. It needs to handle high throughput, provide durability, and support multiple consumers. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. What's our target throughput — messages per second? What's the average message size? Do we need ordering guarantees — per-partition or global? What's the retention policy — how long do we keep messages? And how many consumer groups are we expecting to support concurrently?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["throughput", "message_size", "ordering", "retention", "consumer_groups"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "1 million messages per second, average 1KB per message. Per-partition ordering. 7-day retention. Up to 100 consumer groups per topic. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with capacity estimation. 1M messages/sec at 1KB each is 1GB/sec of write throughput. With a replication factor of 3, that's 3GB/sec of total disk writes. Over 7 days, raw storage is 1GB/sec * 86,400 sec * 7 days = ~605 TB, times 3 replicas = ~1.8PB. For network, each message is sent to 2 follower replicas and read by up to 100 consumer groups, so network throughput on popular topics could be significant. Now let me talk about the core architecture, starting with how Kafka models this.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "replication_factor", "storage_estimation", "network_throughput"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Go ahead with the architecture.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The fundamental abstraction is the topic, partitioned into N partitions. Each partition is an ordered, immutable append-only log. Messages within a partition have a monotonically increasing offset. Each partition has one leader replica and multiple follower replicas across different brokers. All reads and writes go through the leader. The key design insight in Kafka is that the log is append-only and reads are sequential — this aligns perfectly with how modern disks work. Sequential reads and writes on spinning disks achieve throughput comparable to random reads from memory. This is why Kafka can saturate disk bandwidth without needing to keep everything in RAM.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["topic_partition", "append_only_log", "offset", "leader_follower", "sequential_io", "disk_throughput"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's go deep on replication. Explain the ISR mechanism and why it matters.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "isr_mechanics" }
+    },
+    {
+      "role": "candidate",
+      "content": "ISR — In-Sync Replicas — is the set of replicas that are fully caught up with the leader, within a configurable lag threshold (replica.lag.time.max.ms, default 30 seconds in newer Kafka). The leader maintains the ISR list. A follower falls out of the ISR if it hasn't fetched messages from the leader within the lag threshold — this could happen due to GC pauses, disk issues, or network problems. The key property: a message is considered 'committed' only when all replicas in the ISR have acknowledged it. The leader tracks this with the 'high watermark' — the offset up to which all ISR replicas have replicated. Consumers only see messages up to the high watermark. This means if the leader dies, any ISR replica can take over without data loss — it has all committed messages. The trade-off is that a shrinking ISR reduces redundancy. If ISR drops to just the leader, every committed message has only one copy — a leader failure would lose data. This is why Kafka has the min.insync.replicas setting. If you set it to 2, the broker refuses to accept writes when ISR drops below 2, protecting data integrity at the cost of availability.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["isr", "high_watermark", "committed_offset", "min_insync_replicas", "replication_lag"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. Now, what happens when the leader dies and no ISR replicas are available? That's the unclean leader election scenario.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "unclean_leader_election" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is one of the most important operational decisions in Kafka. If the leader dies and all ISR replicas are also down, you have two choices. Option one: wait for an ISR replica to come back online. This preserves data consistency — no committed messages are lost — but the partition is unavailable until recovery. Could be minutes, could be hours. Option two: enable unclean leader election (unclean.leader.election.enable=true). This allows a non-ISR replica — one that was behind — to become leader. The partition becomes available quickly, but any messages that were committed to the old leader but not yet replicated to this replica are permanently lost. Worse, if the old leader comes back, it has messages that the new leader doesn't — these get truncated, creating a silent data loss that's very hard to debug. My recommendation: disable unclean leader election for any topic where data integrity matters — financial events, audit logs, payment processing. Enable it only for topics where availability is more important than occasional data loss — metrics, logging, analytics.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["unclean_leader_election", "data_loss", "log_truncation", "availability_vs_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great. Let's talk about the consumer side. What are consumer rebalancing storms and how do you mitigate them?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "consumer_rebalancing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Consumer rebalancing happens when the partition assignment across consumers in a group changes — a consumer joins, leaves, or is considered dead (missed heartbeat). In eager rebalancing (the old default), all consumers stop processing, release their partitions, and get new assignments. During rebalancing, zero messages are processed. A 'storm' happens when a cascading effect triggers repeated rebalances. For example: a consumer takes too long processing a batch, misses its heartbeat (session.timeout.ms), gets kicked out, triggering a rebalance. During the rebalance, other consumers fall behind. If any of them also miss heartbeats because the rebalance took too long, they get kicked out too — triggering another rebalance. This can cascade until the consumer group is effectively dead. Mitigations: first, use cooperative incremental rebalancing (the new default). Instead of all consumers stopping, only the affected partitions are revoked and reassigned. Unaffected consumers keep processing. Second, tune session.timeout.ms and max.poll.interval.ms appropriately — give consumers enough time for slow partitions. Third, implement proper heartbeat threading — the heartbeat runs on a separate thread from message processing. Fourth, use static group membership (group.instance.id) — when a consumer restarts, it reclaims its previous assignment without triggering a full rebalance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consumer_rebalancing", "eager_rebalancing", "cooperative_rebalancing", "rebalance_storm", "static_membership", "heartbeat_configuration"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you monitor a Kafka deployment? What are the key metrics?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Monitoring is critical for Kafka. I'd organize metrics into four categories. Broker health: under-replicated partitions (most important single metric — if this is non-zero, you're at risk of data loss), ISR shrink rate, active controller count (should be exactly 1), request handler idle ratio, disk usage and I/O utilization, network throughput, and JVM GC pause times. Producer metrics: produce request latency (p50, p99), produce error rate, batch size and compression ratio. Consumer metrics: consumer lag per partition — the difference between the latest offset and the consumer's committed offset. This is the single most important consumer metric. If lag is growing, the consumer can't keep up. I'd alert on lag exceeding a threshold — say 10,000 messages or 5 minutes of data, whichever is applicable. Also track commit rate and rebalance frequency. Operational metrics: partition leader elections per second (should be near zero in steady state), log flush latency, and segment roll frequency. For consumer lag specifically, I'd use a dedicated monitoring tool like Burrow, which computes lag in terms of time, not just offsets — a lag of 1,000 messages on a high-throughput topic means seconds, while on a low-throughput topic it could mean hours.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["under_replicated_partitions", "consumer_lag", "isr_metrics", "broker_health", "burrow", "time_based_lag"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about data retention and compaction?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "retention_compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two retention modes. Time or size-based deletion: messages older than the retention period (7 days in our case) get deleted. The log is divided into segments, and old segments are deleted wholesale — no individual message deletion. This is efficient. Log compaction: instead of deleting by time, Kafka keeps only the latest message for each key. This is useful for topics that represent state — like a changelog or a KTable backing. The compaction thread periodically scans the log and removes older entries for keys that have newer values. You can combine both — compacted topics with a minimum retention time, ensuring that even recently updated keys keep some history. For our 7-day retention with 1.8PB of storage, the cleaner threads removing old segments is a background I/O operation. I'd schedule it during low-traffic hours and monitor the log cleaner lag to ensure it doesn't fall behind.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["log_retention", "log_compaction", "segment_deletion", "ktable", "cleaner_lag"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle a scenario where a single consumer group falls severely behind — hours of lag?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "consumer_lag_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several strategies depending on the cause. First, diagnose: is the consumer too slow (processing bottleneck)? Is it under-provisioned (not enough consumers for the partition count)? Is it rebalancing repeatedly? For a processing bottleneck: add more consumers to the group (up to the partition count) or increase the partition count of the topic. If the consumer does expensive work per message, consider batching or processing asynchronously — consume fast, process in the background. For severe lag where catching up in real-time processing isn't feasible: you might choose to skip ahead. Reset the consumer offset to the latest position and accept the data loss for that consumer group. Or reset to a specific timestamp if you want to skip only a portion. For a more graceful approach: spin up a temporary 'catch-up' consumer group with high parallelism that replays the backlog into a fast-processing pipeline, while the primary consumer continues from its current position. Once the catch-up consumer finishes, merge the results. The key operational decision is: is it more important to process every message (at the cost of remaining behind) or to minimize lag (at the cost of data loss)?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consumer_lag_recovery", "offset_reset", "parallelism", "catch_up_consumer", "processing_backpressure"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's wrap up. Anything you'd add to this design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. First, I'd implement quotas — produce and consume byte-rate limits per client ID — to prevent a rogue producer from overwhelming the cluster. Second, for the 100 consumer groups reading the same topic, I'd leverage the OS page cache — since all consumers read the same data, the second through hundredth consumers likely hit the page cache, dramatically reducing disk I/O. This is another reason sequential I/O matters. Third, I'd implement tiered storage — after a few days, move older log segments from local disk to object storage (S3). This decouples storage costs from broker hardware and supports longer retention without more disks. Finally, schema management — integrate a schema registry so producers and consumers agree on message format, with backward/forward compatibility enforcement.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["quotas", "page_cache", "tiered_storage", "schema_registry", "compatibility"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent depth across the board. You clearly have operational experience with Kafka, not just theoretical knowledge. Great interview.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 78,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Deep understanding of ISR mechanics and unclean leader election trade-offs with practical recommendations",
+      "Comprehensive consumer rebalancing discussion with concrete mitigation strategies",
+      "Excellent monitoring framework organized by category with actionable thresholds"
+    ],
+    "weaknesses": [
+      "Did not discuss the producer API design or exactly-once semantics in detail",
+      "Could have covered multi-datacenter replication (MirrorMaker) given the scale"
+    ]
+  }
+}

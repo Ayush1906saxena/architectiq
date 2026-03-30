@@ -1,0 +1,143 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "principal",
+    "candidate_profile": "disaster-recovery",
+    "total_exchanges": 20,
+    "generation_id": "seed_435"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design the disaster recovery architecture for a real-time chat system. This is an enterprise product where customers rely on it for critical business communication. How would you approach this?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "RPO: 0 seconds — zero data loss. RTO: 5 minutes. Those are my targets. For a chat system, losing messages is unacceptable — people make business decisions in chat, and missing a message could mean missing a critical incident alert or a deal approval. Here's my multi-region active-active setup with synchronous replication for messages and async for metadata.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rpo", "rto", "zero_data_loss", "active_active", "synchronous_replication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Zero RPO is ambitious. Walk me through how you achieve it without unacceptable latency overhead.",
+      "annotation": { "action": "deepen", "phase": "requirements", "target_concept": "synchronous_replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Synchronous cross-region replication adds 30-70ms of latency depending on region distance. For a chat system, that's acceptable — the user sends a message and sees it appear in 100-150ms instead of 50-80ms. They won't notice. The architecture: two primary regions — US-East and EU-West, approximately 80ms apart. Each message write is acknowledged only after both regions have persisted it. The replication protocol: when a message arrives at the primary handler in US-East, it's simultaneously written to the local message store AND sent to EU-West via a dedicated low-latency network link. The EU-West region writes to its local store and sends an ack. The primary handler waits for both local write + remote ack before acknowledging to the client. If the remote ack doesn't arrive within 200ms (timeout), we have a decision: fail the write (preserving zero RPO but degrading availability) or accept the write locally with async replication (preserving availability but temporarily risking RPO). I'd implement a circuit breaker: under normal conditions, strict synchronous replication. If cross-region latency exceeds 200ms for more than 30 seconds, switch to async mode with aggressive catch-up, and alert the on-call.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["synchronous_replication", "latency_budget", "dedicated_network_link", "circuit_breaker", "degradation_modes", "timeout_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the complete multi-region architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "multi_region_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two active regions, each capable of serving 100% of traffic independently. Each region contains: a WebSocket gateway fleet (holding active connections for users routed to that region), a message processing service, a message store (Cassandra cluster with local quorum writes), a Redis cluster for presence and caching, and a metadata store (PostgreSQL for channels, users, permissions). Traffic routing: DNS-based geographic routing sends users to the nearest region. US and LATAM users go to US-East, European and African users go to EU-West. Asian users go to whichever has lower latency. Message replication: synchronous between regions as I described — both regions persist every message. This means either region can serve any user's message history with zero data loss. Metadata replication: asynchronous with conflict resolution. Channel settings, user profiles, and permissions change infrequently, so eventual consistency with last-writer-wins is acceptable. The 'active-active' aspect: both regions handle reads AND writes simultaneously. A user in US-East can send a message to a channel, and a user in EU-West sees it within 100ms. No single 'primary' region — this eliminates the failover delay of active-passive setups.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["active_active", "geographic_routing", "cassandra", "local_quorum", "metadata_replication", "conflict_resolution"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when an entire region goes down?",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "regional_failover" }
+    },
+    {
+      "role": "candidate",
+      "content": "Because both regions are active and have all data, a regional failure is handled gracefully. Step 1 (0-30 seconds): health checks detect the region failure. Our global load balancer (Route 53 or Cloudflare) detects failed health checks and stops routing new DNS requests to the failed region. Existing DNS TTL is 30 seconds, so within 30 seconds all new connections go to the surviving region. Step 2 (30-90 seconds): users connected to the failed region's WebSocket gateways lose their connections. Their clients detect the disconnection and reconnect — DNS now points them to the surviving region. The clients reconnect with their last_seen_message_id, and the surviving region serves any messages they missed. Step 3 (2-5 minutes): the surviving region absorbs 100% of traffic. It was provisioned to handle this — we always maintain enough capacity in each region to serve the full global load. This is expensive (we run at ~50% utilization normally) but it's the cost of a 5-minute RTO. For the reconnection storm: when 50% of users suddenly reconnect to one region, we use a jittered backoff on the client — random delay between 0-10 seconds before reconnecting. This spreads the reconnection over 10 seconds rather than a thundering herd. The surviving region's auto-scaler also kicks in, adding WebSocket gateway instances within 2 minutes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["regional_failover", "dns_failover", "reconnection_storm", "jittered_backoff", "capacity_headroom", "auto_scaling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the split-brain scenario — both regions are up but can't communicate with each other?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "split_brain" }
+    },
+    {
+      "role": "candidate",
+      "content": "Split-brain is the nightmare scenario for active-active. Both regions continue accepting writes, but they can't replicate to each other. When connectivity restores, you have two divergent datasets. My approach: accept the split-brain temporarily and resolve on reconnection. During the partition: each region operates independently, serving its local users. Messages sent in US-East are visible to US-East users immediately but invisible to EU-West users until connectivity restores. The circuit breaker switches to async mode (queue pending replications). This is a deliberate CAP theorem choice: during a partition, we choose availability over consistency. On reconnection: the queued replications are replayed. For messages, this is straightforward — messages are append-only with globally unique IDs (UUID v7 with region prefix), so there are no conflicts. Each region simply ingests the messages it missed and inserts them into the correct timeline position by timestamp. For metadata changes (channel renames, permission changes), we use vector clocks to detect conflicts. Concurrent modifications to the same entity are flagged for manual resolution — an admin gets a notification saying 'Channel #engineering was renamed to #eng in US-East and #engineering-team in EU-West during a network partition. Please choose.' For the chat use case, message-level split-brain is actually tolerable — users in different regions might have temporarily different views of a conversation, but once connectivity restores, the full conversation is reconstructed in order. The UX during a partition: we show a subtle banner — 'Some messages from other regions may be delayed' — so users aren't surprised by messages appearing out of order during reconciliation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["split_brain", "cap_theorem", "conflict_resolution", "vector_clocks", "append_only_semantics", "user_experience_degradation", "manual_conflict_resolution"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle disaster recovery for the message store specifically? You mentioned Cassandra.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "message_store_dr" }
+    },
+    {
+      "role": "candidate",
+      "content": "Cassandra's built-in replication is part of the DR strategy, but it's not sufficient alone. Data protection has three layers. Layer 1 — local replication: within each region, Cassandra runs with replication factor 3 across 3 availability zones. A local quorum write (2 of 3) ensures no single AZ failure causes data loss. Layer 2 — cross-region replication: the synchronous replication I described ensures both regions have every message. This handles regional failures. Layer 3 — backup and point-in-time recovery: daily full snapshots of the Cassandra cluster to S3 (using Cassandra's snapshot feature), plus continuous streaming of the commit log to S3 for point-in-time recovery. This handles the case that neither active-active nor local replication can: data corruption that propagates to all replicas. If a bug causes silent data corruption, we can restore to a point before the corruption began. Backup retention: daily snapshots for 30 days, weekly snapshots for 1 year, monthly snapshots for 7 years (regulatory compliance for some enterprise customers). Recovery testing: monthly automated restore tests where we spin up a new Cassandra cluster from backup, load a sample of data, and verify integrity against the production cluster. If we can't restore from backup, we don't have a backup — we have a hope.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cassandra_replication", "availability_zones", "point_in_time_recovery", "backup_strategy", "data_corruption_protection", "recovery_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the WebSocket connection state? How do you ensure users don't lose their session context during failover?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "session_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "WebSocket connections are ephemeral — they will be lost during failover. The key is making reconnection seamless. Session state is split between client-side and server-side. Client-side: the client maintains its own state — which channels are open, the scroll position, draft messages, and critically, the last_seen_message_id per channel. This state survives reconnection because it's in the client's memory or local storage. Server-side session state: the user's presence status, typing indicators, and unread counts. These are stored in Redis with a 5-minute TTL. After failover to the surviving region, the Redis cluster there has its own copy of presence data (synced via cross-region replication). For users who failover, their presence state is stale for up to the sync lag (usually <1 second in normal operation). The reconnection protocol: client connects to the new region, authenticates (stateless JWT — no session lookup needed), sends its per-channel last_seen_message_id, and receives a delta of missed messages. The client merges these into its local view. Typing indicators and presence are re-established from scratch — any 'typing...' indicators that were active are lost, which is an acceptable UX trade-off. Unread counts are recalculated server-side based on the client's last_seen_message_id.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["session_recovery", "client_side_state", "stateless_authentication", "jwt", "delta_sync", "presence_recovery"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you test disaster recovery? You can't just hope it works when you need it.",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "dr_testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "DR testing is the most important aspect of DR — an untested plan is a plan that fails. Four levels of testing. Level 1 — component testing (weekly): automated tests that verify each component's failover independently. Kill a Cassandra node, verify data is accessible from replicas. Kill a WebSocket gateway, verify clients reconnect. Kill a Redis node, verify the cluster self-heals. These run in production against a canary partition that handles synthetic traffic. Level 2 — regional failover drill (monthly): simulate a full region failure by withdrawing a region from DNS and verifying all traffic shifts to the surviving region within 5 minutes. We measure actual RTO and RPO. Initially we did this at 3 AM on Sundays, but we've graduated to doing it during business hours — that's when a real failure would happen, so that's when we should test. Level 3 — chaos engineering (ongoing): continuous random failures injected in production — network partitions between regions, disk failures, process crashes. Our synthetic test users continuously send and receive messages; any disruption is detected immediately. Level 4 — full disaster simulation (quarterly): simulated 'region destroyed' scenario where we revoke all access to a region and operate from the surviving region for 24 hours. The team practices the complete incident response: detection, communication, failover, operation under degraded capacity, and restoration. We publish DR test results to customers — enterprise clients audit our DR capability, and having documented, regular test results builds trust.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dr_testing", "component_testing", "failover_drills", "chaos_engineering", "disaster_simulation", "customer_transparency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about data at the application level — things like file attachments and search indexes?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "ancillary_data_dr" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each data type has different DR requirements based on its criticality. File attachments: stored in S3 with cross-region replication (S3 CRR). S3 provides 11-nines durability within a region and CRR provides cross-region protection. Files are immutable once uploaded — no conflict resolution needed. RTO for files: after failover, the surviving region's S3 bucket has all files. The only lag is CRR propagation — typically under 15 minutes for large files, under 1 minute for small files. Acceptable because files are always fetched after the message that references them. Search index (Elasticsearch): this is a derived data store — it can be rebuilt from the message store. I'd run an independent Elasticsearch cluster in each region, each indexing from its local Cassandra. During a regional failure, the surviving region's search index is complete (it has all messages via synchronous replication). RTO for search: zero — it's always available in both regions. The gap: messages that were in transit during the failure might not be indexed for a few minutes until the re-indexing pipeline catches up. Push notification state: the FCM/APNs tokens and notification preferences are stored in PostgreSQL with cross-region replication. During failover, there might be a few seconds of duplicate or missed push notifications — acceptable given the alternative is not sending them at all.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["file_storage_dr", "s3_crr", "search_index_dr", "derived_data", "push_notification_dr", "per_datatype_rto"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the cost of this DR architecture, and how do you justify it?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "cost_justification" }
+    },
+    {
+      "role": "candidate",
+      "content": "The active-active DR architecture roughly doubles infrastructure cost compared to a single-region deployment. Let me quantify. Compute: we maintain full capacity in both regions — that's 2x on WebSocket gateways, message processing, and Cassandra nodes. Realistically, we can run each region at 60% capacity (enough to absorb full load with some queuing), so it's 1.2x rather than 2x. Storage: messages are stored twice (both regions), so 2x on Cassandra and S3 storage. Network: synchronous cross-region replication adds significant data transfer costs — every message crosses the internet. At 10TB/month of message data, cross-region transfer at $0.02/GB is about $200/month. Trivial. Total: approximately 1.5-1.7x the cost of single-region. For a chat system with $10M ARR, that's maybe $2M/year in additional infrastructure. The justification: for enterprise customers, our SLA guarantees 99.99% uptime. Without multi-region DR, a single-region outage (which happens to major cloud providers 2-3 times per year for 1-4 hours each) would blow our SLA. Each SLA breach triggers contractual credits of 10-30% of monthly revenue for affected customers. More importantly, an outage of an enterprise communication tool during a crisis makes headlines and triggers customer churn. The $2M DR investment protects $10M+ in revenue and reputational value. It's not optional — it's a business requirement.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cost_analysis", "infrastructure_multiplier", "sla_credits", "business_justification", "reputational_risk", "roi_calculation"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. The combination of zero-RPO architecture with practical split-brain handling and rigorous testing methodology was very strong. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 81,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 9,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 10,
+      "communication": 9,
+      "disaster_recovery": 10,
+      "operational_excellence": 9,
+      "cost_analysis": 9
+    },
+    "strengths": [
+      "Exceptional DR architecture with clear RPO/RTO targets and concrete implementation details",
+      "Strong split-brain handling with practical conflict resolution strategies per data type",
+      "Rigorous four-level DR testing program with customer transparency"
+    ],
+    "weaknesses": [
+      "Limited discussion of API design and client protocol specifics",
+      "Could have explored monitoring and alerting for the DR infrastructure in more depth",
+      "Didn't discuss third-party dependency DR (auth providers, push notification services)"
+    ]
+  }
+}

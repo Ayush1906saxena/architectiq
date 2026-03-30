@@ -1,0 +1,191 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "principal",
+    "candidate_profile": "mediocre",
+    "total_exchanges": 22,
+    "generation_id": "seed_121"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a chat system — something like WhatsApp or Slack. It should support one-on-one and group messaging at scale. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great. For a chat system at this scale, we need to think about several dimensions. How many users? What's the message volume? Do we need group chats, and if so, what's the max group size? Do we need end-to-end encryption? What about message persistence and search? And do we need real-time typing indicators, online presence, read receipts?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "group_size", "encryption", "message_persistence", "presence", "read_receipts"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "1 billion users, 500 million DAU. 50 billion messages per day. Group chats up to 500 members. E2E encryption is nice to have. Full message history. Yes to all real-time features. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "50 billion messages per day is about 580K messages per second. That's significant. At the highest level, the architecture has a few core components. A WebSocket Gateway for real-time bidirectional communication. A Chat Service for message processing and routing. A Message Store for persistence. A Presence Service for online/offline tracking. A Notification Service for push notifications to offline users. And a Media Service if we're handling images and files.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "websocket", "gateway_service", "chat_service", "message_store", "presence_service", "notification_service"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good overview. Let's dig into the WebSocket Gateway. How does it work?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "websocket" }
+    },
+    {
+      "role": "candidate",
+      "content": "The WebSocket Gateway maintains persistent connections with all online users. With 500M DAU and maybe 100M concurrent connections, we'd need a large fleet of gateway servers. Each server can handle around 500K connections, so about 200 gateway servers. When a user connects, they're assigned to a gateway via a load balancer. The gateway authenticates the connection and registers it in a connection registry — mapping user_id to gateway_server_id.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket", "connection_registry", "load_balancing", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a user's connection drops? They're on a mobile device and go through a tunnel.",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "connection_failover" }
+    },
+    {
+      "role": "candidate",
+      "content": "When the connection drops, the gateway detects it via a missed heartbeat or TCP close. The user is removed from the connection registry. The client will try to reconnect. Once reconnected, potentially to a different gateway, the connection is re-registered. Any messages that arrived while they were offline are... they'd need to be queued somewhere.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["connection_failover", "heartbeat", "reconnection"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's go deeper there. How exactly are messages delivered during a disconnection? How does the client know what it missed?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "offline_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Well, the messages are stored in the message store. When the client reconnects, it can query for messages since the last message it received. Like, the client sends its last_seen_message_id and the server returns everything after that. The message store needs to support this kind of range query efficiently.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["offline_delivery", "last_seen_message", "range_query"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "But how does the client know the reconnection happened quickly enough? What if the disconnection was 1 second versus 1 hour? How is the experience different?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "reconnection" }
+    },
+    {
+      "role": "candidate",
+      "content": "For a short disconnect — like a second or two — ideally the gateway buffers recent messages destined for that user. When the client reconnects, the buffered messages are replayed immediately without a database query. For a longer disconnect — like an hour — the buffer is gone, so we fall back to the database query. The client experience: on short reconnect, messages appear almost instantly. On long reconnect, there's a brief loading state while history is fetched. But I'll be honest, the exact mechanism for distinguishing short vs long disconnects and managing the buffer... I'm not sure of the cleanest approach there.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["message_buffering", "reconnection", "short_vs_long_disconnect"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair enough. Let's talk about message delivery guarantees. How do you ensure a message is delivered exactly once?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "delivery_guarantees" }
+    },
+    {
+      "role": "candidate",
+      "content": "Exactly-once is tricky. We'd use at-least-once delivery with client-side deduplication. Each message has a unique ID generated by the sender. If the sender doesn't receive an acknowledgment, it retries. The server deduplicates by message ID. On the recipient side, the client also deduplicates by message ID before displaying. So even if a message is delivered twice due to retries, the user sees it once.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["exactly_once_delivery", "idempotency", "deduplication", "client_message_id"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How do you handle message ordering in group chats?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "For ordering... messages are stored with timestamps. The server assigns a server-side timestamp when it receives the message. In a group chat, all messages go through the Chat Service, which assigns timestamps. Since the Chat Service could be multiple instances, we'd need synchronized clocks — NTP isn't precise enough for message ordering. We could use a logical clock or a per-chat sequence number. Honestly, ordering in distributed systems is one of those problems where the details get complicated quickly.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["message_ordering", "timestamps", "logical_clock", "sequence_number"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Can you be more specific? How would you implement the per-chat sequence number?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "message_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each chat — whether 1:1 or group — could have a counter in Redis. When a message arrives for that chat, we atomically increment the counter (INCR) and use that as the sequence number. Redis is fast enough — a single chat won't have more than a few messages per second. The sequence number is stored with the message and determines display order. But this makes Redis a dependency for every message write. If Redis is slow, message delivery is slow.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["sequence_number", "redis_caching", "atomic_operations"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the message store? How do you store 50 billion messages per day?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "Cassandra is a natural fit here. It handles high write throughput well — LSM-tree based. Partition key is chat_id, clustering key is the sequence number. This gives us efficient ordered reads for a chat's history. 580K writes per second is within Cassandra's capability with a decently sized cluster. For storage: 50B messages * 200 bytes average = 10 TB per day. With 3x replication and 1-year retention: about 11 PB. That's a lot of Cassandra nodes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "cassandra", "database_schema", "capacity_estimation", "storage_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's go back to real-time features. How does the presence service work? How do you know if a user is online?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "presence_service" }
+    },
+    {
+      "role": "candidate",
+      "content": "The presence service tracks online/offline status. When a user connects to the WebSocket gateway, they're marked online. When they disconnect, they're marked offline. We'd store presence in Redis — a simple key-value: user_id -> {status, last_seen, gateway_id}. Clients send heartbeats every 30 seconds. If no heartbeat for 60 seconds, the user is marked offline. The question is: how do you propagate presence changes? If Alice comes online, how does Bob (who has Alice as a contact) find out?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["presence_service", "heartbeat", "redis_caching", "presence_propagation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly. How do you propagate presence at this scale?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "presence_propagation" }
+    },
+    {
+      "role": "candidate",
+      "content": "If we broadcast every presence change to all contacts, that's expensive. A user might have 500 contacts, so each presence change generates 500 push notifications. With 500M DAU coming and going... that's enormous fan-out. The approach should be lazy — don't broadcast presence changes. Instead, when a user opens a chat with Alice, the client queries Alice's presence at that moment. The presence service returns Alice's current status. For the contact list, we batch-query presence for visible contacts only. This is much cheaper than push-based presence.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["presence_propagation", "lazy_evaluation", "pull_based_presence", "batch_query"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now, you mentioned 200 gateway servers handling 500K connections each. What happens when a gateway server crashes?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "gateway_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "500K users lose their connections and need to reconnect to other gateways. The clients would reconnect with exponential backoff and jitter to avoid a thundering herd. The load balancer distributes them across remaining gateways. The stale connection registry entries for the crashed gateway would need cleanup — either via TTL or the new gateway overwriting them when users reconnect. It's disruptive but recoverable within about a minute.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["gateway_failure", "reconnection", "exponential_backoff", "thundering_herd", "connection_registry"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "During that minute, messages sent to those 500K users... where do they go?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "message_delivery_during_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "They'd be stored in Cassandra but not delivered in real-time. The Chat Service would try to push via the gateway, find the connection gone, and... fall back to push notification? Or just wait for the user to reconnect and pull the missed messages. Actually, this gets into the queuing question I was vague about earlier. We probably need a per-user message queue for undelivered messages. When the user reconnects, drain the queue. But I'm not confident about the exact mechanism for managing these queues at scale — 500M users potentially each with a queue feels heavyweight.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["message_delivery_during_failure", "push_notification", "message_queue", "offline_delivery"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running low on time. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The key components are there — WebSocket gateways, Cassandra for storage, Redis for presence and connection registry, push notifications for offline delivery. The system handles the happy path well. Where I struggled is in the edge cases — message delivery during disconnections, ordering guarantees, and per-user message queuing. At principal level, I should have had cleaner answers for those. I'd also add monitoring for message delivery latency, connection stability metrics, and alerting on gateway health.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["monitoring", "delivery_latency", "connection_stability"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good self-awareness. You had a strong high-level architecture but I'd have liked more depth on the delivery guarantees and failure modes. Thanks for the discussion.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 56,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 7,
+      "api_design": 5,
+      "database_design": 7,
+      "caching_strategy": 5,
+      "scalability": 6,
+      "failure_handling": 4,
+      "communication": 6
+    },
+    "strengths": [
+      "Strong high-level architecture — correctly identified all major components",
+      "Good Cassandra design with appropriate partition and clustering key choices",
+      "Smart lazy presence propagation to avoid fan-out explosion"
+    ],
+    "weaknesses": [
+      "Could not articulate a clean message delivery mechanism during connection failures",
+      "WebSocket connection failover and reconnection details were vague",
+      "Message ordering solution was hand-wavy — mentioned Redis INCR but couldn't discuss failure implications",
+      "For principal level, should have demonstrated expertise in exactly the distributed messaging details that were weakest"
+    ]
+  }
+}

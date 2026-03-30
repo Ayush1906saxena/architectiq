@@ -1,0 +1,152 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_029"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a video streaming platform like YouTube — handling both video upload and playback at scale. What do you want to clarify?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. What's the scale — number of videos uploaded per day, concurrent viewers? Do we need to support live streaming or just on-demand? What video quality range — SD only, or up to 4K? And what's our playback start latency target — how fast should a video begin playing after the user clicks?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["requirements_gathering", "scale", "latency", "live_vs_vod"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500,000 new videos per day, 100 million concurrent viewers at peak. On-demand only. Up to 4K resolution. Playback should start within 2 seconds. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do some back-of-envelope math. 500K videos per day — if the average raw upload is 200MB (10 minutes of 1080p), that's 100TB of raw uploads per day. After transcoding to multiple quality levels, each video becomes about 3x the original size (different bitrates), so 300TB of transcoded output per day. For playback: 100M concurrent viewers at an average bitrate of 5 Mbps (1080p) means 500 Tbps of total egress bandwidth. That's enormous — for reference, YouTube serves about 700 Tbps. This is a CDN-dominated system; the storage and transcoding are the back-office problems, but bandwidth is the cost driver.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "bandwidth_estimation", "storage_estimation", "cdn"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good sizing. Walk me through the upload pipeline — from the creator uploading a video to it being available for playback.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": "upload_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The upload pipeline has several stages. Stage 1 — Upload: the client uploads the raw video file to an upload service via a resumable upload API (important for large files on unreliable connections). The file goes to temporary object storage (S3). Stage 2 — Validation: we check the file format, duration limits, and run a basic virus scan. We also extract metadata — codec, resolution, duration, framerate. Stage 3 — Transcoding: this is the heavy lifting. We transcode the original video into multiple quality levels — an encoding ladder. I'll detail this next. Stage 4 — Post-processing: generate thumbnails at multiple resolutions, extract audio for closed captioning (speech-to-text), and run content moderation (nudity detection, copyright matching via audio fingerprinting like Content ID). Stage 5 — Publishing: once transcoding and moderation pass, we upload the transcoded segments to the CDN origin, update the video metadata in the database to 'published', and notify the creator.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["upload_pipeline", "resumable_upload", "transcoding", "content_moderation", "thumbnails", "encoding_ladder"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me more about the transcoding stage. What is the encoding ladder and how does the transcoding system work?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "transcoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "The encoding ladder defines which quality levels we produce for each video. A typical ladder: 240p at 300 kbps, 360p at 800 kbps, 480p at 1.5 Mbps, 720p at 3 Mbps, 1080p at 6 Mbps, 1440p at 12 Mbps, 4K at 20 Mbps. We use H.264 for compatibility and AV1 for newer devices — AV1 achieves the same quality at 30-50% lower bitrate but requires more encoding time. The transcoding system is a DAG (Directed Acyclic Graph) of tasks. The DAG for a video looks like: split the video into segments (2-10 second chunks) → transcode each segment at each quality level in parallel → package into streaming format (HLS or DASH) → generate segment manifests. The parallelism is key — instead of transcoding a 10-minute video sequentially at 7 quality levels (70 minutes of encoding work), we split it into 60 segments of 10 seconds each, transcode each segment at each quality level independently. That's 420 tasks that can run in parallel on a worker fleet. Using a task queue (like AWS SQS or Temporal) to orchestrate the DAG, a 10-minute video can be fully transcoded in 2-3 minutes with enough workers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["encoding_ladder", "transcoding_dag", "h264", "av1", "hls", "dash", "parallel_processing", "task_queue"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Impressive detail on the encoding pipeline. Now let's talk about playback. How does adaptive bitrate streaming work?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "adaptive_bitrate" }
+    },
+    {
+      "role": "candidate",
+      "content": "Adaptive Bitrate (ABR) streaming is how the player automatically adjusts quality based on the viewer's network conditions. Here's the flow: when the viewer starts a video, the player downloads the manifest file (an M3U8 for HLS or an MPD for DASH). The manifest lists all available quality levels and the URLs for each segment at each quality level. The player starts by requesting a low-quality segment to minimize startup time — this gets the video playing within 1-2 seconds. Then, while playing, the player measures its download speed. If it downloaded the 2-second segment in 0.5 seconds, it has bandwidth headroom and upgrades to a higher quality for the next segment. If a segment takes too long, it downgrades. The ABR algorithm on the player side is the intelligence here — Netflix uses a buffer-based algorithm (BOLA) that considers not just bandwidth but also how full the playback buffer is. If the buffer is nearly empty (risk of rebuffering), it aggressively drops quality. If the buffer is full, it can try upgrading. From our server side, we just need to serve the correct segments when requested. Each segment is a separate HTTP request that can be served by the CDN edge.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["adaptive_bitrate", "hls", "dash", "abr_algorithm", "buffer_based_algorithm", "cdn"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's talk about CDN strategy. At 500 Tbps of egress, how do you distribute content?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "cdn" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 500 Tbps, no single CDN provider can handle this alone, and even if they could, the cost would be astronomical. I'd use a multi-tier CDN architecture. Tier 1 — Our own edge servers deployed in major ISPs, similar to Netflix's Open Connect program. Netflix places dedicated cache servers inside ISP networks worldwide. These servers cache the most popular content and serve it directly within the ISP's network — zero transit costs, lowest possible latency. For popular videos (top 10% by views), this serves 80%+ of traffic. Tier 2 — Commercial CDN providers (Akamai, CloudFront, Fastly) for geographic coverage we don't have with our own servers, and for long-tail content that isn't cached on our edge. Tier 3 — Our origin servers in a few data centers as the fallback. The request routing works like this: the player requests a video, our traffic director (DNS-based or anycast) evaluates the viewer's IP, determines their ISP, and routes them to the nearest edge server that has the content. If the edge doesn't have it (cache miss), it pulls from the CDN tier, which pulls from origin.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn", "netflix_open_connect", "multi_tier_cdn", "isp_peering", "traffic_director", "cache_miss"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you decide what content to cache on the edge servers? You can't store everything.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "cdn_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Content popularity follows a power law — a tiny fraction of videos account for the majority of views. I'd use a predictive caching strategy. For the proactive layer: our analytics pipeline tracks trending videos and pre-pushes them to edge servers during off-peak hours (overnight). New uploads from popular creators are immediately pushed to all edge servers because we know they'll get millions of views in the first hour. For the reactive layer: standard LRU cache — when a video is requested and not on the edge, the edge fetches it from upstream and caches it. Popular content stays in cache; unpopular content gets evicted. For storage efficiency on edge servers: we don't cache all quality levels. We cache the most requested quality level for each region — 1080p in markets with good broadband, 480p in markets with slower connections. Less popular quality levels are served from the CDN tier. A typical edge server might have 100TB of storage and cache about 50,000-100,000 videos at the primary quality level. With LRU, the cache hit rate should be 90%+ for views.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_caching", "predictive_caching", "lru", "power_law", "quality_level_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the metadata and search side. How does a user find videos?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "search" }
+    },
+    {
+      "role": "candidate",
+      "content": "Video discovery has two paths: search and recommendations. For search, I'd use Elasticsearch for the video metadata index — title, description, tags, captions (from the speech-to-text processing). The search service handles query parsing, spell correction, and relevance ranking. Ranking factors include text relevance (BM25 score), video quality signals (view count, like ratio, watch time percentage), recency, and personalization (based on the user's watch history). For recommendations — the 'Up Next' and home page — that's a separate ML-powered system. A candidate generation model narrows down from millions of videos to thousands based on the user's history and collaborative filtering. Then a ranking model scores the candidates based on predicted watch time. This runs on a feature store that pre-computes user embeddings and video embeddings. The recommendation service is separate from the video serving infrastructure — it has its own database, models, and serving layer.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["search", "elasticsearch", "bm25", "recommendations", "collaborative_filtering", "feature_store"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about storage? Where do you keep the video files and the metadata?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Video files — the transcoded segments — go in object storage (S3 or GCS). At 300TB/day of new content, that's about 110PB per year. With S3 standard pricing, storage alone is about $2.5M/month. I'd use S3 Intelligent-Tiering or lifecycle policies: videos accessed in the last 30 days stay in standard storage, videos not accessed in 90 days move to S3 Glacier. Metadata — video title, description, creator info, view counts, comments — goes in a relational database. At 500K new videos/day, that's about 180M videos per year. MySQL or Postgres sharded by video_id can handle this. View counts and engagement metrics are high-write: I'd use Redis for real-time counters and flush to the database periodically. Comments are a separate service with its own database, since comment volume is orders of magnitude higher than video metadata updates.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["object_storage", "s3", "tiered_storage", "database_schema", "redis_caching", "sharding_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What happens if a transcoding job fails halfway through?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "transcoding_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Since the transcoding DAG processes segments independently, a failure in one task doesn't affect others. The orchestrator (Temporal or Step Functions) tracks the state of each task. If a segment transcoding task fails, it's retried on a different worker — workers might fail due to hardware issues, OOM, or corrupted input segments. After 3 retries, the task is marked as permanently failed, and the video status is set to 'processing_error'. We notify the creator and allow them to re-upload. For partial failures — say 59 out of 60 segments succeeded — we don't publish a partially transcoded video. All segments must complete for all quality levels before publishing. The idempotency of each task is important: if a worker crashes after uploading the transcoded segment but before acknowledging the task, the retry produces the same segment and overwrites it in storage. Transcoding is deterministic, so re-processing the same input produces the same output.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dag_failure_handling", "task_retry", "idempotency", "orchestration"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Anything you'd add if we had more time?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. Copyright detection: an audio and video fingerprinting system (like YouTube's Content ID) that compares uploads against a database of copyrighted material — this is legally required at scale. Live streaming: that would add a real-time ingest pipeline with RTMP ingest servers, real-time transcoding (lower latency than offline), and segment generation on-the-fly. Monetization: an ad insertion system (SSAI — Server-Side Ad Insertion) that stitches ads into the video stream so ad blockers can't distinguish ad segments from content segments. And global traffic management: if a region's edge capacity is saturated, seamlessly redirect viewers to the next-nearest region.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["copyright_detection", "live_streaming", "ad_insertion", "traffic_management"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. Strong end-to-end coverage from upload through CDN delivery. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 77,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 8,
+      "domain_knowledge": 8
+    },
+    "strengths": [
+      "Excellent capacity math — correctly estimated bandwidth, storage, and transcoding parallelism",
+      "Deep knowledge of the transcoding pipeline including encoding ladder, DAG processing, and codec trade-offs",
+      "Strong CDN strategy referencing Netflix Open Connect with multi-tier architecture and predictive caching",
+      "Good understanding of ABR streaming mechanics including buffer-based algorithms"
+    ],
+    "weaknesses": [
+      "Search and recommendation discussion was relatively shallow — didn't go deep on ranking signals",
+      "Didn't discuss video player experience metrics (rebuffer rate, startup time optimization, quality switches)",
+      "API design for the upload and playback endpoints wasn't explicitly covered"
+    ]
+  }
+}

@@ -1,0 +1,152 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "vp",
+    "candidate_profile": "creator-economy",
+    "total_exchanges": 22,
+    "generation_id": "seed_429"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a video streaming platform — think YouTube scale. How would you approach the architecture?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The technical system serves the business model: creators make content, we distribute it, advertisers pay us, we share revenue with creators. Every technical decision maps to this flywheel. If upload is slow, creators go to TikTok. If buffering is high, viewers leave and ad revenue drops. If monetization is opaque, creators lose trust and stop producing. I'll design with this flywheel at the center.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["business_flywheel", "creator_economics", "platform_dynamics", "user_experience"], "depth": "strategic", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the scale and requirements.",
+      "annotation": { "action": "probe", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me size each side of the flywheel. Creator side: 500K videos uploaded per day, average 10 minutes each, 2GB raw per video. That's 1PB of raw uploads per day. Each video needs to be transcoded into 6 quality levels (144p to 4K), roughly 5x the raw size in output — so 5PB of transcoded video per day. Viewer side: 2 billion daily views, average 5 minutes per view. At an average bitrate of 3 Mbps, that's about 225 PB of data transfer per day — our biggest cost center by far. Advertiser side: 5 ad impressions per view session, so 10 billion ad decisions per day. The CDN bill alone is probably $100M/year. The architecture must obsess over three things: transcoding efficiency (cost), CDN utilization (cost), and ad fill rate (revenue).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "transcoding_pipeline", "cdn_costs", "ad_economics", "cost_structure"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's start with the upload and transcoding pipeline.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "transcoding_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The upload flow: creators upload via a resumable upload protocol — essential because a 2GB file over a spotty connection will fail without chunked upload with resume. The upload service writes chunks to object storage (S3 or GCS) and, once complete, emits a 'video_uploaded' event to a processing queue. The transcoding pipeline is a DAG (directed acyclic graph) of tasks: probe (extract metadata, duration, codec), transcode (generate 6 quality levels using adaptive bitrate encoding), generate thumbnails (every 10 seconds for seek preview), extract audio (for accessibility and search indexing), run content moderation (nudity detection, copyright matching via content ID), and generate captions (speech-to-text). I'd run this on a mix of CPU and GPU instances — GPU for transcoding (10x faster per dollar) and specialized ML instances for content moderation. The key optimization: just-in-time transcoding for long-tail content. The top 10% of videos get all 6 quality levels immediately. The bottom 90% get 480p and 720p initially, and higher resolutions are transcoded on-demand when a viewer requests them. This saves 60-70% on transcoding costs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["resumable_upload", "transcoding_pipeline", "dag_processing", "content_moderation", "jit_transcoding", "cost_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the content delivery work? Walk me through what happens when a viewer presses play.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "content_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Press play triggers a cascade. Step 1: the player requests a manifest file (HLS .m3u8 or DASH .mpd) from our video API. The API returns a manifest pointing to CDN URLs for each quality level. Step 2: the player starts with a conservative quality level based on detected bandwidth and downloads the first few segments (2-4 second chunks). Step 3: the adaptive bitrate (ABR) algorithm on the client adjusts quality continuously — if bandwidth improves, it steps up; if the buffer drops below 5 seconds, it steps down. Step 4: each segment request hits our CDN. Cache hit? Serve directly from the edge. Cache miss? The CDN fetches from our origin storage. CDN strategy: we operate a multi-CDN architecture — Cloudflare, Akamai, and Fastly — and our DNS dynamically routes viewers to the CDN with the best performance for their region. This also gives us negotiating leverage on pricing. For hot content — viral videos or live events — we pre-push segments to edge nodes before viewers request them. The optimization that matters most: start-time. The time from press play to first frame must be under 1 second. This is the single biggest predictor of viewer retention. We achieve this by pre-loading the first segment during thumbnail hover and using a lower initial quality for fast start.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["content_delivery", "adaptive_bitrate", "multi_cdn", "cache_strategy", "start_time_optimization", "viewer_retention"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about the recommendation system — how does the flywheel work technically?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "recommendation_system" }
+    },
+    {
+      "role": "candidate",
+      "content": "The recommendation system is the growth engine of the flywheel. It has three stages. Candidate generation: for a given user, generate ~1000 candidate videos from multiple sources — subscribed channels (100-200 candidates), collaborative filtering (users like you watched X — 300 candidates), content-based (similar to what you just watched — 200 candidates), and trending/new content (200-300 candidates for serendipity). Ranking: a deep learning model scores each candidate on predicted engagement — will this user click, watch 50%+, like, share? The model uses features from the user (watch history, demographics, time of day), the video (topic, creator, length, quality signals), and the context (what they just watched, device type). Re-ranking: apply business rules and diversity constraints. No more than 3 videos from the same creator. At least 20% of recommendations from creators the user hasn't seen before — this is critical for new creator discovery, which fuels the supply side of the flywheel. Suppress content that the user has already seen. Insert ad slots. The flywheel closes when recommendations drive views, views generate data, data improves recommendations. The cold-start problem — new creators and new viewers — is where the flywheel can break. For new creators, I'd boost initial exposure in niche categories and use content quality signals (audio quality, editing, thumbnail quality) as proxies for engagement before we have data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["recommendation_system", "candidate_generation", "ranking_model", "diversity_constraints", "cold_start", "creator_discovery"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the creator monetization system work? You said every technical decision maps to the flywheel.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "monetization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Creator monetization has multiple revenue streams, each with different technical systems. Ad revenue sharing: when an ad plays on a creator's video, we record a revenue event. The ad system tracks CPM (cost per thousand impressions) by ad format (pre-roll, mid-roll, banner), geography, and content category. Finance content commands $30+ CPM; gaming content gets $5-10. We share 55% of ad revenue with creators — this split is the industry standard YouTube set. The technical challenge: attributing ad revenue to specific views in real-time. Each view session generates multiple ad events, each with different CPMs. These flow through a revenue attribution pipeline that joins view events with ad events, computes per-view revenue, and aggregates per creator per day. The creator dashboard shows real-time estimated earnings — updated every 15 minutes — which is crucial for creator satisfaction and retention. Other revenue streams: channel memberships (subscription revenue), super chats during live streams (micro-transactions), merchandise shelf integration (affiliate revenue), and brand partnerships (sponsored content). Each stream has its own pipeline but all feed into a unified creator earnings ledger. The system must be transparent — creators who don't understand their revenue leave the platform.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monetization", "ad_revenue_sharing", "cpm_optimization", "revenue_attribution", "creator_dashboard", "multiple_revenue_streams"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The ad system handles 10 billion decisions per day. How do you architect the ad serving pipeline?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "ad_serving" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ad serving pipeline has sub-100ms latency requirements — it runs during the buffer between content segments. When the player reaches an ad slot, it sends an ad request with context: video category, viewer demographics, device type, geographic location, and the viewer's ad history (for frequency capping). The ad server runs a real-time auction: eligible campaigns bid based on their targeting criteria and budget. The winning ad is selected based on a combination of bid amount and predicted engagement (eCPM = bid * predicted CTR). This is essentially a search ranking problem at massive scale. Architecture: the ad server is stateless and horizontally scalable. Campaign metadata and targeting rules are cached in local memory, refreshed every 30 seconds. Budget pacing — ensuring a $1M campaign doesn't spend its entire budget in the first hour — uses approximate distributed counters in Redis. Brand safety is critical: the ad server checks the video's content classification and the advertiser's brand safety settings. A pharmaceutical ad cannot appear next to health misinformation. A children's brand cannot appear on mature content. This brand safety layer is one of the most important revenue-protection systems — if advertisers don't trust our placement, they reduce budgets.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ad_serving", "real_time_auction", "ecpm", "budget_pacing", "brand_safety", "frequency_capping"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle copyright and content moderation at this scale?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "content_moderation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Content moderation at 500K videos/day requires a multi-tier approach. Automated tier: every uploaded video passes through three ML classifiers during transcoding. Copyright: audio and video fingerprinting against a database of copyrighted works — similar to YouTube's Content ID. This is technically a nearest-neighbor search in a high-dimensional feature space. Match found: the copyright holder's policy applies — block, monetize (run ads and give revenue to the rights holder), or track. Nudity/violence: frame-level image classification running on every Nth frame (every 2 seconds). Hate speech: audio transcription followed by NLP classification. These classifiers catch 95% of violations but the remaining 5% requires human review. Human tier: a team of content moderators reviews flagged content and handles appeals. At our scale, we need 2,000-3,000 moderators globally, working in shifts and across languages. They need specialized tooling: a review interface that shows the flagged segment with context, one-click actions (approve, remove, age-restrict), and quality assurance sampling. The well-being of moderators is a real concern — exposure to disturbing content causes trauma. We need mandatory counseling, rotation policies, and aggressive pre-filtering so the worst content never reaches human eyes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["content_moderation", "content_id", "fingerprinting", "ml_classification", "human_review", "moderator_wellbeing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you think about the competitive landscape and where to invest?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "competitive_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "The competitive landscape is shifting fast. TikTok proved that short-form vertical video is a separate product, not just a feature. Twitch owns live streaming for gaming. Netflix owns premium long-form. We're competing on three fronts simultaneously. My investment priority: creator tools and monetization. Creators are the supply side — if they produce exclusively for us, viewers follow. The technical investments that win creators: best-in-class analytics (what's working, why, and how to improve), the fastest upload and processing times (a creator who uploads at midnight wants the video live in 15 minutes, not 2 hours), the most flexible monetization (let creators set their own ad density, choose sponsorship deals, sell memberships), and creator-facing AI tools — auto-captioning, thumbnail A/B testing, optimal publish time recommendations. The strategic bet: Shorts (our short-form product) isn't just competing with TikTok — it's the discovery funnel that converts casual viewers into long-form subscribers. The technical challenge is building a recommendation system that bridges short and long-form viewing — a user who watches a 15-second cooking Short should be recommended the creator's 20-minute recipe video.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["competitive_strategy", "creator_retention", "creator_tools", "short_form_strategy", "cross_format_recommendation"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the cost structure, and how do you optimize the biggest cost centers?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "cost_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Four major cost centers. CDN and bandwidth: ~40% of total cost. Optimization: build our own edge network for the hottest content (top 1% of videos serve 50% of traffic), negotiate multi-CDN contracts for the rest, use adaptive bitrate to serve the lowest acceptable quality (many mobile viewers can't tell the difference between 720p and 1080p on a 6-inch screen), and implement peer-to-peer CDN for live streams where latency matters less. Storage: ~25% of total cost. Optimization: tiered storage — hot videos (accessed in last 30 days) on SSD, warm on HDD, cold on glacier-class storage. The JIT transcoding strategy I mentioned saves storage by not keeping all resolutions of long-tail content. Aggressive deduplication for re-uploaded content. Transcoding and ML: ~20% of total cost. Optimization: custom hardware (Google built TPUs partly for YouTube's recommendation model), batch processing during off-peak hours for lower spot instance pricing, and the JIT strategy. People (engineering, moderation, operations): ~15%. At this scale, every 1% improvement in CDN efficiency saves $1M+/year. I'd staff a dedicated cost optimization team — 5 engineers who do nothing but find and implement savings. Their ROI is typically 10x their cost.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cost_optimization", "cdn_efficiency", "tiered_storage", "custom_hardware", "cost_optimization_team"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What are the biggest risks to this platform over the next 5 years?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": "risk_assessment" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three existential risks. First, creator exodus: if a competitor offers better monetization — say, 70% revenue share instead of our 55% — top creators migrate and take their audience with them. Mitigation: build switching costs through exclusive features, community tools, and data that creators can't take with them (their recommendation graph, audience analytics, membership subscribers). Second, regulatory risk: governments are increasingly regulating recommendation algorithms (EU's DSA), children's content (COPPA), and ad targeting. A major regulatory change could fundamentally alter our business model. Mitigation: build modular policy engines that can adapt to per-jurisdiction requirements, and invest in privacy-preserving ad targeting (contextual ads, federated learning) as an alternative to behavioral targeting. Third, AI-generated content flood: as generative AI makes video creation trivial, we could be overwhelmed with low-quality content that degrades the viewer experience and drowns out human creators. Mitigation: content quality signals in the recommendation model that favor originality and production effort, AI content labeling requirements, and potentially a verified creator program that gives preference to human-created content. The deepest risk is losing the trust of either side of the marketplace — creators or viewers. Trust takes years to build and moments to destroy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["risk_assessment", "creator_retention", "regulatory_risk", "ai_generated_content", "trust_management", "switching_costs"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. Your flywheel framing kept the conversation grounded in business impact while maintaining deep technical rigor. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 84,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 7,
+      "communication": 10,
+      "strategic_thinking": 10,
+      "business_acumen": 10,
+      "domain_expertise": 9
+    },
+    "strengths": [
+      "Exceptional business flywheel framing connecting technical decisions to creator economics",
+      "Strong cost structure analysis with concrete optimization strategies for each cost center",
+      "Thoughtful content moderation approach including moderator wellbeing considerations"
+    ],
+    "weaknesses": [
+      "Could have explored database design and storage layer architecture in more depth",
+      "Didn't discuss disaster recovery or failure handling for the streaming infrastructure"
+    ]
+  }
+}

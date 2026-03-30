@@ -1,0 +1,130 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "staff",
+    "candidate_profile": "good",
+    "total_exchanges": 20,
+    "generation_id": "seed_148"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service. You've probably seen this before, but I want to go deep on the distributed systems aspects. What are your questions?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. What's the scale — write QPS and read QPS? Do we need multi-datacenter deployment from day one? What's the geographic distribution of users? Do we need custom aliases? And what's our SLA for redirect latency?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "multi_datacenter", "geographic_distribution", "sla"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "200 million new URLs per day, 500:1 read-to-write ratio. Multi-datacenter — US East, US West, Europe, Asia. Users are globally distributed. Yes to custom aliases. Redirect latency under 20ms at p99. Let's see your design.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the numbers. 200M writes/day is ~2,300 writes/sec. With 500:1 ratio, that's 1.15M reads/sec globally. The 20ms p99 constraint is aggressive — that means the redirect must happen close to the user, so geographic routing is essential. For storage: 200M * 365 * 500 bytes = ~36TB per year. Let me focus on two things that make this interesting at staff level: the ID generation scheme and the multi-datacenter deployment.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "geographic_routing", "multi_datacenter"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Go ahead. Start with ID generation.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "id_generation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Instead of a counter-based approach, I'd use Snowflake IDs. The structure: 1 bit unused, 41 bits timestamp (milliseconds since custom epoch — gives us ~69 years), 5 bits datacenter ID (supports 32 DCs), 5 bits machine ID (32 machines per DC), 12 bits sequence number (4096 IDs per millisecond per machine). The generated 64-bit ID is then base62-encoded to produce the short code. With 7 base62 characters, we can represent values up to 3.5 trillion, which comfortably covers our Snowflake ID space. Why Snowflake over a counter? Three reasons: it works independently in each datacenter without coordination, it's roughly time-ordered which is useful for analytics and expiration, and each machine generates IDs independently at up to 4096 per millisecond — far more than we need per machine.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["snowflake_id", "base62_encoding", "multi_datacenter", "id_generation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good choice. Now tell me about the multi-datacenter deployment. How do redirects achieve that 20ms p99?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "multi_datacenter" }
+    },
+    {
+      "role": "candidate",
+      "content": "The key to 20ms is serving redirects from the nearest datacenter. Architecture: DNS-based geographic routing using something like Route 53 or Cloudflare DNS. When a user resolves short.url/abc123, DNS returns the IP of the nearest datacenter based on the user's IP geolocation. US users hit US-East or US-West, European users hit EU, Asian users hit Asia. Each datacenter has a complete read replica of the URL mapping. Writes can go to any datacenter — the Snowflake ID ensures no collisions. We replicate URL mappings asynchronously across all DCs using a Kafka-based replication pipeline. The trade-off: a URL created in US-East might take 100-200ms to appear in the Asia DC. If someone creates a URL and immediately shares it with someone in Asia, there's a brief window where the redirect fails. For this edge case, we implement a fallback: if a local lookup misses, the redirect service makes a synchronous cross-DC call to the origin DC. This adds latency for that one request but guarantees correctness.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dns_routing", "geographic_routing", "async_replication", "cross_dc_fallback", "eventual_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the read path to achieve that 20ms latency within a datacenter?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "read_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Within a DC, the redirect path: request arrives at the load balancer, routes to an app server. App server checks a two-tier cache. Tier 1: local in-process cache (like Caffeine/Guava) — holds the hottest 1M URLs per server, sub-millisecond lookups. Tier 2: Redis cluster — holds the hot set, maybe 100M URLs. Tier 3: database (PostgreSQL or MySQL). With 80/20 rule, Tier 1 should give us ~50% hit rate, Tier 2 gives ~45%, so only ~5% of requests hit the database. For the 95% cache-hit case: DNS resolution happens once and is cached (not counted), load balancer to app server is ~1ms, in-process or Redis lookup is <2ms, returning 302 is <1ms. Total well under 20ms. For the 5% that hit the database, we need the DB response under 10ms — achievable with an SSD-backed database and a warm buffer pool. We could also pre-warm the Redis cache by loading all URLs created in the last 24 hours at startup.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_tier_caching", "local_cache", "redis_caching", "cache_warming", "latency_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about custom aliases? How do you handle uniqueness globally across datacenters?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "custom_aliases" }
+    },
+    {
+      "role": "candidate",
+      "content": "Custom aliases are tricky in a multi-DC setup because two users in different DCs could request the same alias simultaneously. Unlike Snowflake IDs, custom aliases need global uniqueness checking. Option 1: route all custom alias creations to a single primary DC. That DC is the source of truth for alias uniqueness. Downside: cross-DC latency for alias creation. Option 2: use a distributed lock. Before reserving a custom alias, acquire a lock in a globally replicated store (like a CockroachDB or Spanner-backed table with strong consistency). This is slower but allows creation from any DC. Option 3: optimistic approach — create the alias locally, replicate asynchronously, and if a conflict is detected during replication, the second writer gets rejected and notified. Given that custom alias creation is rare compared to auto-generated codes (maybe 1% of writes), I'd go with option 1 — the latency penalty affects very few requests, and the implementation is simple.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["custom_aliases", "global_uniqueness", "distributed_locking", "conflict_resolution"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good trade-off analysis. How do you handle URL expiration at this scale?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "url_expiration" }
+    },
+    {
+      "role": "candidate",
+      "content": "For expiration, each URL has an expires_at timestamp. We don't need to delete URLs exactly at expiration — lazy deletion works. On the read path: when a redirect request comes in and the URL is expired, return 410 Gone instead of redirecting. For actual cleanup: a background job scans for expired URLs in batches (say 10K at a time), deletes them from the database, and invalidates the cache entry. We can use a time-partitioned table or an index on expires_at to efficiently find expired URLs without scanning the full table. With 200M URLs/day and a 1-year default TTL, the cleanup job needs to process ~200M deletions/day — about 2300 deletes/sec, which is manageable. In a multi-DC setup, the expiration job runs in one DC and replication handles propagation. One edge case: after deletion, the short code becomes available for reuse. But we should probably not reuse codes to avoid old links pointing to new content — we have enough Snowflake ID space that reuse is unnecessary.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["url_expiration", "lazy_deletion", "batch_cleanup", "code_reuse"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if an entire datacenter goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "dc_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "DNS-based failover. If the US-East DC goes down, our health check system detects it and updates DNS to stop routing traffic there. Users previously routed to US-East are now directed to US-West. DNS TTL should be short — 30-60 seconds — so failover happens within a minute. For reads: US-West has a full read replica, so all redirects work immediately. The latency increases for East Coast users (now talking to West Coast), but stays functional. For writes: URLs being created are now handled by US-West. Snowflake IDs include the datacenter ID, so there are no collisions. When US-East recovers, it needs to catch up on URLs created during the outage. The Kafka replication pipeline handles this — US-East's consumer resumes from its last offset and ingests the missed writes. One caveat: during the outage, if US-East had writes that hadn't replicated yet, those URLs would be lost. To mitigate: before declaring a DC failed, attempt to drain its Kafka replication queue. If the failure is catastrophic (no drain possible), we accept a small data loss window — typically under 1 second of writes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dc_failure", "dns_failover", "replication_catch_up", "data_loss_window"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running low on time. Any final additions?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things: abuse prevention — rate limiting per API key and URL content scanning for phishing/malware. An analytics pipeline for click tracking, built on Kafka and ClickHouse, completely decoupled from the redirect path. Monitoring: redirect latency per DC, cross-DC replication lag, cache hit rates by tier, and DNS routing accuracy. And I'd explore putting a CDN like Cloudflare in front of the redirect service — popular URLs could be cached at 200+ edge locations, bringing latency to single-digit milliseconds globally.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["abuse_prevention", "analytics_pipeline", "monitoring", "cdn_redirect"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid interview. Good depth on multi-DC architecture and strong trade-off analysis throughout. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 71,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 7
+    },
+    "strengths": [
+      "Excellent multi-datacenter deployment design with DNS routing and async replication",
+      "Strong multi-tier caching strategy with clear latency budget per tier",
+      "Good analysis of custom alias uniqueness across datacenters with three options and clear recommendation"
+    ],
+    "weaknesses": [
+      "API design was not discussed — no endpoint specifications",
+      "Database schema and choice were mentioned but not explored in depth",
+      "Could have discussed the analytics pipeline architecture more concretely"
+    ]
+  }
+}

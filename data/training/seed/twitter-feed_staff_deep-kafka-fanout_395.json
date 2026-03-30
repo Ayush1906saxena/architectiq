@@ -1,0 +1,119 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "staff",
+    "candidate_profile": "deep-kafka-fanout",
+    "total_exchanges": 20,
+    "generation_id": "seed_395"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We've been designing a Twitter-like feed system. You proposed using Kafka for the fan-out pipeline to push tweets to followers' timelines. Let's go deep on this. Start with the topic design — how do you structure the Kafka topics for fan-out?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "kafka_topic_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a multi-topic design to separate concerns and handle different throughput characteristics. Topic 1: `tweet-events` — a single topic for all raw tweet creation events. When a user posts a tweet, the tweet service publishes to this topic with the tweet ID, author ID, content, and timestamp. This is the source-of-truth event. Topic 2: `fanout-tasks` — the fan-out service consumes from `tweet-events`, looks up the author's follower list, and for each follower publishes a fan-out task to this topic. Each message contains {follower_id, tweet_id, author_id, timestamp}. Topic 3: `timeline-writes` — optional, depending on whether we batch. The timeline writer service consumes from `fanout-tasks` and writes to the timeline cache (Redis sorted set per user). The reason for separating `tweet-events` from `fanout-tasks` is cardinality. A single tweet by a user with 10M followers explodes into 10M fanout tasks. If we tried to do this in one topic, the consumer processing that tweet would block processing of other tweets. By separating, we pipeline the explosion — the fan-out service can parallelize the expansion while the tweet-events consumers continue processing new tweets.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka_topic_design", "fan_out_explosion", "pipeline_separation", "cardinality_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good separation. How do you choose the partition key for the fanout-tasks topic? What are the implications?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "kafka_partition_key" }
+    },
+    {
+      "role": "candidate",
+      "content": "The partition key for `fanout-tasks` should be the follower_id. This guarantees that all fan-out tasks destined for a given user's timeline land on the same partition. Why this matters: the timeline writer service can then maintain per-user ordering guarantees — if user A tweets and then deletes that tweet, the fan-out for both events hits the same partition, so the consumer processes them in order. If we partitioned by author_id instead, we'd get ordering per author, but tasks for the same follower's timeline would scatter across partitions, making it impossible to guarantee delivery order without coordination. For the partition count, I'd compute it based on throughput. If we have 500K tweets per second with an average fan-out of 200 followers, that's 100M fanout-tasks per second. Each Kafka partition on modern hardware can handle about 100K messages per second. So we'd need at least 1000 partitions. I'd provision 2048 (power of two) for headroom. The downside of follower_id partitioning: a celebrity's followers are spread across many partitions, so a single tweet by a celebrity triggers writes across nearly all partitions — that's actually fine because it distributes the write load. The concern is the opposite: if many celebrities post simultaneously, all partitions spike, but Kafka handles that with batching and compression.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka_partition_key", "follower_id_partitioning", "ordering_guarantees", "partition_count_estimation", "celebrity_fanout"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "With 2048 partitions and massive throughput, how do you scale the consumer groups? What's your approach to consumer group scaling?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "consumer_group_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "The maximum parallelism within a consumer group equals the number of partitions — 2048 in our case. Each partition is assigned to exactly one consumer in the group. So we can have up to 2048 consumer instances in the timeline-writer group. In practice, I'd start with fewer consumers and scale based on consumer lag. If the consumer group lag (measured by the sum of offsets behind across all partitions) exceeds a threshold — say 5 minutes of production at current throughput — we auto-scale by adding more consumer instances. Kubernetes HPA with a custom metric on consumer lag works well here. Key considerations: each consumer needs enough memory to batch writes to Redis. If each consumer handles 50 partitions, it's processing about 5M messages per second, which requires significant network bandwidth to Redis. I'd right-size at about 100-200 partitions per consumer, meaning 10-20 consumer instances in steady state, scaling to 100+ during spikes (e.g., a major live event). We also need to be mindful that adding consumers triggers a rebalance, which briefly pauses consumption across the entire group. That's why I'd use the cooperative sticky assignor — which I'll explain more if you want to go there — to minimize the rebalance disruption.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consumer_group_scaling", "partition_consumer_ratio", "consumer_lag_autoscaling", "kubernetes_hpa", "cooperative_sticky_assignor"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you achieve exactly-once semantics for the fan-out? A user should see a tweet in their timeline exactly once, not duplicated.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "exactly_once_fanout" }
+    },
+    {
+      "role": "candidate",
+      "content": "True exactly-once is hard to achieve end-to-end, but we can get effectively-once through a combination of Kafka's EOS (Exactly-Once Semantics) and idempotent writes. On the Kafka side: the fan-out service that reads from `tweet-events` and writes to `fanout-tasks` uses Kafka's transactional API. We set `enable.idempotence=true` and use `isolation.level=read_committed` on downstream consumers. This ensures that the consume-transform-produce cycle is atomic — if the fan-out service crashes after producing some messages but before committing offsets, the incomplete transaction is rolled back and the next instance replays without duplicates. On the timeline write side — where the consumer writes to Redis — Kafka EOS doesn't extend to external systems. So I make the Redis write idempotent. The timeline is a Redis sorted set with tweet_id as the member and timestamp as the score. ZADD is naturally idempotent — adding the same tweet_id twice with the same score is a no-op. Even if the consumer replays messages after a crash (at-least-once from Kafka's perspective), Redis deduplicates automatically. The edge case: if a tweet is deleted and then the original fan-out message is replayed, the tweet reappears in the timeline. To handle this, the timeline read path filters out deleted tweets by checking a tweet-existence cache before returning results.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["exactly_once_semantics", "kafka_transactions", "idempotent_writes", "zadd_idempotency", "deletion_edge_case"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a consumer falls behind — say one partition's consumer is slow or stuck? How do you handle consumer lag?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "consumer_lag_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Consumer lag is the operational heartbeat of this system. First, detection: I'd use Kafka's consumer group lag API exposed through Burrow or the Confluent Control Center. Per-partition lag is more useful than aggregate lag — a single stuck partition is harder to detect in aggregate metrics. Alert tiers: lag > 1 minute is a warning (P3), lag > 5 minutes is critical (P2), lag > 30 minutes is an incident (P1). Second, remediation depends on the cause. If it's throughput-limited (consumer can't keep up with production rate), we scale consumers as I described. If it's a single slow partition — often caused by a hot key (celebrity post causing massive fan-out on one partition) — we may need to temporarily repartition or move that consumer to a beefier instance. If the consumer is stuck (a poison message causing repeated failures), we need a dead letter topic — I'll discuss that separately. Third, for temporary spikes, the key insight is that timeline freshness degrades gracefully. If a user's timeline is 5 minutes stale, they might not notice. So I'd prioritize active users. The consumer can check a 'last active' cache before writing to a user's timeline — if the user hasn't opened the app in 24 hours, skip the fan-out write and let them hydrate via pull (fan-out-on-read) when they return. This effectively sheds load during lag spikes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consumer_lag_handling", "per_partition_lag", "alert_tiers", "graceful_degradation", "hybrid_fanout", "load_shedding"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned monitoring. What specific metrics and dashboards would you build for this Kafka-based fan-out pipeline?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "kafka_monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd build dashboards across four layers. Kafka broker metrics: partition count, under-replicated partitions (critical for durability), ISR shrink/expand rate, request handler idle percentage (if this drops below 30%, brokers are overloaded), log segment size and retention. Producer metrics: produce rate per topic, produce latency p50/p99, batch size, compression ratio, and the critical one — record-error-rate, which indicates serialization or authorization failures. Consumer metrics: records consumed per second, consumer lag per partition (visualized as a heat map — one cell per partition, color by lag), commit rate, rebalance frequency and duration, and fetch-latency which tells us if consumers are I/O bound. Application-level metrics: end-to-end latency from tweet creation to timeline appearance (measured by injecting synthetic tweets with timestamps), fan-out ratio (average followers per tweet), Redis write throughput from the timeline writer, and failed-write rate to Redis. I'd use Prometheus for metrics collection, Grafana for dashboards, and PagerDuty for alerting. The single most important dashboard: a time-series graph of 'time from tweet publish to timeline availability at p99' — this is the SLO that users actually experience.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka_monitoring", "broker_metrics", "consumer_lag_heatmap", "end_to_end_latency", "slo_based_monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about dead letter topics. How do you handle messages that repeatedly fail processing?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "dead_letter_topics" }
+    },
+    {
+      "role": "candidate",
+      "content": "A poison message — say a malformed fanout-task or a reference to a deleted user — that causes the consumer to throw an exception will be retried indefinitely if we're not careful, blocking all messages behind it on that partition. My approach: wrap the consumer logic in a retry policy. First attempt: process normally. On failure, retry up to 3 times with exponential backoff (100ms, 500ms, 2s). If all retries fail, publish the original message to a dead letter topic (`fanout-tasks.DLT`) with additional metadata: the exception message, stack trace, retry count, and original timestamp. Then commit the offset and move on. The DLT has its own consumer — a separate service that runs at low priority. This service can attempt reprocessing with fixes applied, or it can be manually inspected. For our fan-out pipeline specifically, a message in the DLT means some user didn't get a tweet in their timeline. That's a data completeness issue, not a correctness issue — the user can still see the tweet via pull-based timeline hydration. So the DLT consumer can run a daily batch job to reconcile missed fan-outs rather than retrying in real-time. Important: the DLT topic should have alerts on its growth rate. If messages are hitting the DLT at more than 0.01% of total throughput, that signals a systematic issue (schema change, downstream dependency failure) rather than individual poison messages.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dead_letter_topics", "poison_messages", "retry_policy", "exponential_backoff", "data_completeness_vs_correctness", "dlt_monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Finally, what about replay capability? If you discover a bug in the timeline writer that's been incorrectly processing fan-outs for 2 hours, can you reprocess?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "kafka_replay" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is one of Kafka's killer features — the ability to replay. Since Kafka retains messages for a configurable retention period (I'd set it to 7 days for fanout-tasks), all the data is still there. To replay: create a new consumer group with a fresh group ID, set `auto.offset.reset=earliest` or use the AdminClient to seek to a specific timestamp (2 hours ago). The new consumer group starts consuming from that point forward. Key design decision: I'd deploy the replay as a separate service from the live pipeline. The live consumers continue processing new messages normally while the replay service backfills the corrections. Both write to the same Redis timelines, and since ZADD is idempotent, duplicates are harmless. The challenge is throughput: replaying 2 hours of data at 100M messages per second means processing 720 billion messages. That takes time even at full consumer scale. To speed it up, I'd run the replay consumers on dedicated high-memory instances with aggressive batching — batch 10K Redis ZADD commands in a single pipeline call. A practical concern: if the bug corrupted data (not just missed writes), we need to also clear the incorrect entries. This requires a 'reconciliation mode' in the replay consumer that deletes the timeline sorted set and rebuilds from the replayed messages. We'd do this per-partition to limit the blast radius — users on partitions not yet replayed still see their (slightly incorrect) timelines, which is better than empty timelines.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka_replay", "consumer_group_reset", "replay_separation", "idempotent_replay", "reconciliation_mode", "blast_radius_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent deep dive on Kafka-based fan-out. You demonstrated strong understanding of the full lifecycle. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 80,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Excellent topic design with clear separation of concerns and justified cardinality management",
+      "Strong exactly-once analysis combining Kafka EOS with idempotent Redis writes",
+      "Practical operational knowledge — monitoring, DLT handling, and replay with blast radius control"
+    ],
+    "weaknesses": [
+      "Did not discuss Kafka broker sizing or cluster topology",
+      "Requirements gathering and API design were not part of this focused deep dive"
+    ]
+  }
+}

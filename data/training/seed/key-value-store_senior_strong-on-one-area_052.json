@@ -1,0 +1,182 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "senior",
+    "candidate_profile": "strong-on-one-area",
+    "total_exchanges": 22,
+    "generation_id": "seed_052"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed key-value store — something like DynamoDB or Cassandra. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. What are our consistency requirements — strong or eventual consistency? What's the expected data size — number of keys, value sizes? And what operations do we need — just get/put, or also range queries, TTL, batch operations?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistency", "capacity_estimation"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Eventual consistency is fine with tunable consistency levels. 1 billion keys, values up to 1MB. Get, put, and delete. No range queries. 100K operations per second at peak. Walk me through the high-level design.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "At a high level, we need to partition data across multiple nodes since 1 billion keys with up to 1MB values won't fit on a single machine. The core component is a partitioning strategy. I'd use consistent hashing to map keys to nodes. Let me go deep on this because it's the foundation of the entire system.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["consistent_hashing", "sharding_strategy"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Go ahead.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "consistent_hashing" }
+    },
+    {
+      "role": "candidate",
+      "content": "So consistent hashing maps both keys and nodes onto a ring — typically a 2^128 or 2^256 space using a hash like SHA-256. A key is assigned to the first node clockwise from its position on the ring. The basic version has a problem though: with N physical nodes, the distribution is highly uneven. Statistically, with N random points on a circle, the ratio of the largest to smallest segment is O(log N). So with 100 nodes, some might handle 5-10x more data than others.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you fix that?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "consistent_hashing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Virtual nodes. Instead of placing each physical node once on the ring, we place it V times — say 150-200 virtual nodes per physical node. Each virtual node is a separate point on the ring mapped by hashing 'node_id:vnode_index'. This smooths out the distribution dramatically. With 100 physical nodes and 200 virtual nodes each, that's 20,000 points on the ring. The standard deviation of load per node drops to roughly 1/sqrt(V) of the mean — so about 7% variation with 200 virtual nodes. Much better than the basic version.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing", "virtual_nodes"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if your nodes have different hardware — some have 2TB of disk, others have 8TB?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "consistent_hashing" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where weighted virtual nodes come in. You assign more virtual nodes to higher-capacity machines proportionally. An 8TB node gets 4x more virtual nodes than a 2TB node, so it owns 4x more of the ring. Cassandra actually does this — you set a 'num_tokens' per node. The trade-off is that more virtual nodes means more entries in the ring metadata, which every node needs to know about for routing. With 1,000 nodes and 200 vnodes each, that's 200K entries — small enough to keep in memory on every node.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing", "virtual_nodes"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "One more on consistent hashing — what happens when you add a new node to the ring?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "consistent_hashing" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a new node joins, its virtual nodes are placed on the ring, and it takes over portions of the keyspace from its neighbors. The key insight is that only the immediate neighbors on the ring are affected — roughly 1/N of the total keys need to move, where N is the number of existing nodes. But with virtual nodes, the data comes from many physical nodes, not just one or two, which actually distributes the data transfer load better. Google's paper on consistent hashing with bounded loads takes this further — they ensure no node handles more than 1 + epsilon times the average load by allowing keys to be assigned to the next node in the ring if the primary is overloaded. This gives you a worst-case guarantee instead of just a probabilistic one.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing", "virtual_nodes", "bounded_loads"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great depth on consistent hashing. Let's move on — how do you handle replication?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right. So, um, for replication we'd replicate each key to, say, 3 nodes. The primary node and the next two nodes clockwise on the ring. We need to make sure replicas are on different physical nodes, not just different virtual nodes of the same machine. For writes, we can use quorum — write to at least 2 of 3 replicas before acknowledging.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["replication", "quorum"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you resolve conflicts when replicas have divergent values? Say two clients write different values to the same key at the same time on different replicas.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, so there are a few approaches. Last-write-wins using timestamps is the simplest — you just keep the value with the highest timestamp. Cassandra does this. Or you could use vector clocks to detect conflicts and let the application resolve them — that's what Dynamo does. I think last-write-wins is simpler and works for most cases.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["consistency", "vector_clocks"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What are the problems with last-write-wins?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Well, it can lose data — if two concurrent writes happen, one is silently discarded. And it depends on synchronized clocks, which isn't guaranteed in distributed systems. Clock skew could cause a legitimately later write to be overwritten by an earlier one with a higher timestamp. You could use NTP to keep clocks synchronized, but even NTP has millisecond-level drift.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["consistency", "clock_synchronization"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the storage engine on each node. How do you store and retrieve data locally?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "storage_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "We'd use an LSM tree — log-structured merge tree. Writes go to an in-memory table first, a memtable, and when it fills up it's flushed to disk as a sorted SSTable file. Reads check the memtable first, then SSTables from newest to oldest. Bloom filters help skip SSTables that don't contain the key. Periodic compaction merges SSTables to reduce read amplification.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["lsm_tree", "bloom_filter"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Why LSM over a B-tree? And what are the compaction trade-offs?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "storage_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "LSM trees have better write throughput because writes are sequential — just append to the memtable and flush sequentially to disk. B-trees require random I/O for updates. The trade-off is read amplification — a read might need to check multiple SSTables. Compaction helps but it uses disk bandwidth and can cause latency spikes during heavy compaction. There's leveled compaction which bounds read amplification but uses more write amplification, and size-tiered compaction which has less write overhead but more read overhead. I'm not as deep on the specifics of each strategy, to be honest.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["lsm_tree", "compaction"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's fair. How do you detect and recover from node failures?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "single_point_of_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "You'd use a gossip protocol for failure detection — each node periodically pings random other nodes. If a node doesn't respond after several rounds, it's marked as suspected, and if enough nodes agree, it's marked as down. For recovery, since we have 3 replicas, reads and writes continue on the surviving 2 nodes. The recovering node gets its data through anti-entropy — it compares Merkle trees of key ranges with its replica neighbors to find and sync missing data.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["gossip_protocol", "merkle_tree", "replication"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned Merkle trees but didn't go deep. Can you explain how they help here?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "merkle_tree" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure, at a high level, a Merkle tree is a hash tree where each leaf is the hash of a data block — in our case, a key-value pair or a range of keys. Parent nodes are hashes of their children. Two nodes can compare their root hashes to quickly determine if their data is identical. If not, they walk down the tree comparing child hashes to narrow down exactly which key ranges differ. This is much more efficient than comparing every key individually. I know that Dynamo and Cassandra both use this approach, but I'll admit I don't have deep implementation experience with Merkle trees specifically.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["merkle_tree"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's wrap up. Looking at your design, where are you most confident and where would you want to learn more?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'm most confident in the partitioning layer — consistent hashing with virtual nodes, bounded loads, and weight distribution. That's something I've implemented and tuned in production. I'm less confident in the conflict resolution strategies — I understand the concepts of vector clocks and CRDTs but haven't had to debug them in a real system. And the storage engine — I know the LSM tree basics but haven't tuned compaction strategies firsthand. Those are areas I'd want to dive deeper into.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing", "vector_clocks", "lsm_tree"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "I appreciate the self-awareness. Your consistent hashing knowledge is genuinely excellent — some of the best I've seen. The other areas were adequate but didn't demonstrate the same depth. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 60,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 5,
+      "api_design": 4,
+      "database_design": 7,
+      "caching_strategy": 4,
+      "scalability": 8,
+      "failure_handling": 6,
+      "communication": 7
+    },
+    "strengths": [
+      "Exceptional depth on consistent hashing — virtual nodes, bounded loads, weighted distribution, rebalancing analysis",
+      "Good self-awareness about areas of strength and weakness",
+      "Understood the high-level architecture of a distributed KV store"
+    ],
+    "weaknesses": [
+      "Conflict resolution discussion was superficial — couldn't detail vector clock implementation",
+      "Storage engine knowledge was textbook-level without practical depth",
+      "No capacity estimation — didn't calculate storage needs, memory, or per-node throughput",
+      "Didn't discuss API design, client libraries, or how clients discover the ring topology",
+      "No mention of caching, hot keys, or read optimization strategies"
+    ]
+  }
+}

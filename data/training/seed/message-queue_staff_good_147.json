@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "message-queue",
+    "level": "staff",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_147"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed message queue — think Apache Kafka. What are your initial questions?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Key questions: What delivery semantics do we need — at-least-once, at-most-once, or exactly-once? What's the expected throughput — messages per second and message size? What's the retention policy — should messages persist for hours, days, or indefinitely? Do we need message ordering guarantees? And what about the consumption model — pub-sub, point-to-point, or both?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["delivery_semantics", "throughput", "retention", "ordering", "consumption_model"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "At-least-once with exactly-once as a stretch goal. 1 million messages per second, average message size 1KB. 7-day retention. Ordering within a partition. Consumer groups — multiple consumer groups reading the same topic independently. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me estimate storage. 1M msg/sec * 1KB = 1GB/sec of raw data. With 7-day retention: 1GB * 86400 * 7 = ~605TB. With 3x replication: ~1.8PB of total storage. That's a large cluster. At 1KB per message, we're write-throughput bound more than storage bound — 1GB/sec sustained writes is the main challenge. This needs a storage engine optimized for sequential writes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "storage_estimation", "write_throughput", "sequential_writes"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about the storage layer. How do you design it for 1GB/sec sustained writes?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "storage_layer" }
+    },
+    {
+      "role": "candidate",
+      "content": "The key insight is that a message queue's write pattern is append-only — we never update or insert in the middle. This means we can use sequential disk I/O, which is orders of magnitude faster than random I/O. Modern SSDs do 500MB/sec+ sequential writes, and even HDDs do 100-200MB/sec. The storage design: each topic-partition is stored as a sequence of segment files on disk. A segment is a fixed-size file (say 1GB). We always write to the active segment by appending to its end. When it reaches 1GB, we close it and create a new segment. Within a segment, each message is stored with: offset (monotonically increasing 64-bit integer), timestamp, key length, key bytes, value length, value bytes, and a CRC32 checksum for integrity. There's also an index file per segment that maps offsets to file positions — a sparse index, storing one entry per 4KB block. To find message at offset N: binary search the segment files by their starting offset, then binary search the sparse index within that segment, then scan forward from the nearest index entry. This is essentially Kafka's log-structured storage design.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["storage_layer", "sequential_writes", "segment_files", "sparse_index", "log_structured_storage"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does replication work? You mentioned 3x replication. Walk me through the ISR mechanism.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "isr_replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each partition has one leader and N-1 followers (with replication factor 3, that's 1 leader + 2 followers). All writes go to the leader. Followers replicate by continuously fetching new messages from the leader — they act as consumers of the leader's log. The ISR (In-Sync Replica) set is the subset of replicas that are caught up to the leader within a configurable lag threshold. A replica is in the ISR if it has fetched all messages up to the leader's log-end offset within the last, say, 10 seconds. If a follower falls behind (network issue, slow disk), it's removed from the ISR. The key invariant: a message is considered committed (and visible to consumers) only when all replicas in the ISR have acknowledged it. The leader waits for ISR acks before responding to the producer. This means if the leader crashes, any ISR member can become the new leader without data loss — they have all committed messages. If a non-ISR follower becomes leader (unclean leader election — disabled by default), some committed messages might be lost. The trade-off: larger ISR means more safety but higher write latency (waiting for slow replicas). Shrinking ISR means faster writes but less redundancy. In practice, the ISR dynamically adjusts — healthy replicas stay in, slow ones drop out temporarily.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["isr_replication", "leader_follower", "committed_messages", "unclean_leader_election", "replication_lag"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens during leader election? How do you minimize downtime?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "leader_election" }
+    },
+    {
+      "role": "candidate",
+      "content": "Leader election is managed by a controller node — one broker in the cluster is elected as the controller (via ZooKeeper or Raft-based consensus in newer designs like KRaft). The controller monitors the health of all partition leaders. When it detects a leader failure (missed heartbeats for 10 seconds), it selects a new leader from the ISR — typically the first replica in the ISR list. The controller updates the cluster metadata and broadcasts the new leader assignment to all brokers. Producers and consumers get notified of the new leader through metadata refresh. The election process takes about 1-5 seconds in practice. During this window, writes to the affected partitions fail and producers retry. Consumers pause until they discover the new leader. To minimize impact: each broker hosts many partitions (thousands), but any single broker failure only affects the partitions where that broker was the leader. The unaffected partitions continue normal operation. For faster failover, we can use a shorter heartbeat interval and eagerly detect failures, though this risks false positives during GC pauses or network blips.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leader_election", "controller", "kraft", "failover_time", "partition_leadership"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now tell me about consumer groups. How does a consumer group read from a topic?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "consumer_groups" }
+    },
+    {
+      "role": "candidate",
+      "content": "A consumer group is a set of consumer instances that collectively consume a topic. Each partition is assigned to exactly one consumer within the group — this ensures ordering per partition (one consumer reads messages in order) and no duplicate processing within the group. If we have a topic with 12 partitions and a consumer group with 4 consumers, each consumer handles 3 partitions. If we add a 5th consumer, partitions are rebalanced: some consumers give up a partition so the new one gets some. If a consumer exceeds 12, the extras sit idle — there's no benefit to more consumers than partitions. Multiple consumer groups read the same topic independently — group A might be processing real-time analytics while group B is doing batch ETL. Each group maintains its own offset per partition: the position of the last consumed message. Offsets are stored in a special internal topic (__consumer_offsets). After processing a batch of messages, the consumer commits its offset. If it crashes and restarts, it resumes from the last committed offset.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consumer_groups", "partition_assignment", "offset_management", "independent_consumption"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens during consumer group rebalancing? A consumer joins or leaves the group.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "consumer_rebalancing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rebalancing is the trickiest part of consumer groups. The naive approach (eager rebalancing): when any consumer joins or leaves, all consumers stop consuming, revoke all partition assignments, and re-assign from scratch. This causes a full stop-the-world pause — in large groups with many partitions, this can take 30+ seconds. Better approach: cooperative (incremental) rebalancing. Only the partitions that need to move are revoked. If consumer C joins a group of A and B each handling 6 partitions, only 4 partitions are revoked (2 from A, 2 from B) and assigned to C. A and B continue consuming their remaining partitions without interruption. The rebalancing protocol: a group coordinator (a designated broker) manages membership. Each consumer sends heartbeats. When membership changes: 1) coordinator notifies all consumers of the new membership. 2) Each consumer runs the partition assignment algorithm locally (same algorithm, deterministic, so all agree). 3) Consumers that need to release partitions commit their offsets and revoke. 4) The coordinator assigns the freed partitions to the new consumer. The key metric is rebalance time — with cooperative rebalancing, the partial pause is typically under 5 seconds for affected partitions only.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consumer_rebalancing", "eager_rebalancing", "cooperative_rebalancing", "group_coordinator", "rebalance_time"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the producer write messages? Walk me through the producer path.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "producer_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "The producer flow: Step 1 — Serialization: the producer serializes the message key and value. Step 2 — Partitioning: if the message has a key, hash the key to determine the partition (consistent — same key always goes to the same partition, ensuring ordering for that key). If no key, round-robin or sticky partitioning across all partitions for load balancing. Step 3 — Batching: the producer accumulates messages in an in-memory buffer per partition. When the buffer reaches a size threshold (say 16KB) or a time threshold (say 5ms), the batch is sent. Batching is crucial for throughput — sending 16KB in one network call is far more efficient than 16 individual 1KB calls. Step 4 — Compression: the batch is compressed (LZ4 for speed, Zstandard for better compression ratio). At 1KB messages, compression can achieve 4-8x reduction. Step 5 — Network send: the batch is sent to the partition's leader broker. Step 6 — Leader writes to its log, replicates to ISR followers, waits for acks per the configured acks setting (acks=all for durability), and responds to the producer. The producer has three acks modes: acks=0 (fire and forget — fastest, possible data loss), acks=1 (leader ack only — good balance), acks=all (all ISR ack — safest, highest latency).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["producer_path", "partitioning", "batching", "compression", "ack_modes"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you achieve exactly-once semantics? You mentioned it as a stretch goal.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "exactly_once" }
+    },
+    {
+      "role": "candidate",
+      "content": "Exactly-once has two parts: idempotent producers and transactional writes. Idempotent producer: the producer assigns a sequence number to each message per partition. The broker tracks the last sequence number per producer-partition pair. If a retry causes a duplicate (same sequence number), the broker silently deduplicates. This gives exactly-once from producer to broker. Transactional writes: for read-process-write patterns (consume from topic A, process, produce to topic B), we need atomic multi-partition writes. The producer begins a transaction, writes to potentially multiple partitions, commits the consumer offset and the produced messages atomically. This is implemented with a transaction coordinator on the broker side and two-phase commit. Consumers configured with isolation.level=read_committed only see messages from committed transactions. The end-to-end guarantee: exactly-once within the Kafka ecosystem. If the sink is an external system (database), the consumer needs to implement idempotent writes on its side — Kafka can't control that.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["exactly_once", "idempotent_producer", "transactional_writes", "two_phase_commit", "read_committed"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the retention and cleanup of old messages?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "data_retention" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two retention strategies. Time-based: delete segment files older than the retention period (7 days in our case). A background thread periodically checks segment file creation timestamps and deletes expired ones. Since segments are immutable files, deletion is just an unlink — very cheap. Size-based: if the total partition size exceeds a configured limit, delete the oldest segments first. We can also combine both — whichever triggers first. For compacted topics (used for changelog/state topics, not for our primary use case): instead of deleting old segments, we compact them — keep only the latest value for each key, removing older duplicates. This is useful for topics that represent the latest state of each entity. The cleanup runs as a low-priority background process to avoid impacting read/write performance. Each segment file has a deletion-eligible flag set when it expires, and the cleaner thread processes them during low-traffic periods.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_retention", "time_based_retention", "size_based_retention", "log_compaction", "background_cleanup"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about monitoring? What metrics would you track for this system?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Key broker metrics: bytes in/out per second, messages per second, request latency (produce and fetch), ISR shrink rate (indicates replication problems), under-replicated partition count (should be 0), disk utilization per broker. Key consumer metrics: consumer lag — the difference between the latest offset in the partition and the consumer's committed offset. This is the single most important metric. If lag grows, the consumer can't keep up, and we'll eventually hit retention limits and lose messages. Alert if lag exceeds a threshold (say, 1 million messages or 5 minutes of production). Producer metrics: produce request rate, error rate, retry rate, batch size. Cluster-wide: partition count, leader distribution (should be balanced across brokers), controller elections (should be rare — frequent elections indicate instability). I'd also track end-to-end latency: timestamp the message at produce time, measure the delay at consume time. For our SLA, this should be under 100ms for at-least-once and under 500ms for exactly-once.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "consumer_lag", "broker_metrics", "end_to_end_latency", "alerting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Great interview — you showed strong depth on storage internals, replication, and consumer groups. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 7,
+      "database_design": 9,
+      "caching_strategy": 6,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent storage layer design with segment files, sparse indexes, and sequential write optimization",
+      "Strong ISR replication explanation with clear trade-offs on consistency vs availability",
+      "Good consumer group rebalancing discussion covering both eager and cooperative approaches"
+    ],
+    "weaknesses": [
+      "Didn't discuss caching strategies — page cache, consumer fetch buffers, or zero-copy optimization",
+      "High-level architecture was light — jumped directly into components without a full system overview",
+      "Could have discussed multi-datacenter replication and geo-distributed message routing"
+    ]
+  }
+}

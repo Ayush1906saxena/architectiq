@@ -1,0 +1,191 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "staff",
+    "candidate_profile": "argues-back",
+    "total_exchanges": 24,
+    "generation_id": "seed_049"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter — something that could be used as a shared service across an organization's APIs. What questions come to mind?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several. What's the granularity of rate limiting — per user, per API key, per IP, or some combination? What kind of limits — requests per second, per minute, per day? Do we need to support burst traffic or strictly enforce the limit? And what's our consistency requirement — is it okay to occasionally let through a few extra requests, or does it need to be exact?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "consistency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Per API key, configurable windows from per-second to per-day. Some burst tolerance is fine. We can tolerate slight over-counting — up to 5% error. Scale: 500,000 active API keys, peak 200,000 requests per second across all keys.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. One more — what happens when a request is rate-limited? Do we need to return a Retry-After header with precision? And is there a hard requirement for the rate limiter to be in the request path, or can it operate as a sidecar or middleware?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "rate_limiting"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes to Retry-After. It's in the request path — needs to be sub-millisecond overhead. Let's start with the algorithm choice. I'd suggest you look at the token bucket approach.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Actually, I'd prefer to go with a sliding window log or sliding window counter approach rather than token bucket for this use case. Let me explain why. Token bucket is great for smoothing out traffic and allowing controlled bursts. But our requirement is rate limiting per window — 'N requests per minute' type limits. Token bucket doesn't naturally express that. A client could drain the bucket at the start of a period and have to wait the entire refill time. Sliding window counter gives us a more intuitive limit that matches how API users think about their quotas.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "token_bucket", "sliding_window"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "I've seen token bucket work well at scale though. Sliding window log requires storing every request timestamp, which is memory-intensive at 200K RPS. Have you considered that?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "You're right about the sliding window log — that's the naive version and it's expensive. But I said sliding window counter, which is different. Here's how it works: we keep counters for fixed windows and interpolate. If we're 30% into the current minute, the effective count is 70% of the previous minute's count plus 100% of the current minute's count. That's just two integers per key per window size. At 500K active keys, that's 500K * 2 * 8 bytes = 8MB for a per-minute limiter. Token bucket needs two values too — tokens remaining and last refill timestamp — so memory is actually comparable. But sliding window counter gives a more predictable experience for API consumers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sliding_window", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair enough, the memory argument holds. But token bucket handles bursts more gracefully. If a key has a limit of 60 per minute and they send 10 requests in one second, token bucket allows it naturally. How does sliding window handle that?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sliding window counter handles that fine — it counts requests in the window, not the rate. 10 requests in one second is still 10 out of 60 for the minute. The user has 50 left. Where token bucket arguably does better is when you want to control burst size independently from the rate — like 'max 60 per minute AND max 10 per second.' But you said we have configurable windows, so we could just set multiple sliding window counters for different granularities. I think the real question is: what's the user-facing API contract? If we tell a developer 'you get 60 requests per minute,' sliding window counter is the honest implementation of that. Token bucket is an approximation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "sliding_window", "token_bucket"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Okay, that's a convincing argument. Let's go with sliding window counter. Walk me through the architecture.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. The rate limiter sits as a middleware in the request path. For each incoming request, we extract the API key, look up its rate limit configuration, and check the counter in Redis. Redis is the natural choice here — it supports atomic increment operations, has built-in key expiration for window cleanup, and sub-millisecond latency from the application tier. The flow is: MULTI, INCR current_window_key, check previous_window_key, EXEC — then calculate the weighted sum. If under the limit, allow; if over, reject with 429 and Retry-After header.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "redis_caching", "api_design"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the Redis being a single point of failure? If Redis goes down, do all requests get rejected or all get allowed?",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "single_point_of_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question. The fail-open vs fail-closed decision should be configurable per API. For most APIs, I'd default to fail-open — if Redis is down, allow requests through. The rate limiter is a protection mechanism, not a business logic gate. Better to temporarily allow some abuse than to block all legitimate traffic. For payment endpoints or security-sensitive paths, you might want fail-closed. Implementation: we set a short timeout on Redis calls — 5ms. If Redis doesn't respond, the circuit breaker opens and we fall back to a local in-memory rate limiter with approximate counts. Not as accurate across nodes, but better than nothing.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["single_point_of_failure", "circuit_breaker", "rate_limiting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The local fallback means each node tracks independently, so a client could get N times their limit across N nodes. Is that acceptable?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "You're right, and honestly, I think that's acceptable during a Redis outage. It's a degraded mode. But we can mitigate it. If we know the number of active app server nodes — say 20 — each local limiter can use limit/N as its threshold. So if the global limit is 60 per minute, each node allows 3 per minute locally. It's imprecise because traffic isn't evenly distributed, but it's a reasonable heuristic. The alternative — rejecting all traffic during a Redis outage — is worse for our users.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How do you handle the rate limit configuration? Where is it stored and how does it get to the middleware?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Configuration lives in a relational database — something like PostgreSQL. Each API key maps to a rate limit tier (free: 100/min, pro: 1000/min, enterprise: custom). On startup, each app server loads the config and caches it locally with a 60-second refresh interval. We also push config changes via a pub/sub channel in Redis so changes take effect within seconds, not minutes. The local cache means config lookups add zero latency to the request path.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "redis_caching"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about Redis scaling. 200K RPS to Redis — can a single Redis instance handle that?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "redis_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "A single Redis instance can handle around 100-200K simple operations per second, so we're at the edge. I wouldn't run at 100% capacity though. I'd use Redis Cluster with hash-based sharding on the API key. With 8 shards, each handles about 25K RPS — very comfortable. The sliding window counter operations are per-key, so there's no cross-key coordination needed, which makes sharding trivial. Each API key's counters always live on the same shard.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "sharding_strategy", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about race conditions? Two requests for the same API key arrive at different app servers simultaneously.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Redis is single-threaded per shard, so operations on the same key are serialized. Using a Lua script makes the check-and-increment atomic: we read the current and previous window counters, compute the weighted sum, and if under the limit, increment — all in one atomic operation. No race condition possible because the Lua script executes without interleaving. This is one of Redis's great properties for this use case.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistency", "rate_limiting"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice. What about multi-region? If we have app servers in US and EU, how does the rate limit work?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "multi_region" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where it gets interesting. Option one: global Redis — all regions talk to one Redis cluster. Simple but adds cross-region latency, maybe 50-100ms, which violates our sub-millisecond requirement. Option two: local Redis per region with periodic sync. Each region enforces a fraction of the limit locally, similar to the fallback approach we discussed, and periodically exchanges counts. You get eventual consistency but fast local decisions. Option three: for most users, route them to a single region by API key so their limit is enforced locally. I'd go with option two for most keys, and option three for high-volume enterprise keys where accuracy matters more.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_region", "rate_limiting", "consistency", "eventual_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "With option two, how much over-limit leakage would you expect?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Depends on the sync interval. If we sync every second and a key's limit is 60 per minute, the worst case is each region allows its local share plus up to 1 second of excess traffic before learning about the other region's count. With 2 regions splitting 50/50, that's roughly 30 per region per minute plus maybe 1-2 extra per second during bursts. So worst case maybe 5-10% over-limit in a synchronized burst across regions. That's within our 5% tolerance for normal traffic patterns, though a coordinated attack could exploit it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good analysis. How would you handle the Retry-After header accurately with sliding windows?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "With sliding window counter, we know the current count and the window boundaries. If the limit is hit, the earliest time the request could succeed is when the weighted contribution from the previous window drops enough. Since the weight of the previous window decreases linearly as we move through the current window, we can calculate the exact time the count drops below the limit. For example, if we're at 62/60 and the previous window contributed 40 of those, we need the weight to drop the previous window's contribution by at least 2, which means we need to advance in time by about 2/40 of the window duration — 3 seconds for a 1-minute window. We return Retry-After: 3.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "sliding_window"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's precise. Last question — how would you monitor and alert on this system?",
+      "annotation": { "action": "redirect", "phase": "wrap_up", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Key metrics: rate limit hit rate per tier and per key (sudden spikes indicate either an attack or a customer needing an upgrade), Redis latency p99 (alert if above 1ms), the fallback activation rate (how often we're using local rate limiting instead of Redis), and false-positive rate if we can measure it (legitimate requests getting 429s). I'd expose these via Prometheus and set up PagerDuty alerts for Redis latency spikes and fallback activation. We'd also want a dashboard showing top rate-limited keys so the sales team can proactively reach out to customers hitting their limits.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "rate_limiting"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great discussion. I particularly appreciated that you defended your algorithm choice with concrete reasoning instead of just accepting my suggestion. That's important at the staff level. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 7,
+      "api_design": 8,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Defended sliding window counter vs token bucket with concrete technical reasoning and memory analysis",
+      "Excellent fail-open/fail-closed analysis with configurable behavior per endpoint",
+      "Strong multi-region rate limiting discussion with realistic leakage estimation",
+      "Precise Retry-After header calculation showing deep understanding of the algorithm"
+    ],
+    "weaknesses": [
+      "Could have provided a more structured high-level architecture diagram earlier",
+      "Didn't discuss monitoring until prompted at the end",
+      "Multi-region sync approach could use more detail on the actual sync protocol"
+    ]
+  }
+}

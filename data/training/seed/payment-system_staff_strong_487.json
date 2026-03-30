@@ -1,0 +1,373 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_487"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Today we're designing Stripe -- a payment processing platform. Merchants integrate via API, customers pay, money moves. Take it wherever you want to start.",
+      "annotations": {
+        "action": "opening",
+        "phase": "requirements",
+        "target_concept": "payment_processing_platform"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Interesting. Let me first clarify the scope. Stripe handles a lot -- payment processing, subscription billing, fraud detection, payouts to merchants, multi-currency support. Should I focus on the core payment lifecycle -- authorize, capture, settle, and payout -- or do you want me to cover ancillary features like subscriptions and invoicing too?",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["payment_lifecycle", "authorize", "capture", "settle", "subscriptions", "fraud_detection", "multi_currency"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Focus on the core payment lifecycle and the financial infrastructure behind it. Subscriptions are out of scope.",
+      "annotations": {
+        "action": "answer_requirements",
+        "phase": "requirements",
+        "target_concept": "core_payment_lifecycle"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Great. Let me lay out functional requirements: merchants create payment intents via API, customers authorize payments via card or bank, we process authorizations through card networks, capture funds, and settle to merchant bank accounts. Non-functional requirements: we need exactly-once payment semantics -- no double charges, ever. Strong consistency for financial state. PCI DSS compliance for card data handling. And high availability -- merchants lose revenue if we're down. For scale, Stripe processes hundreds of millions of transactions per year. Let's say roughly 10,000 transactions per second at peak, maybe 3,000 average. Each transaction involves multiple state transitions and at least one external network call to Visa/Mastercard that takes 200-500ms. Does that framing work?",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["payment_intents", "exactly_once_semantics", "strong_consistency", "PCI_DSS", "high_availability", "transactions_per_second", "card_network_latency"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good numbers. Walk me through the high-level architecture.",
+      "annotations": {
+        "action": "transition",
+        "phase": "high_level_design",
+        "target_concept": "system_architecture"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll structure it around the payment lifecycle. The API Gateway receives merchant requests, handles authentication, rate limiting, and routes to internal services. The Payment Service is the orchestrator -- it manages the payment state machine: created -> authorized -> captured -> settled. It's the source of truth for payment intent state. The Tokenization Vault is an isolated service that handles raw card numbers -- this is the PCI scope boundary. Card data enters here, gets tokenized, and no other service ever sees the real PAN. The Payment Processor Service communicates with external card networks -- Visa, Mastercard, acquiring banks. It handles the authorize and capture messages. The Ledger Service maintains the double-entry bookkeeping system -- every money movement is recorded as balanced debit/credit entries. The Settlement Service runs batch processes to calculate net amounts owed to merchants, generates settlement files, and initiates bank transfers via ACH or wire. And the Reconciliation Service continuously verifies that our internal ledger matches external bank and network statements.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["API_gateway", "payment_state_machine", "tokenization_vault", "PCI_scope", "card_networks", "double_entry_ledger", "settlement_service", "reconciliation", "ACH"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me more about the double-entry bookkeeping. What does the schema look like concretely?",
+      "annotations": {
+        "action": "deepen",
+        "phase": "deep_dive",
+        "target_concept": "double_entry_bookkeeping"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "The core principle is that every money movement is represented by at least two entries that sum to zero -- money doesn't appear or disappear. The schema centers on three tables. First, the Accounts table: each entity has one or more accounts with a type -- asset, liability, or revenue. A merchant has a liability account representing money we owe them. Stripe has a revenue account for fees. The card network has an asset account representing money they owe us. Columns: account_id, entity_id, entity_type, account_type, currency, created_at. Second, the Ledger Entries table: each row is one side of a transaction. Columns: entry_id, transaction_id, account_id, amount (positive for debit, negative for credit), currency, entry_type (authorization_hold, capture, fee, settlement, refund), created_at, idempotency_key. Third, the Transactions table ties entries together: transaction_id, payment_id, transaction_type, status, created_at. The invariant is: for any transaction_id, SUM(amount) across all ledger entries must equal zero. When a $100 payment is captured, we create entries like: debit card_network_receivable +$100, credit merchant_payable -$97.10, credit stripe_revenue -$2.90. The $2.90 is Stripe's fee. This gives us a complete, auditable money trail.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["double_entry_principle", "accounts_table", "ledger_entries", "transactions_table", "debit_credit_balance", "zero_sum_invariant", "fee_accounting", "audit_trail"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you ensure the zero-sum invariant is never violated in practice?",
+      "annotations": {
+        "action": "challenge",
+        "phase": "deep_dive",
+        "target_concept": "ledger_integrity"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Multiple layers. At the database level, all ledger entries for a single transaction are written in a single database transaction with SERIALIZABLE isolation. We use a CHECK constraint or a trigger that verifies the sum is zero before committing. The application layer constructs balanced entry sets -- there's a LedgerEntryBuilder that enforces balance at construction time and refuses to produce an unbalanced set. The write path goes through a single code path; there's no ad-hoc entry creation. Beyond that, we run continuous background verification: a reconciliation job scans transactions and flags any where the sum isn't zero. This should never happen given the above, but defense in depth matters when money is involved. We also maintain running balance caches per account, and periodically verify that the cached balance matches the sum of all entries for that account. Any discrepancy triggers a P0 alert.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["SERIALIZABLE_isolation", "database_constraints", "balanced_entry_builder", "single_write_path", "background_verification", "running_balance_cache", "defense_in_depth"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about idempotency. A merchant's server crashes after sending a charge request but before receiving our response. They retry. How do you prevent double-charging?",
+      "annotations": {
+        "action": "deepen",
+        "phase": "deep_dive",
+        "target_concept": "idempotency"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Idempotency is critical here. The mechanism has two parts. First, the merchant provides an Idempotency-Key header with each request -- a UUID they generate. On our side, we have an idempotency_keys table: idempotency_key (unique), merchant_id, request_hash, response_body, response_status, created_at, locked_at. When a request comes in, we do an INSERT ... ON CONFLICT on the idempotency key within a transaction. If it's new, we insert a row with a lock timestamp, process the payment, and update the row with the response. If the key already exists and the request hash matches, we return the stored response -- exact same status code and body. If the key exists but the request hash differs, we return a 422 error because the merchant is reusing a key for a different request, which is a bug. The database unique constraint on (idempotency_key, merchant_id) is the ultimate guard against races. Even if two retries arrive at different servers simultaneously, only one INSERT succeeds, the other blocks on the row lock. We set a TTL on idempotency keys -- typically 24-48 hours -- after which they're archived. This approach means idempotency is guaranteed at the database level, not just the application level.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["idempotency_key", "database_unique_constraint", "request_hashing", "stored_response_replay", "row_level_locking", "race_condition_prevention", "TTL_on_keys"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about idempotency on the downstream side -- toward the card network? We might have sent the auth to Visa but didn't get a response back.",
+      "annotations": {
+        "action": "challenge",
+        "phase": "deep_dive",
+        "target_concept": "downstream_idempotency"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the harder problem because we don't control the card networks. The approach is: before we send an authorization request to the network, we persist the attempt with a unique reference ID in our database. If the network call times out or we crash, we're in an ambiguous state -- the auth might or might not have gone through. We cannot simply retry blindly because the network might process it twice. Instead, we first issue a status inquiry or reversal. Most card networks support a void/reversal message that's safe to send even if the original auth didn't go through -- it'll just return 'not found.' So our recovery flow is: detect the ambiguous state, send a reversal for the original reference ID, and if the reversal succeeds (meaning the auth did go through), we know the state and can re-authorize if the merchant still wants to proceed. If the reversal returns 'original not found,' the auth never went through and we can safely retry. We also reconcile daily against the network's settlement files. Any authorization that we think failed but the network actually processed will show up in reconciliation, and we issue a reversal at that point. The key insight is: when in doubt, reverse. It's always safer to void an authorization than to risk a double charge.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["ambiguous_state_handling", "status_inquiry", "reversal_before_retry", "reference_ID_tracking", "daily_reconciliation", "settlement_file_matching", "safe_reversal_principle"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good principle. Now tell me about PCI compliance architecture. How do you keep card data secure?",
+      "annotations": {
+        "action": "transition",
+        "phase": "deep_dive",
+        "target_concept": "PCI_compliance"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "PCI DSS compliance is about minimizing the scope of systems that touch cardholder data. The architecture has a hard boundary. The Tokenization Vault is an isolated service running in a separate network segment -- its own VPC with strict firewall rules. Only the vault can decrypt raw PANs. When card data enters our system, either from a merchant API call or from Stripe.js/Elements on the client side, it goes directly to the vault. The vault encrypts the PAN using envelope encryption -- a data encryption key per card, wrapped by a master key in an HSM (Hardware Security Module). It returns an opaque token like tok_abc123. All other services -- payment service, ledger, settlement -- only ever see tokens, never raw card numbers. When we need to send the actual PAN to the card network for authorization, the Payment Processor Service makes an internal call to the vault, which decrypts and forwards the PAN over a dedicated, encrypted connection to the network. Network segmentation means the vault sits behind multiple layers: a separate VLAN, host-based firewalls, and all access is authenticated and logged. The vault machines have no SSH access in production, hardened OS, and undergo regular penetration testing. By isolating the PAN to one small service, the rest of our infrastructure is out of PCI scope, which dramatically reduces compliance burden and audit cost.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["PCI_DSS_scope_minimization", "tokenization_vault", "network_segmentation", "VPC_isolation", "envelope_encryption", "HSM", "token_based_architecture", "hardened_infrastructure", "audit_scope_reduction"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's move to settlement. How does money actually get from the cardholder's bank to the merchant's bank?",
+      "annotations": {
+        "action": "transition",
+        "phase": "deep_dive",
+        "target_concept": "settlement_process"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Settlement is a batch process that runs on a daily cycle. Here's the flow. Throughout the day, captured payments accumulate in our ledger. At end of day, the Settlement Service runs a batch job that: one, queries all captured payments that haven't been settled yet, grouped by merchant. Two, calculates the net amount per merchant: total captured minus refunds minus Stripe's fees. Three, generates a settlement record with a payout amount per merchant. Four, creates the corresponding ledger entries -- debiting the merchant payable account and crediting the settlement clearing account. Five, produces a NACHA file (for US ACH) or the equivalent for other payment rails, containing the payout instructions for each merchant's bank account. Six, submits the NACHA file to our bank partner, which initiates the ACH transfers. ACH itself settles in 1-2 business days. The whole batch is idempotent -- it's keyed by settlement date and merchant ID, so re-running it produces the same outputs. We also generate settlement reports for merchants showing the breakdown of each payout: which payments were included, fees charged, and refunds deducted. If a batch fails midway, we can resume from the last checkpoint because each merchant's settlement is independent.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["batch_settlement", "net_amount_calculation", "NACHA_files", "ACH_transfers", "settlement_ledger_entries", "idempotent_batch", "merchant_payout_reporting", "checkpoint_recovery"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when the ACH transfer fails -- say the merchant's bank rejects it?",
+      "annotations": {
+        "action": "failure_probe",
+        "phase": "scaling_failures",
+        "target_concept": "settlement_failure"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "ACH returns are a normal part of operations. When a transfer fails, the bank sends back a return code -- R01 for insufficient funds, R02 for account closed, R03 for no account on file, and so on. We receive these returns typically within 2-3 business days. When a return comes in, the Settlement Service reverses the corresponding ledger entries: re-credit the merchant payable account, debit the settlement clearing account. The merchant's available balance is adjusted, and the payout amount goes back into a pending state. We notify the merchant via webhook and dashboard. For retriable failures like R01, we can schedule a retry after a delay. For permanent failures like R02 or R03, we flag the merchant's bank account as invalid and request updated banking information before any future payouts. There's also a risk angle: if a merchant has a negative balance due to refunds exceeding captures, and the payout return means we can't recover funds, that becomes a collections issue. We manage this with reserve holds -- for new or high-risk merchants, we hold a percentage of settlements in reserve for a rolling window to cover potential refunds and chargebacks.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["ACH_return_codes", "ledger_reversal", "webhook_notification", "retriable_vs_permanent_failures", "negative_balance_risk", "reserve_holds", "collections"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the reconciliation problem at scale? You've got your ledger, card network statements, and bank statements that all need to agree.",
+      "annotations": {
+        "action": "deepen",
+        "phase": "deep_dive",
+        "target_concept": "reconciliation"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Reconciliation is a three-way matching problem and it's one of the most operationally complex parts of payments. We reconcile across three sources: our internal ledger, card network settlement files (which we receive daily from Visa/Mastercard), and bank account statements. The process runs as a daily batch job. Step one: match our captured payments against the network settlement file entries using the authorization reference ID. Every captured payment should appear in the network file. Any in our system but not in the network file is an 'unmatched internal' -- maybe the capture didn't actually go through. Any in the network file but not in our system is an 'unmatched external' -- very concerning, could indicate a processing error. Step two: match the net amounts in the network settlement against actual money movement in our bank account. The total settled by Visa should match a corresponding deposit in our acquiring bank account. Step three: generate exception reports. Small discrepancies from timing differences are expected -- a payment captured at 11:59 PM might land in tomorrow's network file. We handle this with a grace period. Larger discrepancies trigger alerts and manual investigation. At scale, this means matching millions of transactions daily. We use batch processing with exact-match joins on reference IDs, and fuzzy matching on amounts and timestamps for the remainder. The goal is to get the unmatched rate below 0.01%, with every exception resolved within 48 hours.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["three_way_reconciliation", "network_settlement_files", "reference_ID_matching", "unmatched_transactions", "timing_discrepancies", "grace_period", "exception_reports", "fuzzy_matching", "unmatched_rate_SLA"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about availability and database design. How do you ensure the payment service stays up and consistent?",
+      "annotations": {
+        "action": "probe",
+        "phase": "scaling_failures",
+        "target_concept": "database_availability"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "For the payment state machine and ledger, we need strong consistency, so we use a relational database -- PostgreSQL -- with synchronous replication to a standby. We shard by merchant_id, which keeps all of a merchant's payments on one shard and avoids cross-shard transactions for the common operations. Each shard is a primary-standby pair with automatic failover. For write availability, we accept that during a failover (typically 10-30 seconds), writes to that shard are unavailable. That's acceptable in payments -- it's better to briefly reject a charge than to risk inconsistency. Read replicas serve dashboard queries and analytics, but the ledger writes always go to the primary. For the idempotency key store, we co-locate it on the same shard as the payment data so idempotency check and payment creation happen in a single local transaction. The payment state machine uses optimistic locking -- each payment has a version column, and state transitions do UPDATE ... WHERE version = X. If there's a conflict, we re-read and retry. This prevents race conditions where two concurrent requests try to transition the same payment.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["PostgreSQL", "synchronous_replication", "merchant_id_sharding", "automatic_failover", "consistency_over_availability", "co_located_idempotency", "optimistic_locking", "version_column"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the timeout scenario from the merchant's perspective? They call our API and the request times out. What state are things in?",
+      "annotations": {
+        "action": "failure_probe",
+        "phase": "scaling_failures",
+        "target_concept": "timeout_handling"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the most common source of payment confusion. From the merchant's perspective, a timeout is ambiguous -- the payment might have succeeded, failed, or still be in flight. Our design handles this cleanly because of the idempotency key and the payment intent model. The merchant should have created a PaymentIntent first, which gives them a pi_xxx ID. If the charge request times out, they have two safe options: one, retry with the same idempotency key, and we return the actual result if the original completed, or process it if it didn't. Two, poll GET /payment_intents/pi_xxx to check the current state. On our side, the payment might be in one of several states: if the timeout was before we sent to the network, the payment is still in 'created' state and the retry will process it. If we sent to the network and are waiting for a response, the payment is in 'processing' state. If we got a network response but the client disconnected before we could return it, the payment has moved to 'authorized' or 'failed.' The key design choice is that the state machine always makes forward progress server-side regardless of client connectivity. We never leave a payment in a zombie state. Background workers poll for payments stuck in 'processing' for more than a timeout threshold and resolve them by querying the network for the authorization status.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["payment_intent_model", "idempotent_retry", "state_polling", "forward_progress", "zombie_payment_prevention", "background_resolution_workers", "client_disconnection_handling"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you think about caching in a payment system? It seems tricky when everything needs to be consistent.",
+      "annotations": {
+        "action": "probe",
+        "phase": "deep_dive",
+        "target_concept": "caching_in_payments"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "You're right to be cautious. For the core payment path -- writing charges, reading payment state for processing -- we generally don't cache. The cost of serving stale data is a potential double charge or wrong refund, which is unacceptable. But there are safe caching opportunities. Merchant configuration data -- API keys, fee structures, webhook endpoints, account settings -- changes rarely and is read on every API call. We cache this in a local in-memory cache with a short TTL of 30-60 seconds, and use pub/sub invalidation when config changes. Token-to-PAN mapping in the vault can be cached in-memory with encryption at rest, since the mapping is immutable once created. For the merchant dashboard and analytics, we cache aggressively -- these are read-heavy, eventually-consistent workloads. Pre-computed daily summaries, transaction lists, payout history -- all cached in Redis with TTLs aligned to when the next batch job will refresh the data. Routing metadata for card networks -- BIN tables that map card number prefixes to issuing banks and network -- is essentially static data that changes quarterly. We cache it aggressively and refresh on a scheduled basis.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["no_cache_on_write_path", "merchant_config_caching", "pubsub_invalidation", "immutable_token_caching", "dashboard_caching", "Redis", "BIN_table_caching", "TTL_alignment"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "One more thing. Walk me through what happens if a merchant disputes that our fee calculation is wrong. How do you prove it?",
+      "annotations": {
+        "action": "probe",
+        "phase": "scaling_failures",
+        "target_concept": "auditability"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where the double-entry ledger really pays off. Every fee we charged is a ledger entry linked to a specific payment via transaction_id. We can pull the complete audit trail: the payment was captured for $100 at timestamp T, the merchant's agreed fee rate is 2.9% + $0.30 (stored in their contract record with an effective date), so the fee was $3.20, and here are the three ledger entries that sum to zero proving the accounting is balanced. We also maintain a fee schedule history -- when the merchant's rate changed, who authorized it, the old and new values. The ledger is append-only; entries are never modified or deleted, only offset by new reversal entries. This immutability is critical for auditing. If the dispute is about the rate itself, we show the contract version that was effective at the time of the transaction. If it's about the amount, the math is deterministic from the captured amount and the rate. All of this is exposed in the merchant dashboard and downloadable as CSV reports. For regulatory purposes, we retain these records for 7+ years.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["audit_trail", "ledger_entry_linkage", "fee_schedule_history", "append_only_ledger", "immutability", "contract_versioning", "data_retention_policy"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong session. You covered the payment lifecycle end-to-end with impressive depth on the financial infrastructure. Let's wrap here. Thanks.",
+      "annotations": {
+        "action": "wrap_up",
+        "phase": "wrap_up",
+        "target_concept": "session_end"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Thank you. Payments are a domain where the details really matter, so I appreciate the deep questions on idempotency and reconciliation -- those are the areas where most payment systems run into trouble in production.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": [],
+        "depth": "none",
+        "has_reasoning": false,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    }
+  ],
+  "scorecard": {
+    "overall": 84,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 7,
+      "api_design": 8,
+      "database_design": 9,
+      "caching_strategy": 8,
+      "scalability": 7,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Excellent double-entry bookkeeping design with concrete schema and zero-sum invariant enforcement at multiple layers",
+      "Thorough idempotency implementation covering both merchant-facing and downstream card network scenarios",
+      "Strong PCI compliance architecture with clear scope boundary and tokenization vault isolation",
+      "Detailed settlement batch process with NACHA file generation and ACH failure handling",
+      "Comprehensive three-way reconciliation design with clear matching strategy and exception handling"
+    ],
+    "weaknesses": [
+      "Could have provided more concrete capacity numbers for database sizing and throughput",
+      "Did not discuss multi-region deployment or geographic considerations for global payment processing",
+      "Fraud detection was mentioned in scoping but not revisited even briefly during the design"
+    ]
+  }
+}

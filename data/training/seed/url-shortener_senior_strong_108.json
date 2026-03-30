@@ -1,0 +1,179 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_108"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service, something like bit.ly. It should work at large scale. What questions do you have before we dive in?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Thanks! Let me start with a few clarifying questions. What's the expected daily volume of URL shortening requests? Should we support custom aliases? Do we need link expiration? And is analytics — like click tracking — in scope?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "custom_aliases", "url_expiration", "analytics"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Assume 100 million new URLs per day, 100:1 read-to-write ratio. Custom aliases yes. Expiration with a default of 5 years. Basic click analytics. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great. I'd like to start with the API design since that defines the contract for everything else. For creation, we need a POST /api/v1/urls endpoint accepting a JSON body with long_url, optional custom_alias, and optional ttl_days. It returns a 201 with the short URL and metadata. For redirects, GET /{short_code} returns a 302 with the Location header. I'd also add GET /api/v1/urls/{short_code}/stats for analytics.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "url_expiration", "analytics"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice, starting with the API. Why 302 instead of 301?",
+      "annotation": { "action": "probe", "phase": "requirements", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "302 means the browser always comes back through us, which is essential for analytics. A 301 would let the browser cache the redirect permanently, so we'd lose visibility on repeat visits. If a client explicitly opts out of analytics, we could offer a 301 mode for better performance, but 302 is the safer default.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "analytics"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good reasoning. Now how would you generate the short codes?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "base62_encoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use UUIDs — specifically UUIDv4 — and take the first 8 characters of the base62-encoded UUID. UUIDv4 gives us 122 bits of randomness, so even truncated to 8 base62 characters we have about 62^8 — roughly 218 trillion combinations. At 100M URLs per day, collision probability is negligible for decades. The key advantage over sequential IDs is that short codes are non-guessable by default, no need for an additional scrambling step.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["base62_encoding", "collision_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "But you still could get a collision with truncated UUIDs. How do you handle that?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "collision_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, collisions are theoretically possible even if rare. I'd handle it with a retry loop. On insert, we check uniqueness via a database unique constraint on short_code. If the insert fails due to a duplicate key, we generate a new UUID and retry. With 218 trillion possibilities and even a billion existing URLs, the collision probability per attempt is about 1 in 218,000 — so we'd almost never need more than one retry. I'd cap retries at 3 and return a 503 if all fail, but that's effectively unreachable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["collision_handling", "database_choice"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Makes sense. Walk me through the high-level architecture now.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "At the top, clients hit a CDN/edge layer for popular redirects. Behind that, a load balancer distributes to a fleet of stateless application servers. Those servers handle both the URL creation flow and the redirect flow. For data, we have a Redis cluster as the primary read cache — redirect lookups hit Redis first. Behind Redis is our persistent store, which I'd make a sharded PostgreSQL cluster. For analytics, redirects asynchronously publish events to a Kafka topic, and a consumer pipeline aggregates into a time-series store like ClickHouse.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["load_balancing", "redis_caching", "database_choice", "sharding_strategy", "kafka", "analytics_pipeline", "cdn_redirect"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk numbers. How do you size the cache and the database?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me work through it. 100M URLs per day is about 1,160 writes per second. With 100:1 read ratio, that's 116K reads per second. For storage: each URL record — short_code, long_url (avg 200 bytes), metadata — is roughly 500 bytes. Over 5 years that's 100M * 365 * 5 * 500 bytes, about 91 TB. For cache: applying the 80/20 rule, 20% of daily URLs are hot. 20M URLs * 500 bytes = 10 GB. A single Redis node handles that, but I'd cluster for availability. With Redis handling 90%+ of reads, the database only sees maybe 12K reads per second, well within range for a sharded Postgres setup.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you shard PostgreSQL? What's the sharding key?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd shard by the short_code using consistent hashing. Since our short codes are UUID-derived, they already have good distribution — no hot shards. I'd start with 32 shards, each holding about 2.8 TB over 5 years. The application layer resolves the shard using a hash ring. For custom aliases, they go through the same hash function. The nice thing about UUID-based codes is we don't need to coordinate across shards for ID generation — each server generates independently.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_strategy", "consistent_hashing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if a shard goes down? How do you maintain availability?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "single_point_of_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each shard runs as a primary with two replicas using synchronous replication to one replica and async to the second. If the primary fails, the synchronous replica promotes automatically — Patroni or similar can handle that. Reads can be served from either replica. For the brief promotion window, the Redis cache absorbs most read traffic. Writes to that shard queue briefly and retry. Since URL creation isn't latency-critical the same way redirects are, a few seconds of write unavailability is acceptable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_replicas", "single_point_of_failure", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What about the Redis cache — what's your invalidation strategy?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cache_eviction" }
+    },
+    {
+      "role": "candidate",
+      "content": "URL mappings are essentially immutable once created — the short code always points to the same long URL. So cache invalidation is minimal. I'd set a TTL on cache entries matching the URL's expiration time. For expired URLs, the TTL naturally evicts them. For deleted URLs — if we support that — we'd explicitly delete the cache key on the delete API call. LRU eviction handles memory pressure. The immutability of the data makes caching particularly clean here.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_eviction", "cache_aside", "url_expiration"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if someone tries to use your service for spam — shortening malicious URLs?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multiple layers of defense. First, rate limiting per API key — say 100 URL creations per minute per user. Second, on URL creation, we run the destination URL through a blocklist check — Google Safe Browsing API or a similar service. This can be async if we allow the URL to be created in a 'pending' state and activate it after the scan passes. Third, if a URL is reported or flagged post-creation, we mark it in the database and the redirect returns a warning interstitial page instead of a direct redirect. Finally, we monitor for bulk creation patterns that look like abuse.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle multi-region deployment? Users are global.",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "multi_region" }
+    },
+    {
+      "role": "candidate",
+      "content": "For reads, I'd deploy the redirect service in multiple regions, each with its own Redis cache and read replicas of the database. The CDN handles the first line of caching at the edge. For writes, I'd route all creations to a primary region to avoid cross-region ID conflicts — since our UUID approach doesn't need coordination, we could actually do multi-region writes, but I'd keep it single-region for simplicity and use async replication to other regions. The slight delay in a new URL being available globally — maybe 200-500ms — is acceptable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_region", "cdn_redirect", "read_replicas", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned UUID-based generation doesn't need coordination. Could you actually do multi-region writes then?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "multi_region" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes, actually. Since each server independently generates UUIDs without coordination, multi-region writes are feasible. Each region writes to its local primary. We'd use async cross-region replication — CockroachDB or Yugabyte handle this natively, or we could use logical replication between Postgres clusters. The collision risk is the same as single-region since UUIDs are globally unique. The main trade-off is that a URL created in US-East won't be immediately resolvable in EU-West until replication catches up. But with sub-second replication, that's usually fine. If we need strict consistency, we could write to a global coordination layer, but I'd avoid that complexity unless required.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_region", "database_choice", "consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're wrapping up. Any final thoughts on the design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A couple things I'd highlight. First, observability: we should track cache hit rates, redirect latency percentiles, and UUID collision rates — if collisions spike, it could indicate a PRNG issue. Second, a background cleanup job to purge expired URLs and reclaim storage. Third, I'd consider a Bloom filter in front of the database for the creation path — before inserting, check the Bloom filter to see if a collision is likely, which saves a database round-trip in most cases. Overall the UUID approach trades a tiny collision handling cost for simplicity in distributed generation, which I think is the right trade-off at this scale.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "url_expiration", "bloom_filter", "collision_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. Really thorough design with a nicely different approach to code generation. Thanks for the discussion.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 75,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 8,
+      "api_design": 9,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Led with API design, creating a clear contract before diving into internals",
+      "UUID-based approach elegantly avoids distributed ID coordination",
+      "Strong multi-region discussion leveraging UUID independence"
+    ],
+    "weaknesses": [
+      "Capacity estimation came only when prompted rather than proactively",
+      "Could have explored the analytics pipeline in more depth"
+    ]
+  }
+}

@@ -1,0 +1,142 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "vp",
+    "candidate_profile": "multi-modal",
+    "total_exchanges": 22,
+    "generation_id": "seed_431"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a ride-sharing system like Uber. How would you architect it?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Uber isn't a ride company anymore. It's a logistics platform: rides, food delivery, freight, autonomous vehicles. The matching engine, payment system, and maps are shared infrastructure that powers all of these verticals. I'd design this as a platform with shared services and vertical-specific logic, not as a monolithic ride-sharing app.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["platform_architecture", "shared_infrastructure", "multi_vertical", "logistics_platform"], "depth": "strategic", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting framing. Walk me through the shared platform and how verticals plug in.",
+      "annotation": { "action": "deepen", "phase": "requirements", "target_concept": "platform_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "The shared platform has five core services. One: the Matching Engine — given a request (a rider needing a car, a customer ordering food, a shipper needing a truck), find the optimal supply unit and dispatch it. The matching algorithm is vertical-agnostic — it optimizes for a cost function that each vertical defines differently. Two: the Maps and Routing Service — ETA calculation, route optimization, real-time traffic. Every vertical needs this. Three: the Payment Platform — charge the customer, pay the provider, handle disputes. Four: the Identity and Trust Service — rider/driver verification, ratings, fraud detection. Five: the Real-Time Communication Layer — push notifications, in-app messaging, live tracking. Each vertical is a thin layer on top: Rides defines the cost function (minimize rider wait time), Eats defines its own (minimize food delivery time accounting for restaurant prep time), Freight defines its own (minimize empty miles for trucks). New verticals launch in months instead of years because they inherit 80% of the functionality.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["shared_services", "matching_engine", "maps_service", "payment_platform", "vertical_abstraction", "reusability"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's go deep on the matching engine. How does it work for rides?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "matching_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "The matching engine for rides solves a real-time bipartite matching problem. On one side: riders requesting trips. On the other: available drivers. The naive approach — assign each rider to the nearest driver — is locally optimal but globally suboptimal. If driver A is 2 minutes from rider 1 and 3 minutes from rider 2, but driver B is 10 minutes from rider 1 and 2.5 minutes from rider 2, the naive approach assigns A→1 and B→2 (total: 4.5 min), but the global optimum is A→2, B→1 — wait, no, that's worse. Let me reconsider. The real insight is batch matching: instead of matching riders one by one, we batch requests over a 2-second window and solve the assignment problem optimally using the Hungarian algorithm or a variant. The cost function for rides: weighted combination of driver ETA (dominant factor), driver rating, vehicle type match, and predicted trip profitability. For Uber Pool / shared rides, it becomes a vehicle routing problem — which rider to pick up first, optimal detour, maximum acceptable delay. This is NP-hard, so we use heuristic approximations with bounded worst-case detour (no rider waits more than 5 minutes extra).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["bipartite_matching", "batch_matching", "hungarian_algorithm", "cost_function", "vehicle_routing", "ride_sharing_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the geospatial aspects? Millions of drivers reporting their locations in real-time.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "geospatial_system" }
+    },
+    {
+      "role": "candidate",
+      "content": "Location management is the heartbeat of the platform. Every active driver sends a location update every 4 seconds — with 5 million concurrent drivers globally, that's 1.25 million location updates per second. We need to answer the query 'find all drivers within 3 km of this point' in under 50ms. Data structure: I'd use a geospatial index based on S2 geometry (Google's spherical geometry library) or H3 (Uber's own hexagonal grid). The world is divided into cells at multiple resolutions. Each driver's current cell is stored in a distributed in-memory store — Redis with geospatial commands or a custom solution. When a rider requests a match, we query all cells within the search radius and get a candidate set of nearby drivers. Architecture: location updates flow through a Kafka topic partitioned by geographic region. A fleet of location service workers consume these events and update the geospatial index. The index is sharded by geographic region — the NYC shard doesn't need to know about Tokyo drivers. For cross-region queries (rare edge case near shard boundaries), we query adjacent shards. The maps and ETA service consumes the same location stream to maintain real-time traffic models — aggregating driver speeds on each road segment gives us ground-truth traffic data that's better than any third-party provider.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geospatial_indexing", "s2_geometry", "h3_hexagonal_grid", "location_streaming", "kafka", "geographic_sharding", "traffic_modeling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about surge pricing. How is it implemented and what's the strategy?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing is the most controversial but important mechanism in the platform. It serves a dual purpose: demand shaping (discouraging marginal riders during peak times) and supply incentivization (encouraging more drivers to come online and drive to high-demand areas). The implementation: a pricing service monitors supply-demand imbalance per geographic zone in real-time. When the ratio of open requests to available drivers in a zone exceeds a threshold (say, 2:1), surge kicks in. The multiplier is a function of the imbalance severity — 2:1 might be 1.3x, 5:1 might be 2.5x. The model is trained on historical elasticity data — how much does a 1.5x multiplier reduce demand and increase supply? This varies by city, time of day, and event type. Strategic considerations: pure market-clearing pricing is economically efficient but publicly toxic. A 9x surge during a hurricane causes PR disasters. I'd implement price caps during emergencies and natural disasters — this is both ethical and protects the brand. For predictable high-demand events (concerts, sporting events), we'd pre-position supply by sending bonus offers to drivers 30 minutes before the event ends. The goal: minimize surge by maximizing supply, rather than maximizing revenue through high multipliers. Long-term, surge hurts the brand more than it helps the P&L.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_pricing", "supply_demand_balancing", "price_elasticity", "demand_shaping", "supply_incentivization", "ethical_pricing"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the food delivery vertical (Eats) differ in its matching and logistics?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "food_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Food delivery has a three-sided matching problem instead of two-sided: customer, restaurant, and courier. The matching is sequenced: when a customer orders, we first estimate the restaurant's prep time (an ML model trained on order complexity, historical kitchen speed, and current order queue depth). Then we dispatch a courier timed to arrive at the restaurant just as the food is ready — dispatching too early means the courier waits, too late means the food gets cold. This 'dispatch timing' optimization is unique to Eats. The cost function changes: for rides, ETA is king. For Eats, food quality (temperature at delivery) is king. A courier 5 minutes farther away might be a better match if the food needs 15 minutes to prepare, because they arrive at the restaurant at the right time. Batching is also different: a courier can carry two or three orders from nearby restaurants to nearby customers if the routes overlap. The batching algorithm must ensure that no order is delayed more than 10 minutes beyond its original ETA — customer satisfaction drops sharply after that threshold. The shared infrastructure — maps, payments, identity — transfers directly. The matching engine's abstraction layer means we just define a new cost function and constraint set.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["three_sided_matching", "dispatch_timing", "prep_time_prediction", "food_quality_optimization", "order_batching", "platform_reuse"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you prepare the platform for autonomous vehicles?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "autonomous_vehicles" }
+    },
+    {
+      "role": "candidate",
+      "content": "Autonomous vehicles are an existential technology shift — they eliminate the driver cost, which is 70-80% of the ride price. The platform that integrates AVs first wins the market. Technical preparation: the matching engine already treats 'supply units' abstractly. An AV is just a supply unit with different capabilities — it can't handle certain road conditions, needs to route to charging stations, and has no driver to negotiate with upset passengers. We add a 'vehicle capability' model: each supply unit declares what it can do (highway-only AV, all-road AV, human-driven). The matching engine respects these constraints. Fleet management: AVs need a different operational model. Instead of drivers deciding when and where to work, we operate the fleet like an airline — positioning vehicles based on predicted demand, scheduling maintenance and charging, and routing to optimize utilization. This is a fleet optimization problem that runs at a 15-minute planning horizon, continuously re-optimizing as conditions change. The transition period — mixed human and AV fleet — is the hardest. We need seamless handoffs (if no AV is available, dispatch a human driver), consistent passenger experience across vehicle types, and dynamic pricing that accounts for different cost structures (AVs are cheaper to operate but more expensive to maintain).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["autonomous_vehicles", "fleet_management", "vehicle_capability_model", "fleet_optimization", "transition_planning", "cost_structure"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about safety? This platform moves people physically — the stakes are higher than a social media feed.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "safety" }
+    },
+    {
+      "role": "candidate",
+      "content": "Physical safety is a non-negotiable top priority. Technical safety systems: real-time trip monitoring — if a trip deviates significantly from the expected route, we trigger an automated check-in with the passenger. If they don't respond, we alert a safety response team. Crash detection using phone accelerometer data — a sudden deceleration event triggers an automated 'Are you okay?' prompt, and if no response, we contact emergency services with the vehicle's location. Driver fatigue monitoring: if a driver has been active for more than 12 hours, we force them offline. Speed monitoring: if GPS data shows sustained speeding, we flag the driver for review. Identity verification: periodic selfie checks for drivers to prevent account sharing. Emergency button: in-app SOS that shares live location with local emergency services and a trained safety agent. Beyond technology: a dedicated safety team that handles reported incidents with trained investigators. Background checks for all drivers, refreshed annually. A public safety report published quarterly with incident statistics and improvement initiatives. The culture must be: every engineer who ships a feature that moves a person must ask 'what happens when this goes wrong?' before shipping.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["physical_safety", "trip_monitoring", "crash_detection", "driver_fatigue", "emergency_response", "safety_culture"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the marketplace balancing problem — making sure there are enough drivers?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "marketplace_balance" }
+    },
+    {
+      "role": "candidate",
+      "content": "Driver supply is the single biggest operational challenge. Too few drivers: long wait times, riders churn. Too many: drivers earn less per hour, drivers churn. The ideal utilization rate is about 60-70% — drivers are busy enough to earn well but there's enough slack to keep wait times low. Supply management tools: demand forecasting using historical patterns, weather, events calendars, and real-time signals. If we predict high demand in downtown at 6 PM Friday, we send push notifications to drivers at 5 PM: 'High demand expected downtown — you could earn $X/hour.' Heat maps showing drivers where demand is. Guaranteed minimum earnings during scheduled shifts to reduce uncertainty. Long-term supply strategy: the driver's hourly earnings after expenses must exceed their next-best option (typically $18-22/hour in the US). If it drops below that, drivers leave permanently, and recovering supply is harder than maintaining it. I track 'driver hours supplied' as a leading indicator — a 5% drop in weekly driver hours predicts a service quality crisis in 2-3 weeks. The data platform enables this: we see earnings trends, utilization changes, and driver churn signals before they become visible in rider-facing metrics.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["marketplace_balance", "demand_forecasting", "driver_incentives", "utilization_optimization", "leading_indicators", "supply_retention"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the organizational structure to build and maintain this multi-vertical platform?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "org_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "The org structure mirrors the architecture — shared platform teams and vertical product teams. Platform teams: Matching and Dispatch (20 engineers — the most complex algorithms), Maps and Location (15 engineers — geospatial infrastructure, ETA, routing), Payments (12 engineers — billing, payouts, fraud), Identity and Trust (10 engineers — verification, ratings, safety), and Platform Infrastructure (15 engineers — Kafka, databases, deployment platform). Vertical teams: Rides (20 engineers — rider and driver apps, ride-specific matching logic, surge), Eats (25 engineers — restaurant platform, menu management, delivery-specific matching, food quality), Freight (15 engineers — shipper and carrier apps, load matching). Each vertical team owns their customer experience end-to-end but consumes platform services. The organizational tension: vertical teams want features fast, platform teams want stability. I'd address this with an 'inner source' model — vertical teams can contribute to platform code with review from the platform team, reducing bottlenecks. Quarterly platform roadmap reviews ensure platform investments align with vertical priorities.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["org_design", "team_topology", "inner_source", "platform_vertical_tension", "governance_model"], "depth": "strategic", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exceptional. The multi-vertical platform vision with shared infrastructure was exactly the strategic thinking we wanted to see. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 86,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 8,
+      "api_design": 8,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 10,
+      "strategic_thinking": 10,
+      "business_acumen": 10,
+      "domain_expertise": 10
+    },
+    "strengths": [
+      "Exceptional multi-vertical platform vision with clear shared infrastructure and vertical-specific logic separation",
+      "Deep matching engine expertise covering bipartite matching, vehicle routing, and three-sided marketplace",
+      "Strong safety consciousness with concrete technical monitoring systems and cultural recommendations"
+    ],
+    "weaknesses": [
+      "Could have explored database design and data storage architecture in more depth",
+      "Didn't discuss caching strategies or CDN usage for the real-time tracking data"
+    ]
+  }
+}

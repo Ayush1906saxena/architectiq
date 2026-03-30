@@ -1,0 +1,179 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_169"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a rate limiting system for a large-scale API platform — something like what AWS API Gateway or Stripe uses internally. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Let me understand the scope. First, what granularity of rate limiting do we need — per-user, per-API-key, per-service, global? Or a hierarchy of all of these? Second, do we have premium tiers where certain users get higher limits? Third, what should happen when a limit is hit — hard reject with 429, or do we want queuing and backpressure? Fourth, what's the scale — how many API requests per second across the platform, and how many distinct rate limit keys are we tracking?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_granularity", "tiered_limits", "rejection_vs_queuing", "scale"], "depth": "deep", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We need a hierarchical system: per-user, per-API-key, per-service, and global limits — all enforced simultaneously. Premium users get higher limits. Hard reject with 429 plus Retry-After header. Scale is 2 million requests per second, 50 million distinct API keys. Let's go deep on the hierarchy.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "hierarchical_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me think about the hierarchy model. We have four tiers, each nesting within the other. A single request must pass all four checks: the global rate limit (protecting the entire platform), the per-service limit (protecting individual microservices), the per-API-key limit (enforcing the customer's plan), and the per-user limit (preventing a single user from consuming all of an API key's quota). The evaluation order matters: I'd check from most-specific to least-specific — user first, then API key, then service, then global. Reason: if the user is already over their limit, there's no point consuming quota at higher tiers. This is a fail-fast approach.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hierarchical_rate_limiting", "evaluation_order", "fail_fast"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good reasoning on the order. What algorithm would you use for each tier?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "rate_limit_algorithms" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use different algorithms depending on the tier's characteristics. For per-user and per-API-key limits, I'd use the sliding window log algorithm. It gives precise rate counts and is easy to reason about for customer-facing limits — no one wants to explain why they got rate limited when they 'should' have had quota left due to a fixed window boundary. For per-service limits, I'd use a token bucket algorithm because services care about burst capacity — a service can handle short bursts above its sustained rate but not sustained overload. Token bucket naturally models this with its refill rate and burst size. For the global limit, I'd use a simple counter with a fixed window — at this level, precision matters less than speed, and a fixed window counter is the cheapest to implement in a distributed setting.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sliding_window_log", "token_bucket", "fixed_window_counter", "burst_capacity"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the high-level architecture. Where does rate limiting sit in the request path?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rate limiting must be as early as possible in the request path to protect downstream services. I'd implement it as a sidecar or middleware in the API gateway layer. The flow: request arrives at the load balancer, hits the API gateway, which extracts the rate limit keys (user ID, API key, target service) from the request headers and JWT. The gateway calls the rate limiter service. If all four tier checks pass, the request proceeds to the backend service. If any check fails, the gateway returns 429 with Retry-After and X-RateLimit-Remaining headers. Architecturally, the rate limiter service is backed by a Redis cluster for storing counters. But at 2M RPS, a centralized Redis check adds latency and creates a dependency on every request. So I'd use a two-level approach: a local in-memory rate limiter on each gateway instance handles the first line of defense, and periodically syncs with the central Redis cluster. The local limiter is slightly imprecise but handles 90% of decisions without a network call.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_gateway", "sidecar_pattern", "redis", "two_level_rate_limiting", "local_cache"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting two-level approach. How imprecise does the local limiter get, and how do you bound that imprecision?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "distributed_counting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good question. Say an API key has a limit of 1,000 requests per minute and we have 20 gateway instances. In the worst case with no synchronization, the key could make 1,000 requests to each instance — 20x overshoot. To bound this, I'd allocate quotas. The central Redis assigns each gateway instance a fraction of the total quota. With 20 instances, each gets 50 requests/minute for that key. When a local quota is exhausted, the instance requests more from Redis. If the key's global quota is also exhausted, the request is denied. This bounds the overshoot to at most one local quota allocation per instance — so worst case, the key gets 1,000 + (20 * one batch size) requests. If the batch size is 10, that's a 20% overshoot maximum. The sync interval and batch size are tunable per tier — for premium customers with high limits, larger batches are fine; for tight limits, smaller batches with more frequent sync.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["quota_allocation", "distributed_counting", "overshoot_bounding", "batch_size_tuning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now let's talk about premium users. How does the priority system work when you have different tiers?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "priority_queues" }
+    },
+    {
+      "role": "candidate",
+      "content": "Premium handling operates at multiple levels. First, rate limit configuration: each plan tier (free, pro, enterprise) has different limits stored in a config service. When we look up the rate limit for an API key, we first resolve its plan tier and load the corresponding limits. This is cached locally with a TTL of a few minutes. Second, and more interestingly, under global resource pressure, premium users should be shed last. I'd implement a priority-based admission control system. When the per-service or global rate limit is approaching capacity — say above 80% — we start applying a weighted lottery. Free tier requests get a pass-through probability that decreases as load increases, while enterprise requests maintain high pass-through until much closer to the hard limit. This is implemented as a priority queue in the rate limiter: each request is scored by its tier priority, and when we're near capacity, lower-priority requests are rejected first.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tiered_limits", "priority_queues", "admission_control", "weighted_lottery", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you prevent a situation where free tier users are perpetually starved under sustained high load?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "fairness" }
+    },
+    {
+      "role": "candidate",
+      "content": "Starvation prevention is critical for fairness. I'd implement a minimum guaranteed throughput for each tier. Even under maximum load, free tier gets at least 10% of the per-service capacity, pro gets 25%, and the remaining 65% is first-come-first-served with priority weighting. Think of it like weighted fair queuing in network routers. Additionally, I'd track the denial rate per tier over rolling windows. If free tier denial rate exceeds a threshold — say 80% — for more than 5 minutes, we trigger an alert and potentially auto-scale the service. The rate limiter shouldn't permanently compensate for under-provisioned services. Fundamentally, if we're regularly in the regime where we need to choose between tiers, the real fix is capacity, not rate limiting policy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fairness", "weighted_fair_queuing", "minimum_guarantee", "starvation_prevention", "auto_scaling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss the Redis layer. At 2M RPS with 50M keys, how do you size and architect the Redis cluster?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "redis_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do the math. 50M API keys, each with a sliding window log. If we keep a 1-minute window with per-second granularity, that's 60 entries per key. At ~50 bytes per entry, that's 3KB per key, total 150GB. But most keys are inactive at any given moment — let's say 5M active keys, so 15GB of hot data. For throughput, even with local rate limiting handling 90% of decisions, that's 200K RPS to Redis. A single Redis instance handles about 100K simple operations per second, so we need at minimum a cluster of 4-6 shards for throughput headroom. I'd deploy a Redis Cluster with 8 shards, each with a replica, for a total of 16 instances. Shard by the hash of the rate limit key. Each shard handles about 25K RPS with plenty of headroom. Memory per shard is about 2GB, trivially small. The bigger concern is network — at 200K RPS with an average payload of 200 bytes, we're looking at ~40MB/s, well within network capacity.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_cluster", "capacity_estimation", "memory_sizing", "throughput_sizing", "sharding"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when Redis goes down? Do you fail open or fail closed?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a fundamental trade-off: fail open means allowing all traffic through (risking downstream overload), fail closed means rejecting all traffic (causing an outage for legitimate users). My answer is neither — it depends on the tier. For the global and per-service tiers, I'd fail open with a local fallback. The local in-memory rate limiters continue operating with their last known quotas. Since they're already handling most decisions, the degradation is bounded. We accept some overshoot but keep the system running. For per-API-key and per-user tiers, I'd also fail open but with a conservative local limit — each gateway instance applies a static 'emergency' limit that's significantly lower than the normal limit divided by the number of instances. This prevents any single key from abusing the Redis outage while still allowing most traffic through. I'd also have a circuit breaker around the Redis calls: if Redis latency exceeds 10ms or error rate exceeds 5%, the local rate limiter takes over completely, and we stop calling Redis until it recovers. No cascading failures.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fail_open_vs_closed", "circuit_breaker", "graceful_degradation", "cascading_failure_prevention"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle rate limit configuration changes — say a customer upgrades from free to pro mid-month?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "configuration_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Configuration propagation needs to be fast but doesn't need to be instant. When a plan change happens, the billing service writes the new plan to the configuration database and publishes an event to a 'plan-changes' Kafka topic. The rate limiter service subscribes to this topic and updates its local config cache. Time to propagation: typically under 5 seconds. For the in-memory cache on gateway instances, they poll the rate limiter service every 30 seconds for config updates, or we can use a push model via gRPC streaming. During the propagation window, the customer might still get rate limited at the old tier, which is acceptable. I'd also handle the edge case of a downgrade: if a customer is downgraded mid-period, we don't immediately reject their in-flight requests, but their counters start being evaluated against the new lower limits from the next window boundary. This avoids surprising customers with sudden rejections.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["config_propagation", "kafka", "event_driven", "cache_invalidation", "graceful_downgrade"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about observability. How do customers know their current rate limit usage?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "observability" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two channels. Real-time: every API response includes standard rate limit headers — X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, and Retry-After on 429 responses. These are computed from the local rate limiter state and are approximate but directionally correct. For the dashboard view, we write rate limit events — both allows and denials — to a Kafka analytics stream. A consumer aggregates these into time-series data in ClickHouse, powering a customer-facing dashboard showing usage over time, peak usage, and denial events. We also expose a /v1/rate-limits/status API endpoint that queries Redis directly for the current counter state, giving customers an accurate real-time view. Internally, we monitor per-customer denial rates to proactively reach out to customers who are frequently hitting limits — this is both a support and an upsell opportunity.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_headers", "analytics_pipeline", "customer_dashboard", "proactive_monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle distributed denial-of-service attacks that try to overwhelm the rate limiter itself?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "ddos_protection" }
+    },
+    {
+      "role": "candidate",
+      "content": "The rate limiter can itself become a target. Defense in depth. Layer 1: network-level DDoS protection via the cloud provider's built-in mechanisms — AWS Shield, Cloudflare, etc. This handles volumetric attacks before they reach our infrastructure. Layer 2: at the load balancer, connection-level rate limiting — max connections per IP, SYN flood protection. These are stateless and cheap. Layer 3: the per-IP rate limiter in the gateway, which operates before any key extraction or JWT parsing. This is a simple fixed-window counter using the IP address, implemented entirely in the local in-memory rate limiter — no Redis call, no key extraction. An unknown IP sending thousands of requests per second gets blocked immediately. Layer 4: if the attack uses many IPs, we detect anomalous patterns in the aggregate — sudden traffic spikes from unusual ASNs — and dynamically add firewall rules. The key insight is that DDoS protection must not depend on the same Redis cluster that handles normal rate limiting. The most resource-intensive operations (sliding window logs, quota allocation) only happen for authenticated requests that pass the cheap initial filters.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["defense_in_depth", "ddos_protection", "connection_rate_limiting", "anomaly_detection", "resource_isolation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're near the end. How would you test this system?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Testing a rate limiter is tricky because correctness is statistical. I'd have three layers. Unit tests: verify each algorithm in isolation — token bucket refill rates, sliding window boundary conditions, priority queue ordering. Integration tests: spin up a local Redis, simulate concurrent requests from multiple clients, and assert that the total allowed requests fall within the expected bounds (accounting for the distributed counting overshoot). Load tests: deploy the full system in a staging environment and run sustained 2M RPS with a realistic key distribution — Zipfian, since a few API keys generate most traffic. Verify that p99 latency for rate limit decisions stays under 1ms locally and under 5ms for Redis-backed decisions. Chaos tests: kill Redis shards during load tests and verify the failover to local rate limiting works correctly. Verify that premium tier traffic continues uninterrupted during partial failures.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["unit_testing", "integration_testing", "load_testing", "chaos_testing", "zipfian_distribution"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "One thing I'd add: the rate limiter should be self-protecting. It should rate limit itself — if the rate limiter service is overloaded, it should shed load gracefully rather than becoming a bottleneck. I'd implement an internal admission control that measures its own CPU and memory utilization and starts failing fast on the cheapest tier checks first when overloaded. Also, I'd expose the rate limiting logic as a library, not just a service, so latency-sensitive services can embed it directly.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["self_protection", "admission_control", "library_vs_service", "graceful_degradation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great interview. Your hierarchical model and distributed counting approach were particularly strong. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 80,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 8,
+      "database_design": 8,
+      "caching_strategy": 9,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Hierarchical rate limiting model with clear evaluation order rationale",
+      "Two-level local+central architecture with bounded overshoot analysis",
+      "Excellent failure handling with nuanced fail-open/fail-closed per tier"
+    ],
+    "weaknesses": [
+      "Could have discussed rate limit API design and header standards more concretely earlier",
+      "Testing strategy came late and could have been woven into the design discussion"
+    ]
+  }
+}

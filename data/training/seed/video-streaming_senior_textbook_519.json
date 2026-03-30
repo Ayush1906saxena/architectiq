@@ -1,0 +1,202 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "senior",
+    "candidate_profile": "textbook_no_experience",
+    "total_exchanges": 22,
+    "generation_id": "seed_519"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a video streaming platform like YouTube. Users upload videos, we process them, and millions of people watch them. What would you like to clarify before we start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. I'd like to understand the scale: how many daily active users, how many video uploads per day, average video length, what video quality levels we need to support, and whether we need live streaming or just video-on-demand.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["dau", "upload_volume", "video_quality", "live_vs_vod"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500M DAU, 500K video uploads per day, average length 5 minutes. Support 360p through 4K. Video-on-demand only, no live streaming. Let's go.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great. At a high level, the system has two main paths: the upload path and the playback path. For upload, the user uploads a raw video file to an upload service, which stores it in blob storage like S3. Then a transcoding pipeline converts the raw video into multiple resolutions and bitrates using HLS or DASH adaptive bitrate streaming. HLS stands for HTTP Live Streaming and uses .m3u8 manifest files with .ts segment files. DASH is Dynamic Adaptive Streaming over HTTP and uses MPD manifests with fragmented MP4 segments. Both protocols segment the video into small chunks so the client can switch between quality levels based on network conditions. The transcoded segments are pushed to a CDN for global distribution. For playback, the client fetches the manifest from the CDN, then streams segments adaptively.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["upload_path", "playback_path", "blob_storage", "transcoding", "hls", "dash", "adaptive_bitrate", "cdn"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good overview. You mentioned transcoding into multiple resolutions. Walk me through the transcoding pipeline in more detail.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "transcoding_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The transcoding pipeline takes the raw uploaded video and produces multiple renditions. Typically we'd produce 360p, 480p, 720p, 1080p, and 4K versions. Each resolution also gets multiple bitrate variants. The encoding uses codecs like H.264 for broad compatibility and H.265/HEVC for better compression at higher resolutions. VP9 and AV1 are also options, with AV1 offering the best compression but being slower to encode. The pipeline would be orchestrated by a job queue: when a video is uploaded, a message is placed on a queue, and transcoding workers pick up jobs, process them, and write the output segments back to object storage. The entire pipeline can be parallelized by splitting the video into chunks and transcoding each chunk independently before stitching them back together.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["renditions", "h264", "h265", "vp9", "av1", "job_queue", "parallel_transcoding", "chunked_encoding"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned workers picking up transcoding jobs from a queue. What happens when a transcoding worker crashes mid-job? Say it's 60% done encoding a 4K rendition of a 30-minute video.",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "transcoding_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If a worker crashes, the job would need to be retried. The message queue should use visibility timeouts so that if a worker doesn't acknowledge the job within a certain time, the message becomes visible again and another worker picks it up. The new worker would restart the transcoding from the beginning.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["visibility_timeout", "message_redelivery", "retry"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Restarting a 30-minute 4K encode from scratch is very expensive. That could be 2-3 hours of compute wasted. How would you avoid that waste?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "transcoding_checkpointing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, so we could implement checkpointing. The worker periodically saves its progress, so on retry we can resume from the last checkpoint. Or since we split the video into chunks for parallel encoding, each chunk is a separate sub-job. If the worker crashes on chunk 7 of 12, only chunk 7 needs to be retried, not the whole video.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["checkpointing", "chunked_retry"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The chunked approach is better. But how do you track which chunks are done, which failed, and when all chunks are complete so you can assemble the final output? What data store tracks this state, and what happens if the orchestrator itself crashes?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "job_orchestration" }
+    },
+    {
+      "role": "candidate",
+      "content": "We'd need an orchestrator service that tracks the state of each chunk. It could store the state in a database — each video has a record with the status of every chunk. When all chunks are marked complete, the orchestrator triggers the assembly step. If the orchestrator crashes... I suppose we'd need it to be stateless and rebuild its view from the database on restart. The database is the source of truth.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["orchestrator", "state_tracking", "database_source_of_truth"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's quite hand-wavy. In practice, systems like AWS Step Functions or Temporal solve this exact problem with durable execution. Have you thought about idempotency here? If the orchestrator re-sends a chunk job that already completed, does the worker produce duplicate output?",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "idempotency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good point. We'd need to make the transcoding jobs idempotent. If a worker processes a chunk that was already done, it should either detect the existing output and skip, or overwrite with the same result. We could check if the output segment already exists in S3 before starting.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["idempotency", "output_existence_check"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Okay, let's talk about the CDN. You mentioned pushing transcoded segments to a CDN. How does that work at YouTube scale with millions of videos?",
+      "annotation": { "action": "transition", "phase": "deep_dive", "target_concept": "cdn_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "The CDN has edge servers distributed globally — Points of Presence in major cities. When a user requests a video segment, the request goes to the nearest edge server. If the segment is cached, it's served directly. If not, the edge pulls it from the origin server, caches it, and serves it. Popular videos stay hot in cache. For less popular videos, the edge fetches from origin on demand. We'd use a pull-based CDN model rather than pushing all content to every edge proactively, because with millions of videos, the storage at each edge would be enormous.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["edge_servers", "pop", "pull_cdn", "cache_hit", "origin_fetch"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good reasoning on pull vs push. Now, what happens when a CDN edge location goes down? A whole PoP serving, say, all of Southeast Asia becomes unreachable. How does the system handle that?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cdn_edge_outage" }
+    },
+    {
+      "role": "candidate",
+      "content": "If an edge goes down, DNS-based failover would route users to the next nearest PoP. CDN providers handle this with health checks and Anycast routing — if one PoP stops responding, the BGP routes adjust and traffic shifts to the next closest PoP. There might be a brief increase in latency because users are now served from a farther location, but the service remains available.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["dns_failover", "anycast", "bgp_routing", "latency_increase"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's the CDN provider's perspective. But from your system's perspective, the next PoP suddenly gets double or triple the traffic. Its cache is cold for the Southeast Asian audience's content. What happens to your origin servers? What's the cascading effect?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "thundering_herd" }
+    },
+    {
+      "role": "candidate",
+      "content": "I see. The failover PoP would have a lot of cache misses since it wasn't serving that region before. So there would be a surge of requests to the origin. We'd need to make sure our origin can handle the spike... maybe by having enough capacity headroom, or by rate-limiting origin requests from the CDN edge.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["cache_miss_surge", "origin_capacity", "rate_limiting"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Rate-limiting origin requests means users can't watch their videos. How would you actually protect the origin without degrading the user experience? Think about the CDN architecture itself.",
+      "annotation": { "action": "hint", "phase": "scaling_failures", "target_concept": "cdn_shielding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Maybe we could use a multi-tier CDN? Like a shield or mid-tier cache between the edge and the origin. If the edge doesn't have the content, it goes to the shield cache first. The shield aggregates requests from multiple edges, so even if many edges request the same segment simultaneously, the shield makes only one request to the origin. That would absorb the thundering herd.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["cdn_shield", "mid_tier_cache", "request_coalescing"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "CDN shielding is the right idea. But what happens if the shield layer itself is overwhelmed? You're still hand-waving. In a real outage, how do you decide what to serve and what to degrade? Do all users get 4K, or do you drop to lower resolutions?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "graceful_degradation" }
+    },
+    {
+      "role": "candidate",
+      "content": "We could degrade quality. If the origin is under heavy load, we could instruct the client to switch to lower resolution streams. The adaptive bitrate mechanism already handles this if segments take too long to load — the client downgrades automatically. So in a way, the system naturally degrades. We could also serve stale cached content if we allow slightly longer TTLs during an outage.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["quality_degradation", "adaptive_bitrate", "stale_cache"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's move to capacity estimation. You've been light on numbers. How much storage do you need per day, and what does the transcoding compute look like?",
+      "annotation": { "action": "transition", "phase": "deep_dive", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "500K uploads per day, average 5 minutes each. Raw upload at, say, 1080p might be around 500MB per video. That's 500K times 500MB, which is 250TB of raw uploads per day. After transcoding into multiple resolutions, the total stored output might be 2-3x that, so around 500-750TB per day including all renditions. For compute, a single 5-minute video at multiple resolutions might take 10-15 minutes of CPU time. So 500K videos times 15 minutes is 7.5 million CPU-minutes, or about 125,000 CPU-hours per day. That's roughly 5,000 machines running 24/7, though in practice we'd use GPU-accelerated encoding which is much faster.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["storage_estimation", "compute_estimation", "gpu_encoding"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good estimates. One more scenario: a popular creator with 50 million subscribers uploads a new video. Within the first minute, 2 million viewers try to watch it. But it was just uploaded and transcoding hasn't finished yet. What happens?",
+      "annotation": { "action": "scaling_probe", "phase": "scaling_failures", "target_concept": "upload_spike" }
+    },
+    {
+      "role": "candidate",
+      "content": "The video isn't available for playback until transcoding is complete. But we could prioritize transcoding for high-profile creators. Or we could make the video available as soon as the first rendition is done — like 360p first — and progressively add higher resolutions as they finish. Users could start watching in lower quality immediately.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["priority_transcoding", "progressive_availability"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Progressive availability is how YouTube actually works. But the 2 million concurrent viewers hitting that video in the first minute — what's the CDN impact? Is the content even cached at the edges yet?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "flash_crowd" }
+    },
+    {
+      "role": "candidate",
+      "content": "No, it wouldn't be cached yet since it's brand new. All 2 million viewers would initially cause cache misses at the edge. The edges would all request the segments from the origin simultaneously. That's another thundering herd scenario. We'd need the CDN shield to coalesce those requests. And the origin would need to handle the burst until the edges warm their caches.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["cache_miss", "thundering_herd", "cdn_shield"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You keep saying 'CDN shield' as a magic solution. But concretely, how many requests per second hit the origin in that first minute? And can your origin handle it? You haven't sized your origin infrastructure at all.",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "origin_sizing" }
+    },
+    {
+      "role": "candidate",
+      "content": "2 million viewers, each requesting a segment every 2-4 seconds. That's roughly 500K to 1M segment requests per second. Even with CDN shielding, the origin needs to serve each unique segment at least once per shield node. If we have 20 shield nodes globally, each unique segment gets requested 20 times from origin. A 5-minute video in 2-second segments has 150 segments, times 6 renditions is 900 unique segments, times 20 shield nodes is 18,000 requests to origin in the first few seconds. That's actually manageable for a well-provisioned S3 origin. The real bottleneck is bandwidth — 900 segments at maybe 5MB average is 4.5GB per shield node, times 20 is 90GB out of origin in the first burst. That's tight but feasible.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["request_rate_calculation", "shield_fan_in", "segment_count", "bandwidth_calculation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good, you got to concrete numbers when pushed. Let's wrap up. Overall you showed solid theoretical knowledge of streaming protocols and CDN architecture, and your capacity estimates were reasonable. Where you struggled was production failure scenarios — the transcoding crash recovery, the CDN outage cascading effects, and origin protection all needed significant prompting to get beyond surface-level answers. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 44,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 5,
+      "api_design": 4,
+      "database_design": 4,
+      "caching_strategy": 5,
+      "scalability": 5,
+      "failure_handling": 3,
+      "communication": 6
+    },
+    "strengths": [
+      "Solid textbook knowledge of streaming protocols — correctly described HLS/DASH, adaptive bitrate, codec trade-offs (H.264 vs H.265 vs AV1)",
+      "Good capacity estimation when prompted — computed storage, compute, and origin bandwidth with reasonable numbers",
+      "Correct high-level architecture with upload path, transcoding pipeline, and CDN-based playback"
+    ],
+    "weaknesses": [
+      "Failure scenarios consistently weak — transcoding crash answer was just 'restart the job', needed heavy prompting to reach chunked retry and checkpointing",
+      "CDN outage discussion was generic and hand-wavy — kept saying 'CDN shield' without sizing or concrete fallback strategy",
+      "No API design discussion — never defined upload or playback API endpoints",
+      "No database design — never discussed metadata storage, video catalog, or user data",
+      "Couldn't articulate a concrete graceful degradation strategy under origin overload beyond 'adaptive bitrate handles it'"
+    ]
+  }
+}

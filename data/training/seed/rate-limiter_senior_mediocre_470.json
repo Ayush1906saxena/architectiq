@@ -1,0 +1,162 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "senior",
+    "candidate_profile": "mediocre",
+    "total_exchanges": 20,
+    "generation_id": "seed_470"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter for an API platform. It needs to limit how many requests each client can make in a given time window. What's your first question?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "What scale? How many total API requests per second across all clients?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["total_throughput"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500,000 requests per second, thousands of API clients, each with a different rate limit. Limits are like '1000 requests per minute' or '50 requests per second.' What else matters?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "What happens when someone exceeds their limit? Do we hard block them or just slow them down? And does the rate limiter need to be real-time — can we tolerate some over-allowance?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["blocking_vs_throttling", "exactness"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Hard block with HTTP 429. Small over-allowance is fine — within 5%. Let's design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The simplest approach: for each client, keep a counter. When a request comes in, increment the counter. If it's over the limit, reject. Reset the counter every minute. We could store these counters in Redis since it's fast and supports atomic increments.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["counter", "redis", "atomic_increment"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a fixed window counter. It works, but there's a known edge case. What happens if a client sends 1000 requests at second 59 and 1000 more at second 61?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "fixed_window_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "Both windows show 1000, which is within the limit. But they sent 2000 requests in 2 seconds. That's the boundary problem. So... we need something better. Maybe a sliding window? Instead of resetting every minute, we track a rolling 60-second window.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["boundary_problem", "sliding_window"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you implement a sliding window? There are a few approaches with different trade-offs.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "sliding_window" }
+    },
+    {
+      "role": "candidate",
+      "content": "We could log the timestamp of every request in a sorted set in Redis. To check the rate, count how many entries fall within the last 60 seconds. If it's over the limit, reject. Then clean up old entries periodically. The problem is storing every request timestamp uses a lot of memory — at 1000 requests per minute per client with thousands of clients, that's millions of entries.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["sliding_window_log", "sorted_set", "memory_concern"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good analysis of the memory trade-off. Is there a way to approximate a sliding window without storing every timestamp?",
+      "annotation": { "action": "hint", "phase": "high_level_design", "target_concept": "sliding_window_counter" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm... could we combine two fixed windows? Like, keep the current window count and the previous window count, and weight them based on where we are in the current window? If we're 30 seconds into the current minute, the estimated rate is previous_count × 0.5 + current_count?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["sliding_window_counter", "weighted_average"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly — that's the sliding window counter approach. Low memory, good enough accuracy. Now, this rate limiter runs across multiple API gateway instances. When gateway A and gateway B both receive requests for the same client simultaneously, how do they coordinate?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "distributed_coordination" }
+    },
+    {
+      "role": "candidate",
+      "content": "They both check Redis. Since Redis is centralized, both gateways see the same counter. The INCR command in Redis is atomic, so even if they hit at the same time, the counter increments correctly.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["centralized_redis", "atomic_operations"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That works. But now every single API request makes a round trip to Redis. At 500K requests per second, what's the concern?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "performance" }
+    },
+    {
+      "role": "candidate",
+      "content": "Latency — each request adds a Redis round trip, maybe 1-2ms. And Redis itself might not handle 500K operations per second on a single instance. We'd need to shard Redis by client key. Or... use a local counter on each gateway and sync periodically? Like each gateway tracks locally and pushes to Redis every second. But then the local counts could be stale.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["redis_latency", "redis_sharding", "local_counting", "staleness"], "depth": "surface", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Local counting with periodic sync is a real pattern. What's the trade-off in terms of rate limit accuracy?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "local_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "If we have 10 gateways and sync every second, in the worst case a client could send to all 10 gateways simultaneously and get 10x the per-gateway allowance before the sync catches up. So if the limit is 1000/minute and each gateway allows 100/minute locally, a client hitting all 10 gateways could get 1000/minute — which is actually the global limit. Wait, that works out. The trick is dividing the global limit by the number of gateways for local enforcement.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["over_allowance", "limit_division", "gateway_distribution"], "depth": "surface", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "But what if traffic isn't evenly distributed? A client might route 90% of requests to one gateway due to load balancer stickiness. Then that gateway's local limit of 100 blocks legitimate traffic while others sit unused.",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "uneven_distribution" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's a good point. The local approach breaks down with uneven distribution. I think we'd need a hybrid — do a local check first (fast, no network), and if the local count is approaching the limit, fall back to the Redis check for the authoritative global count. Most requests pass the local check quickly; only borderline cases hit Redis.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["hybrid_approach", "local_fast_path", "redis_fallback"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if Redis goes down entirely?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "redis_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If Redis is down, we can't check global rate limits. We'd have to decide: fail open (allow all requests — risk abuse) or fail closed (block all requests — bad for users). I'd fail open in most cases — it's better to temporarily allow some over-limit requests than to block legitimate users because of our own infrastructure failure.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["fail_open", "fail_closed"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost done. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Response headers — X-RateLimit-Remaining and Retry-After so clients can self-regulate. A dashboard for ops to see which clients are being throttled most frequently. And the ability to dynamically adjust limits without restarting services — maybe a config service or feature flags.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["rate_limit_headers", "monitoring", "dynamic_configuration"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good practical additions. You showed decent understanding of the algorithms but needed more depth on the distributed aspects. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 50,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 4,
+      "api_design": 6,
+      "database_design": 5,
+      "caching_strategy": 5,
+      "scalability": 5,
+      "failure_handling": 4,
+      "communication": 6
+    },
+    "strengths": [
+      "Identified the fixed window boundary problem when prompted and proposed sliding window",
+      "Good memory trade-off analysis for sliding window log vs counter approaches",
+      "Practical additions at the end — headers, dashboard, dynamic config"
+    ],
+    "weaknesses": [
+      "Distributed coordination was shallow — relied on centralized Redis without considering the full implications",
+      "Local rate limiting discussion went in circles — initially proposed dividing limits but didn't see the uneven distribution problem",
+      "No discussion of token bucket or leaky bucket algorithms — senior should know multiple approaches",
+      "Fail open/closed was mentioned but not analyzed deeply — no Redis replication or cluster discussion",
+      "No capacity estimation — didn't size Redis memory or network requirements"
+    ]
+  }
+}

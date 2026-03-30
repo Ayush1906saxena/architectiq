@@ -1,0 +1,191 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "principal",
+    "candidate_profile": "mediocre",
+    "total_exchanges": 22,
+    "generation_id": "seed_119"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter. It will protect APIs from abuse and ensure fair usage. What do you want to know before we start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question. So when we're thinking about a rate limiting solution at scale, we need to consider it from a platform perspective. This isn't just a single service — it's a cross-cutting concern that touches every API in the organization. We need a centralized rate limiting platform that provides a uniform policy engine, integrates with our service mesh, and gives product teams self-service configuration. Let me think about the organizational structure too — who owns this?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["platform_thinking", "service_mesh", "policy_engine"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's all good context, but let's focus on the technical design. What are the core requirements you'd want to nail down?",
+      "annotation": { "action": "redirect", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Right. We need to understand: what entities are we rate limiting — per user, per API key, per IP? What are the rate limit windows — per second, per minute? What's the throughput of the rate limiter itself — how many checks per second? And what's the tolerance for inaccuracy — can we let a few extra requests through?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_scope", "time_windows", "throughput", "enforcement_strictness"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Per-API-key. Per-second and per-minute windows. 500K rate limit checks per second. Soft enforcement — slight over-limit is acceptable. Now, let's get into the design. How does the rate limiter decide whether to allow or reject a request?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "rate_limit_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "So at a high level, we'd use a token bucket or sliding window algorithm. The rate limiter would check the current count against the limit and return allow or deny. We'd store the state in a fast datastore like Redis. The API gateway calls the rate limiter on every request, and based on the response, either forwards the request or returns a 429.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["token_bucket", "sliding_window", "redis_caching", "api_gateway"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's get specific. How does your rate limiter decide to allow or reject a request? Walk me through the exact mechanics of the token bucket algorithm.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Token bucket... right. So the idea is you have a bucket that holds tokens. Tokens are added at a fixed rate. When a request comes in, it takes a token. If there's no token available, the request is rejected. The bucket has a maximum capacity, which allows for short bursts. So if the rate is 100 requests per second and the bucket size is 200, you can burst up to 200 requests momentarily.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["token_bucket", "burst_handling"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good conceptual explanation. Now how do you implement this in Redis? What data do you store and what operations do you perform?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "In Redis... we'd store the token count and the last refill timestamp. When a request comes in, we calculate how many tokens to add since the last refill, add them (up to the max), then subtract one for the current request. If the count is zero or negative, reject. We'd need to make this atomic, so... we'd use a Redis transaction or a Lua script.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["redis_caching", "atomic_operations", "redis_lua_scripts"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Can you write out what that Lua script would look like, or at least the pseudocode?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "redis_lua_scripts" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'm... actually not super familiar with Redis Lua scripting syntax. The pseudocode would be: get the current token count and timestamp. Calculate elapsed time. tokens_to_add = elapsed * rate. new_count = min(max_tokens, old_count + tokens_to_add). If new_count > 0, decrement and allow. Else reject. Update the timestamp. But I'd need to look up the actual Redis Lua API to implement it correctly.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["redis_lua_scripts", "token_bucket"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's fine. The pseudocode logic is correct. How about the sliding window? How would that work for the per-minute limit?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "sliding_window" }
+    },
+    {
+      "role": "candidate",
+      "content": "For per-minute, we could use a fixed window counter — divide time into 60-second windows. Key in Redis is something like api_key:minute_window_id. Increment on each request. If count exceeds limit, reject. The downside is the boundary problem — a client could send the limit at second 59 and again at second 61. Sliding window fixes this by... interpolating between the current and previous window. Like, if we're 40 seconds into the current minute, the effective count is 40/60 * current_window + 20/60 * previous_window.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["fixed_window", "sliding_window_counter", "boundary_problem"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The sliding window counter approximation is reasonable. What about the overall system architecture? How does this scale to 500K checks per second?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "At the architecture level, we'd have a rate limiting service sitting behind the API gateway. All requests pass through the gateway, which calls the rate limiter before forwarding. The rate limiter itself is stateless — it just reads and writes to Redis. We run multiple instances behind a load balancer. Redis needs to handle 500K operations per second, which might need a Redis cluster with multiple shards. We'd shard by API key.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["api_gateway", "stateless_service", "redis_cluster", "sharding_strategy"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How many Redis shards? What's the capacity of a single shard?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "A single Redis instance can handle maybe... 100K to 200K simple operations per second? But our operations are Lua scripts, which are heavier. Maybe 50-80K per second. So for 500K, we'd need... 7 to 10 shards. Let's say 10 for headroom. Redis Cluster can handle that.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["capacity_estimation", "redis_scaling"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when Redis is unavailable? Say a shard goes down.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Well, Redis Cluster has replicas, so if a primary shard goes down, the replica promotes. There's a brief blip during promotion. But if the entire Redis cluster is unavailable... that's a harder question. We'd need to decide: fail open or fail closed. Fail open means allow all requests — no rate limiting — which could be dangerous. Fail closed means block all requests, which causes an outage. I think fail open is safer because at least the service works. We'd alert and fix Redis quickly.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["redis_failover", "fail_open_closed"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Is there a middle ground? Anything between 'no rate limiting' and 'block everything'?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "fallback_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm... we could have a local fallback. Each rate limiter instance could maintain an in-memory counter. It wouldn't be globally accurate, but it would provide some protection. Like, if the global limit is 100 RPS and we have 10 instances, each instance could enforce a local limit of 10 RPS. It's approximate but better than nothing.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["local_rate_limiting", "fallback_strategy"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. At the principal level, I'd expect you to think about cross-cutting concerns. How would you handle rate limit configuration management? Multi-tenancy?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "configuration_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Configuration should be in a database — tier definitions with rate limits per API key. We'd cache configs locally in the rate limiter instances and refresh periodically. For multi-tenancy, each tenant gets their own set of rate limits based on their tier. We'd need a management API for operations teams to update limits, view current usage, and override limits for specific clients. A UI dashboard showing real-time rate limit status across all tenants.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["configuration_management", "multi_tenancy", "management_api", "dashboard"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would this integrate with a service mesh architecture?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "service_mesh" }
+    },
+    {
+      "role": "candidate",
+      "content": "In a service mesh like Istio, rate limiting can be implemented at the sidecar proxy level. Envoy has built-in rate limiting support. You'd deploy a rate limit service that Envoy sidecars call. The mesh provides the infrastructure for routing these calls. The advantage is that rate limiting is applied consistently across all services without each service implementing it. Policies are configured via the mesh control plane — Kubernetes CRDs for example. I've designed systems like this at the org level, using Envoy's rate limit service with our custom policy engine.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["service_mesh", "envoy", "istio", "sidecar_proxy", "policy_engine"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That sounds like an off-the-shelf description of Envoy rate limiting. What are the trade-offs of the sidecar approach versus a centralized rate limiter?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "service_mesh" }
+    },
+    {
+      "role": "candidate",
+      "content": "Trade-offs... the sidecar approach adds a network hop from the sidecar to the rate limit service — additional latency. But it's applied uniformly. A centralized approach at the API gateway means only external traffic is rate-limited — internal service-to-service calls bypass it. The sidecar approach catches both external and internal traffic. But the sidecar approach is more operationally complex — you're deploying the mesh everywhere. For most organizations, starting with API gateway rate limiting is simpler.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["sidecar_tradeoffs", "api_gateway", "internal_traffic"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running out of time. What would you add to this design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add monitoring — track the percentage of requests being rate-limited per tenant, alert on sudden spikes. I'd add rate limit response headers (X-RateLimit-Limit, X-RateLimit-Remaining) for client-side visibility. I'd consider geographic distribution — each region having its own rate limit state with periodic synchronization. And I'd think about DDoS protection as a separate layer — rate limiting is one component but we'd also want IP reputation, CAPTCHAs, and WAF rules at the edge.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["monitoring", "rate_limit_headers", "multi_region", "ddos_protection"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thanks for the discussion. You had good high-level thinking about where rate limiting fits in the platform, but I'd have liked to see more depth in the implementation specifics. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 52,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 5,
+      "api_design": 5,
+      "database_design": 4,
+      "caching_strategy": 5,
+      "scalability": 6,
+      "failure_handling": 5,
+      "communication": 6
+    },
+    "strengths": [
+      "Good platform-level perspective — understood rate limiting as a cross-cutting organizational concern",
+      "Correct conceptual understanding of token bucket and sliding window algorithms",
+      "Reasonable local fallback strategy when Redis is unavailable"
+    ],
+    "weaknesses": [
+      "Too high-level throughout — could not implement token bucket mechanics in Redis",
+      "Struggled to produce Lua script details despite being asked directly",
+      "Service mesh discussion sounded like textbook Envoy documentation without deeper insight",
+      "For principal level, lacked depth on distributed consistency, multi-region rate limiting, and production hardening"
+    ]
+  }
+}

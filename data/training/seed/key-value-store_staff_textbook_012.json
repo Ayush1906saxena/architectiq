@@ -1,0 +1,183 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "staff",
+    "candidate_profile": "textbook",
+    "total_exchanges": 24,
+    "generation_id": "seed_012"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We're going to design a distributed key-value store. At the staff level, I'm looking for depth on distributed systems fundamentals and the ability to reason about real-world failure scenarios. What do you need to know?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. What's the CAP theorem preference — are we optimizing for consistency or availability? What's the data volume, and what are the read/write patterns?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cap_theorem", "data_volume", "access_patterns"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We want high availability with tunable consistency — AP system by default with optional strong consistency. 5 billion keys, 1KB average value, 300K ops/sec balanced read/write. Go ahead and design it.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Perfect. So by the CAP theorem, in the presence of network partitions, we must choose between consistency and availability. Since we're building an AP system, during a partition we'll favor availability — nodes continue serving requests even if they can't communicate with all replicas. We achieve this through eventual consistency with conflict resolution. The system uses consistent hashing for data partitioning, vector clocks for conflict detection, and gossip protocol for cluster membership. Let me go through each.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cap_theorem", "consistent_hashing", "vector_clocks", "gossip_protocol"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Before you go through each one — can you do the capacity estimation?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Of course. 5 billion keys at 1KB each is 5TB of raw data. With replication factor 3, that's 15TB. For throughput, 300K ops/sec divided across a cluster of, let's say, 30 nodes is 10K ops/sec per node — comfortably within SSD throughput capabilities. Memory for caching: if we cache the top 20% of keys, that's 1 billion keys at 1KB = 1TB of cache, or about 33GB per node if distributed across 30 nodes. That's feasible with modern server RAM.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "replication_factor", "cache_sizing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. Now walk me through consistent hashing.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "consistent_hashing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Consistent hashing maps both keys and nodes to positions on a hash ring using a hash function like SHA-256. A key is assigned to the first node encountered clockwise on the ring. When a node is added or removed, only K/N keys need to be remapped on average, where K is total keys and N is total nodes — much better than modular hashing where all keys would remap. To handle uneven distribution, we use virtual nodes — each physical node gets 100-200 virtual positions on the ring, ensuring a more uniform distribution of keys.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["consistent_hashing", "virtual_nodes", "key_remapping"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid textbook explanation. Now let me give you a scenario: node 3 crashes in the middle of a write. The client sent a PUT request with W=2, the coordinator forwarded to nodes 3, 4, and 5. Node 4 acknowledged, node 3 crashed after receiving but before acknowledging, node 5 hasn't responded yet. What happens?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "partial_write_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "So... the coordinator needs W=2 acknowledgments. It has 1 from node 4. Node 3 crashed, so that's a timeout. It's still waiting on node 5. If node 5 responds, we have W=2 and the write succeeds. If node 5 also times out, the write fails and the coordinator returns an error to the client.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["write_quorum", "timeout"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "But what about the data on node 3? It received the write before crashing. When it comes back up, it has the data. But the coordinator reported the write as failed (assuming node 5 also timed out). Now you have inconsistent state — node 3 has the value but the client thinks the write failed.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "partial_write_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm... that's a tricky scenario. I think the anti-entropy mechanism — the Merkle trees — would eventually detect the inconsistency and resolve it during a regular repair cycle. The stale write on node 3 would be reconciled with the other replicas. If the client retried the write and it succeeded on a different set of replicas, the vector clock would show which version is newer.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["anti_entropy", "merkle_tree", "repair"], "depth": "shallow", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "But what if the client didn't retry? The write 'failed,' so the client moved on. Now node 3 has a phantom write that nobody knows about. A future read with R=1 might hit node 3 and return this phantom value. How do you prevent that?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "phantom_writes" }
+    },
+    {
+      "role": "candidate",
+      "content": "I... hmm. I suppose the read repair mechanism would help? When a read with R=2 hits nodes 3 and 4, it would see different values and use the vector clock to determine which is correct. But with R=1, you're right — there's no cross-check. I'm not sure how to fully prevent this. Maybe we should use a write-ahead log that's confirmed before the data is applied? Or maybe the coordinator should send a rollback to node 3 when the overall write fails?",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["read_repair", "write_ahead_log"], "depth": "shallow", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "In practice, most AP systems accept this as a trade-off. The phantom write exists, but it either gets resolved by anti-entropy repair or overwritten by a subsequent write. If the client needs the guarantee that failed writes don't persist, they should use W=N or the system should use a two-phase commit — which sacrifices availability. It's a fundamental trade-off. Let's move on. Tell me about the gossip protocol.",
+      "annotation": { "action": "correct_and_redirect", "phase": "deep_dive", "target_concept": "gossip_protocol" }
+    },
+    {
+      "role": "candidate",
+      "content": "The gossip protocol is how nodes discover and communicate cluster membership and health. Each node periodically (every 1-2 seconds) selects a random peer and exchanges state information — which nodes are alive, which are suspected failed, and metadata like token ranges. It's eventually consistent — information propagates through the cluster in O(log N) rounds. The key properties are: it's decentralized (no coordinator), fault-tolerant (the protocol itself survives node failures), and scalable (each node only communicates with a few peers per round).",
+      "annotation": { "quality": "good", "concepts_mentioned": ["gossip_protocol", "failure_detection", "decentralized"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Node 3 is actually just experiencing network issues — it can talk to nodes 1 and 2 but not nodes 4 and 5. Nodes 4 and 5 think node 3 is dead, but 1 and 2 know it's alive. What happens?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "network_partition" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's a partial network partition. Nodes 4 and 5 would mark node 3 as failed through their gossip. Nodes 1 and 2 still see node 3 as alive. Eventually, the gossip information from both sides should propagate... but actually, nodes 1 and 2 can't reach 4 and 5 through node 3 if the partition is more complex. This could lead to a split-brain scenario. I know this is handled in practice by... I think Cassandra uses something called a 'Phi accrual failure detector' which gives a probability of failure rather than a binary alive/dead. But I'm not sure how it specifically resolves the split-brain case.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["network_partition", "split_brain", "phi_accrual_detector"], "depth": "shallow", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The Phi accrual detector helps with failure detection sensitivity but doesn't solve split-brain. In an AP system, both sides of the partition continue operating, accepting reads and writes. When the partition heals, the conflicting writes are resolved via your vector clocks and conflict resolution. That's the core AP guarantee — availability over consistency during partitions. Let's shift gears. How do you handle data compaction and garbage collection?",
+      "annotation": { "action": "correct_and_redirect", "phase": "deep_dive", "target_concept": "compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "The storage engine uses an LSM tree. Writes go to an in-memory memtable, which flushes to immutable SSTables on disk. Over time, SSTables accumulate and need compaction — merging multiple SSTables into one, discarding tombstones and old versions. There are two strategies: size-tiered compaction (good for write-heavy) and leveled compaction (good for read-heavy). For deletes, we write a tombstone marker that gets cleaned up during compaction after a grace period.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["lsm_tree", "compaction", "tombstones", "size_tiered", "leveled"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the tombstone grace period for, and what happens if you compact too aggressively — removing tombstones before all replicas have seen the delete?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "tombstone_gc" }
+    },
+    {
+      "role": "candidate",
+      "content": "The grace period ensures that the tombstone exists long enough for anti-entropy repair to propagate the delete to all replicas. If we remove a tombstone too early, a replica that still has the old value could 'resurrect' the deleted key during repair — it would see the key on one node, see it missing on the node that compacted the tombstone, and 'repair' by restoring the key. This is the data resurrection problem. The grace period is typically set to something like 10 days — long enough that repair has certainly propagated the delete to all replicas.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tombstone_gc", "data_resurrection", "repair_propagation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good — that was a strong answer. Let me come back to the failure scenario. Your cluster has 30 nodes and 3 of them go down simultaneously during a peak load event. A new node is being provisioned to replace one of them. Describe what happens operationally.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "multi_node_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "With 3 nodes down and RF=3, any key range where all 3 replicas happen to be on the failed nodes is completely unavailable. But with 30 nodes and virtual nodes, the probability of all 3 replicas of any key being on the same 3 failed nodes is low. Most key ranges will have at least 1 surviving replica. For the affected key ranges... reads and writes will fail because no replicas are available. The system should return an error for those keys. For provisioning the replacement: it joins the cluster, gets assigned the virtual node positions, and starts streaming data from surviving replicas. During streaming, it's partially available — serving reads for key ranges it has already received. The operational concern is the increased load on surviving nodes — they're now handling the traffic that the failed nodes were serving, plus streaming data to the replacement. We might need to throttle the stream to avoid overwhelming them.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["multi_node_failure", "replica_distribution", "streaming_repair", "operational_load"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "In practice, how would you prevent the cascade — surviving nodes getting overwhelmed and failing too?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "cascading_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's... a critical operational concern. I think you'd need backpressure mechanisms — rate limiting on the number of concurrent streaming sessions. And maybe load shedding — if a node's CPU or disk is above 80%, it starts rejecting lower-priority requests like repair streams. But honestly, I'm not deeply familiar with the specific mechanisms Cassandra or DynamoDB use to prevent this cascade. I know the general principle of backpressure but I haven't dealt with this in production.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["backpressure", "load_shedding", "cascading_failure"], "depth": "shallow", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Alright. Let me ask one more question. How would you monitor the health of this cluster? What metrics would you watch?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Key metrics: read and write latency at p50, p95, p99 per node. Compaction backlog — how many SSTables are pending compaction. Disk utilization per node. Gossip convergence time — how quickly cluster state propagates. Hinted handoff queue size — if it's growing, hints aren't being delivered fast enough. Tombstone count — if tombstones are accumulating, compaction might be falling behind. And request error rate per node as an early indicator of issues.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["monitoring", "latency_percentiles", "compaction_metrics", "operational_health"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thanks for the conversation. You have strong theoretical knowledge. The areas where you were less certain — the partial write failure scenario, the split-brain resolution, and the cascade prevention — are exactly the kinds of things that distinguish textbook knowledge from production experience. Appreciate your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 52,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 8,
+      "api_design": 4,
+      "database_design": 7,
+      "caching_strategy": 5,
+      "scalability": 5,
+      "failure_handling": 4,
+      "communication": 6
+    },
+    "strengths": [
+      "Strong capacity estimation with concrete numbers",
+      "Good textbook knowledge of consistent hashing, vector clocks, LSM trees",
+      "Excellent answer on tombstone grace periods and data resurrection problem",
+      "Solid monitoring metrics list"
+    ],
+    "weaknesses": [
+      "Fell apart on the partial write failure scenario — couldn't reason through phantom writes",
+      "Could not explain how split-brain is resolved in an AP system despite knowing the term",
+      "Cascading failure prevention was vague — acknowledged lack of production experience",
+      "Answers tended to recite definitions rather than reason from first principles",
+      "No API design discussion — expected at staff level"
+    ]
+  }
+}

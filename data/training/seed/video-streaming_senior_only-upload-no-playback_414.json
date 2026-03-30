@@ -1,0 +1,172 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "senior",
+    "candidate_profile": "only-upload-no-playback",
+    "total_exchanges": 22,
+    "generation_id": "seed_414"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a video streaming platform — think YouTube or Netflix. Users upload videos and other users watch them. We need to handle both the upload pipeline and the playback experience. What clarifying questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great problem. A few questions: What's the scale — how many video uploads per day and how many concurrent viewers? What video lengths and resolutions do we support? Do we need live streaming or just on-demand? And what about geographic distribution — is this a global service?",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["scale", "video_formats", "live_vs_vod", "geographic_distribution"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500,000 video uploads per day, 10 million concurrent viewers at peak. Videos up to 4K resolution, up to 2 hours long. On-demand only, no live streaming. Global service — users in North America, Europe, and Asia. Let's go.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me estimate the upload volume. 500K videos per day. Average video length maybe 10 minutes. At 1080p, a 10-minute video is roughly 1.5 GB raw, maybe 500 MB after encoding. So 500K * 500 MB = 250 TB of ingested video per day. That's massive. We need a very robust upload pipeline. Let me start designing that.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["capacity_estimation", "storage_estimation", "upload_volume"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good estimates. Go ahead with the upload pipeline.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": "upload_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The upload pipeline starts with the client. For large files (potentially multi-GB), we need resumable, chunked uploads. The client splits the video into 5 MB chunks and uploads each chunk sequentially or in parallel. We use a pre-signed URL pattern — the client requests upload URLs from our API, then uploads directly to object storage (S3). This keeps the video data off our application servers. Each chunk is checksummed (MD5 or SHA256) to verify integrity.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chunked_upload", "resumable_upload", "pre_signed_urls", "object_storage", "checksum_validation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle upload failures mid-way? Say the user's connection drops after uploading 60% of the chunks.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "upload_resilience" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each upload has a session ID. The server tracks which chunks have been successfully received for each session. When the client reconnects, it queries the server for the list of completed chunks and resumes from where it left off. The incomplete upload session persists for 24 hours before being garbage collected. We use S3 multipart upload which natively supports this — each part is independently uploaded and the multipart upload is completed only when all parts are received. If abandoned, S3 lifecycle policies clean up incomplete multipart uploads.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["upload_session", "resume_protocol", "s3_multipart", "garbage_collection", "lifecycle_policies"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What happens after all chunks are uploaded?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "post_upload_processing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Once the multipart upload is complete, we trigger a processing pipeline. Step 1: Validation — check the file is a valid video format (MP4, MOV, WebM), check it's not corrupted, verify the duration and resolution match the claimed metadata. Step 2: Content moderation — run the video through a content moderation service (could be AWS Rekognition or a custom ML model) to detect prohibited content — nudity, violence, copyright infringement. Step 3: Metadata extraction — extract duration, resolution, codec, frame rate, aspect ratio. Store all this in the video metadata table.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["video_validation", "content_moderation", "metadata_extraction", "ml_moderation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about transcoding?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "transcoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Transcoding is the big one. We need to transcode each video into multiple resolutions and bitrates for adaptive bitrate streaming. A typical ladder: 360p at 500 kbps, 480p at 1 Mbps, 720p at 2.5 Mbps, 1080p at 5 Mbps, 4K at 15 Mbps. Each resolution uses H.264 or H.265 (HEVC) codec. For a 10-minute video, transcoding to 5 renditions might take 15-30 minutes on a single machine. At 500K videos per day, that's about 6 videos per second entering the transcoding queue. We'd need a fleet of transcoding workers — probably GPU-based instances for hardware-accelerated encoding.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["adaptive_bitrate", "transcoding_ladder", "h264", "h265", "gpu_encoding", "worker_fleet"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you manage the transcoding job queue?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "job_queue" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a message queue — SQS or Kafka. When post-upload validation completes, a message is published to the transcoding queue with the S3 path and desired output renditions. Transcoding workers pull from the queue. Each worker takes a job, downloads the source video, transcodes it into one rendition, uploads the result back to S3, and acknowledges the job. For a single video, we fan out into 5 parallel jobs (one per rendition) to parallelize. If a worker fails, the message becomes visible again after a visibility timeout and another worker picks it up. We track the progress of all renditions for a video — once all 5 complete, we mark the video as 'READY'.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sqs", "fan_out", "parallel_transcoding", "visibility_timeout", "job_tracking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've spent a lot of time on uploads. That's great depth, but let me ask about the other half of the system — how do users actually watch these videos? Walk me through the playback architecture.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "playback_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh... the playback side. Right. So, uh, once the video is transcoded, the different renditions are stored in S3. For playback... the client needs to... hmm, let me think about this. The client would request the video, and we serve it from... I guess we need a CDN. Let me think about what protocol the client uses to stream.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["cdn", "streaming_protocol"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You seem much less prepared on the playback side. This is half the system. Walk me through it.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "playback_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "You're right, I over-indexed on uploads. Let me think through playback. So the transcoded video segments are stored in S3. We use HLS (HTTP Live Streaming) or DASH (Dynamic Adaptive Streaming over HTTP). The video is split into small segments — 2-10 second chunks. There's a manifest file (m3u8 for HLS) that lists all available quality levels and their segment URLs. The client's video player downloads the manifest, then starts fetching segments. It monitors its own bandwidth and switches quality levels adaptively — start at 480p, if bandwidth is good, upgrade to 1080p. If bandwidth drops, downgrade to 360p. All segments are served from a CDN for low latency.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["hls", "dash", "adaptive_bitrate_streaming", "manifest_file", "cdn_delivery", "segment_fetching"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Better. How does the CDN layer work for a global service?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "cdn_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "We'd use a CDN like CloudFront or Akamai with edge locations worldwide. When a user requests a video segment, the request goes to the nearest CDN edge. If the edge has the segment cached, it serves it directly — cache hit, very fast. If not, the edge fetches it from our origin (S3), caches it, and serves it. Popular videos would have very high cache hit rates. For cold videos, the first viewer in a region gets slightly higher latency. We'd also consider regional origin servers — replicate the most popular videos to S3 buckets in each major region to reduce origin fetch latency.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["cdn_edge_locations", "cache_hit_rate", "origin_fetch", "regional_origins"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle seeking — when a user jumps to minute 35 of an hour-long video?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "video_seeking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Since we're using segment-based streaming, seeking is straightforward. The manifest file maps timestamps to segment numbers. When the user seeks to minute 35, the player calculates which segment corresponds to that timestamp and starts fetching from that segment. It doesn't need to download everything before minute 35. The segments are independently decodable because each starts with a keyframe (IDR frame). The seek is nearly instant from the user's perspective — just one segment download latency.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["segment_seeking", "keyframe_alignment", "instant_seek"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about video recommendations and the home feed — how does a user discover videos?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "discovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "The home feed would show personalized video recommendations. But honestly, I haven't thought deeply about this side. At a high level, we'd have a Recommendation Service that uses collaborative filtering and content-based signals — what the user has watched, liked, and the video's category, tags, and engagement metrics. The feed API returns a ranked list of video IDs, and the client fetches thumbnails and metadata. But I'd need more time to design the recommendation pipeline properly — that's a whole system design in itself.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["recommendation_service", "collaborative_filtering"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost out of time. Final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Looking back, I spent too much time on the upload pipeline and didn't give equal attention to playback and discovery, which are arguably more important from a user perspective. The upload pipeline is robust — chunked uploads, validation, transcoding. The playback side works but I should have covered DRM for content protection, view counting at scale, and buffering optimization. In future, I'd timebox: 10 minutes on uploads, 20 minutes on playback and discovery.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["self_reflection", "time_management", "drm", "view_counting"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good self-awareness. The upload depth was impressive, but a balanced design is what we need. You essentially designed half a system very well, which unfortunately isn't enough. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 50,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 6,
+      "api_design": 4,
+      "database_design": 4,
+      "caching_strategy": 5,
+      "scalability": 5,
+      "failure_handling": 6,
+      "communication": 4
+    },
+    "strengths": [
+      "Extremely thorough upload pipeline — chunked uploads, S3 multipart, resume logic",
+      "Good transcoding architecture with parallel fan-out and job tracking",
+      "Solid understanding of video formats and encoding ladder"
+    ],
+    "weaknesses": [
+      "Spent 25 minutes on upload pipeline, only 10 on playback — severely imbalanced",
+      "Playback architecture was surface-level — no depth on DRM, buffering, or player logic",
+      "Completely missed video discovery, recommendations, and user engagement features",
+      "No discussion of database schema for video metadata, view counts, or user interactions",
+      "Poor time management and inability to self-monitor coverage breadth"
+    ]
+  }
+}

@@ -1,0 +1,190 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "principal",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_184"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a rate limiting system. At your level, I'd like you to think about this not just as a component, but as a platform capability. What's your initial framing?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Absolutely. Rate limiting as a platform capability means it needs to serve the entire organization, not just one service. My first questions: How many teams and services would consume this? Are we talking about API gateway-level rate limiting, or service-to-service as well? And what's our current pain point -- are we seeing abuse, or is this about fair usage across internal teams?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["platform_thinking", "api_gateway", "service_mesh"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good framing. We have about 200 microservices across 30 teams. Primary need is API gateway-level rate limiting for external clients, but internal service-to-service is a stretch goal. Current pain: a few bad actors have caused cascading failures twice in the past quarter.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "platform_thinking" }
+    },
+    {
+      "role": "candidate",
+      "content": "OK so two distinct problems: protecting against external abuse, and preventing internal cascade failures. For scale, what's our total API traffic? And how many unique API clients do we have -- is this hundreds or millions?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["capacity_estimation", "client_segmentation"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "About 500K requests per second at the API gateway. Around 50,000 unique API clients, ranging from free tier to enterprise.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. So I'd design this as a multi-layered rate limiting platform with three main components. First, a policy management service -- a self-service portal where teams can define and manage their own rate limiting rules. Second, the enforcement engine -- the actual rate limiting logic that runs in the hot path. Third, an observability layer for monitoring and alerting on rate limit events. Let me detail each one.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["platform_thinking", "self_service", "observability"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's start with the policy management. How does a team onboard?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "self_service" }
+    },
+    {
+      "role": "candidate",
+      "content": "The self-service portal is critical for adoption. A team logs in, selects their service, and defines policies using a declarative format. Something like: 'For endpoint /api/v1/orders, free tier clients get 100 requests per minute, pro tier gets 1000, enterprise gets custom limits.' The policies are stored in a policy store -- I'd use a versioned configuration system, maybe etcd or a dedicated Postgres table with change history. Policies are then pushed to the enforcement layer via a pub/sub mechanism so changes take effect within seconds, not requiring a deploy.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["self_service", "policy_management", "configuration_management", "pub_sub"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about policy validation? How do you prevent a team from accidentally setting a limit of 1 request per day and breaking their own service?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "policy_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question. I'd build automated policy guardrails. First, sanity checks: limits can't be below a configurable floor or above a ceiling. Second, a dry-run mode -- you can apply a policy in shadow mode where it logs what would have been rate-limited without actually blocking. Teams run this for a few hours to see the impact. Third, gradual rollout -- policies are applied to 1% of traffic, then 10%, then 100%. And there's an emergency override: a 'kill switch' that disables any policy immediately if something goes wrong.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["policy_validation", "shadow_mode", "gradual_rollout", "kill_switch"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid. Now let's talk about the enforcement engine. What algorithm do you use and where does it run?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "rate_limiting_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the algorithm, I'd use sliding window log as the default, with token bucket available as an alternative. Sliding window gives you precise counting without the boundary problem of fixed windows. For where it runs: the enforcement layer sits as a plugin in the API gateway. Each gateway instance maintains a local token count, but the authoritative count is in a centralized Redis cluster. The flow is: request arrives, gateway checks local counter (fast path), if the local counter says 'maybe over limit,' it checks Redis (slower path). This two-tier approach means most requests avoid the Redis roundtrip.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["sliding_window", "token_bucket", "redis_caching", "api_gateway"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "At 500K RPS, what's the load on Redis? Can a single Redis cluster handle that?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "redis_capacity" }
+    },
+    {
+      "role": "candidate",
+      "content": "Not all 500K hit Redis -- that's the beauty of the local counter. With the two-tier approach, maybe 10-20% of requests need the Redis check. So call it 50-100K operations per second on Redis. A Redis cluster with 3-5 shards can handle that comfortably -- each shard does 100K+ ops/sec for simple increment operations. The key design is sharding by client_id so all requests from the same client hit the same shard, avoiding distributed counting.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["redis_capacity", "sharding_strategy", "distributed_counting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when Redis goes down? Do you fail open or fail closed?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_modes" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a critical design decision and it depends on the context. For most services, I'd fail open -- allow requests through without rate limiting. The reasoning: rate limiting is a protection mechanism. If it fails, you lose protection but don't break functionality. However, for payment endpoints or authentication endpoints where abuse can cause real financial damage, you might fail closed. This should be configurable per policy -- the team decides based on their risk tolerance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["failure_modes", "fail_open", "fail_closed", "risk_assessment"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does this integrate with API management? Most companies already have an API management platform.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "api_management_integration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, we don't want to build a parallel system. The rate limiter should integrate with existing API management -- whether that's Kong, Apigee, or a custom gateway. I'd design the enforcement engine as a pluggable middleware. For Kong, it's a Lua plugin. For Envoy-based gateways, a WASM filter or ext_authz gRPC service. The policy store exposes a standard API, and adapters translate policies into the gateway's native format. This means teams don't need to change their API management setup -- rate limiting 'just works' as an added capability.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["api_management_integration", "middleware", "plugin_architecture"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the client experience. What does a rate-limited client see?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "client_experience" }
+    },
+    {
+      "role": "candidate",
+      "content": "Standard HTTP 429 Too Many Requests with important headers: X-RateLimit-Limit (their quota), X-RateLimit-Remaining (how much is left), X-RateLimit-Reset (when the window resets, as a Unix timestamp), and Retry-After (how long to wait). The response body includes a machine-readable error code and a human-readable message with a link to our rate limiting documentation. For enterprise clients, we also provide a rate limit dashboard where they can see their usage in real time and request limit increases through a self-service workflow.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["http_429", "rate_limit_headers", "client_experience", "self_service"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle burst traffic? A client sends 90 requests in the first second of a 100-per-minute window.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "burst_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where algorithm choice matters. A simple fixed-window counter would allow this -- 90 in one second, then only 10 left for 59 seconds. That's technically within limits but could still overwhelm the downstream service. The token bucket algorithm handles this better because you can configure both the rate (tokens per second) and the burst size independently. For example: 100 requests per minute with a max burst of 20 per second. This gives clients flexibility for short bursts without allowing traffic spikes that harm infrastructure.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["burst_handling", "token_bucket", "rate_vs_burst"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss automated policy enforcement. How do you detect and respond to abuse patterns automatically?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "automated_enforcement" }
+    },
+    {
+      "role": "candidate",
+      "content": "Beyond static rate limits, I'd build an anomaly detection layer. We stream all request metadata into a Flink pipeline that computes real-time features: request rate by client, error rate spikes, unusual endpoint access patterns. When an anomaly is detected -- say a client suddenly 10x's their normal traffic -- the system can automatically apply a temporary stricter limit. This is a 'dynamic rate limit' that supplements the static policies. The escalation path: anomaly detected -> temporary limit applied -> alert sent to the affected team -> team reviews and either whitelists or blocks the client.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["anomaly_detection", "stream_processing", "dynamic_rate_limiting", "automated_enforcement"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about distributed rate limiting across multiple data centers? A client can hit US-East and EU-West simultaneously.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Cross-region rate limiting is genuinely hard. You have two options. Option one: route all requests from a given client to the same region using DNS or anycast, so counting stays local. Simple but adds latency for some users. Option two: eventual consistency -- each region maintains its own counter and periodically syncs. You might over-count by a few percent, but that's usually acceptable. For strict rate limits like payment endpoints, option one is better. For general API rate limiting, option two with a 5-10% tolerance buffer works. In practice, I'd reduce the per-region limit to 90% of the total, giving headroom for sync delays.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["distributed_rate_limiting", "eventual_consistency", "multi_region"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you measure the success of this platform? What KPIs would you track?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "success_metrics" }
+    },
+    {
+      "role": "candidate",
+      "content": "Platform success metrics at three levels. Adoption: number of teams onboarded, percentage of API endpoints with rate limiting policies (target: 90%+ within 6 months). Effectiveness: reduction in cascade failures (target: zero P1 incidents caused by client abuse), false positive rate (legitimate requests incorrectly rate-limited, target: below 0.01%). Operational: enforcement latency added per request (target: sub-1ms at p99), platform uptime (target: 99.99%). I'd also track developer satisfaction via quarterly surveys -- if teams hate using the platform, they'll build their own and we've failed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["success_metrics", "platform_adoption", "sla"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last question: how do you handle the internal politics? Team A says 'Team B's service is calling us too much' but Team B says 'we need that volume for our SLA.'",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "organizational_challenges" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where the platform approach really shines. Instead of teams arguing, you establish a capacity marketplace. Each service declares its SLA and the traffic it can handle. Consuming teams request capacity allocations. If Team B needs more than Team A can provide, it surfaces a capacity gap that becomes a prioritized engineering investment -- either Team A scales up or Team B optimizes their call patterns. The rate limiter platform provides the data to make these conversations objective, not political. 'The data shows you're making 50K calls/min and our SLA supports 30K -- here's the dashboard.'",
+      "annotation": { "quality": "good", "concepts_mentioned": ["organizational_challenges", "capacity_planning", "data_driven_decisions"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great discussion. You showed strong platform thinking and practical engineering judgment. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 76,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 7,
+      "api_design": 8,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent platform framing -- self-service portal, automated enforcement, integration with existing API management",
+      "Strong policy lifecycle: shadow mode, gradual rollout, kill switch",
+      "Good organizational awareness -- capacity marketplace to resolve inter-team disputes"
+    ],
+    "weaknesses": [
+      "Could have gone deeper on Redis cluster sizing and failure modes",
+      "Sliding window log algorithm at scale has memory concerns that were not addressed",
+      "Didn't discuss cost implications of the Redis cluster for rate limiting"
+    ]
+  }
+}

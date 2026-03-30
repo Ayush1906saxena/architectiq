@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "senior",
+    "candidate_profile": "security-focused",
+    "total_exchanges": 22,
+    "generation_id": "seed_096"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a real-time chat system like WhatsApp or Slack. Users can send messages in 1:1 and group conversations. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "First thing that comes to mind — what's our security posture? Do we need end-to-end encryption like Signal/WhatsApp, or server-side encryption at rest is sufficient? This fundamentally changes the architecture because with E2EE, the server can't read messages, which affects search, moderation, and backup features.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["encryption", "e2e_encryption", "security"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's say server-side encryption at rest, but not end-to-end. We need to support server-side search. What about scale?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "encryption" }
+    },
+    {
+      "role": "candidate",
+      "content": "Understood. Scale questions: how many concurrent users, messages per day, and maximum group size? Also, for compliance — do we need message retention policies? In regulated industries, messages need to be retained for 7 years but also deletable under GDPR right-to-erasure. Those are conflicting requirements that need to be addressed upfront.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "compliance", "data_retention", "gdpr"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "50 million DAUs, 10 million concurrent, 1 billion messages per day. Max group size 1000. Standard retention — keep messages until deleted by user. No specific regulatory requirements. Let's start designing.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me lay out the high-level architecture with security built in from the start. Clients connect through TLS 1.3 to an API gateway that handles authentication — JWT tokens with short expiration and refresh token rotation. The gateway routes to stateless chat servers that maintain WebSocket connections. Before anything, I want to make sure every connection is authenticated and authorized — no message can be sent or received without a valid session.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tls", "authentication", "jwt", "websocket", "api_gateway"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How do you manage 10 million concurrent WebSocket connections?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "websocket_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each chat server handles about 50K-100K connections depending on message throughput. So we need 100-200 chat servers. A connection registry in Redis tracks which user is connected to which server. When user A sends a message to user B, we look up B's server in the registry and route accordingly. For the connection itself, we use secure WebSocket (wss://) with certificate pinning on mobile clients to prevent MITM attacks. Also, heartbeat every 30 seconds — if a client misses 3 heartbeats, we close the connection and mark the user offline.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket_management", "connection_registry", "certificate_pinning", "mitm_prevention"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about the message flow — user A sends a message to user B.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "A sends the message over their WebSocket. The chat server first validates: is A authenticated? Is A a member of this conversation? Is the message size within limits? Then rate limiting — max 60 messages per minute per user to prevent spam flooding. We also run a content sanitization pass to strip any XSS payloads or script injection from the message content. After validation, we persist the message to the database with encryption at rest — AES-256 with keys managed by AWS KMS, rotated every 90 days. Then we publish to a Kafka topic partitioned by conversation_id. The consumer looks up B's chat server from Redis and forwards the message via internal gRPC.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["authentication", "authorization", "rate_limiting", "xss_prevention", "encryption", "kms", "kafka", "grpc"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's very security-conscious. Let me ask about the database design — how are messages stored?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Messages in Cassandra — partitioned by conversation_id, clustered by message_timestamp descending. Each message has: message_id, conversation_id, sender_id, encrypted_content, content_type, created_at, and a field for encryption_key_version so we know which KMS key version was used. This is important — when we rotate keys, old messages are still decryptable because we track which key version encrypted them. We do lazy re-encryption during reads: if a message was encrypted with an old key version, we re-encrypt with the current key and write it back.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cassandra", "database_schema", "encryption", "key_rotation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting approach to key rotation. What about group messages? How does delivery work for a 1000-person group?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "group_messaging" }
+    },
+    {
+      "role": "candidate",
+      "content": "For groups, we don't fan-out the message to 1000 individual inboxes. Instead, the message is stored once in the conversation partition. Each member has a read pointer — a cursor of the last message_id they've seen. To fetch unread messages, the client queries messages after their cursor. For delivery, the Kafka consumer looks up all online group members from the connection registry and pushes notifications. For offline members, we store a count of unread messages and send a push notification. Security-wise, we need to verify group membership on every message send — a user who was removed from the group should immediately lose the ability to send or read new messages. We revoke their session token for that conversation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["group_messaging", "read_cursors", "authorization", "session_management"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've covered security thoroughly. Let's talk about availability — what happens when a chat server crashes with 50K active connections?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "server_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The load balancer detects the server is unhealthy via failed health checks and stops routing new connections. The 50K clients detect the dropped WebSocket and reconnect — the load balancer assigns them to healthy servers. Their session tokens are still valid so re-authentication is seamless. Any messages sent during the reconnection window are not lost because they were persisted to Kafka. When the client reconnects, it sends its last-seen message_id and the server replays any missed messages. The connection registry in Redis has a TTL — the dead server's entries expire within 30 seconds, and new entries are created on reconnection.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["server_failure", "reconnection", "message_replay", "health_checks"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you implement message search?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "search" }
+    },
+    {
+      "role": "candidate",
+      "content": "Search is tricky with encrypted content. Since we're using server-side encryption, we can decrypt for indexing. I'd use Elasticsearch with the decrypted content indexed per conversation. Important: the Elasticsearch cluster itself must have encryption at rest and network-level isolation — it should not be accessible outside the VPC. Search queries must include the conversation_id and the requesting user must be a verified member of that conversation. We also need to think about audit logging — every search query is logged with who searched what and when, for compliance and to detect if an admin is abusing access.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["elasticsearch", "search", "encryption", "vpc_isolation", "audit_logging"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about file and media sharing in chat?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "media_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Files uploaded to S3 with server-side encryption using SSE-KMS. Before storing, we run a malware scan — ClamAV or a managed service like AWS GuardDuty. We also validate file types and sizes to prevent upload of executables or oversized files. The download URL is a pre-signed S3 URL with a short TTL — 15 minutes — so even if a link is leaked, it expires quickly. For images, we generate thumbnails server-side to prevent exif data leakage which can contain GPS coordinates. We strip all metadata before serving.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["s3", "encryption", "malware_scanning", "presigned_urls", "metadata_stripping"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've been very thorough on security. I notice we haven't discussed much about scaling the database layer or performance optimization. Can you touch on that?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "scalability" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fair point — I've been security-focused. For scaling: Cassandra naturally scales horizontally by adding nodes. With 1 billion messages/day at average 500 bytes, that's 500GB/day, about 180TB/year. With replication factor 3, we're looking at 540TB — a large but manageable Cassandra cluster of maybe 50-60 nodes. For hot conversations, we'd cache recent messages in Redis — the last 50 messages per active conversation. The WebSocket layer scales by adding more chat servers. Kafka scales by adding partitions. The main bottleneck is likely the connection registry in Redis — 10M entries with frequent updates — we'd need a Redis Cluster with 5-6 shards for that.",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["cassandra", "scalability", "redis_caching", "capacity_estimation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add: DDoS protection at the edge with rate limiting on connection establishment. IP-based anomaly detection — if a single IP opens 1000 WebSocket connections, that's suspicious. Regular penetration testing of the system. Security headers on all HTTP responses. And a bug bounty program since chat systems are high-value targets. For observability, security-specific metrics: failed authentication rate, rate-limited messages, malware detection counts.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ddos_protection", "anomaly_detection", "penetration_testing", "security_monitoring"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Very security-thorough interview. I would have liked more depth on scaling and performance trade-offs, but the security thinking is impressive. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 68,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 5,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 5,
+      "scalability": 5,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional security depth — encryption, key rotation, audit logging, malware scanning",
+      "Every component designed with security-first thinking",
+      "Strong understanding of authentication, authorization, and compliance considerations"
+    ],
+    "weaknesses": [
+      "Scaling discussion was shallow — only addressed when prompted by interviewer",
+      "Capacity estimation done late and only at surface level",
+      "Caching strategy was minimal — only briefly mentioned Redis for recent messages"
+    ]
+  }
+}

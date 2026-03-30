@@ -1,0 +1,130 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "staff",
+    "candidate_profile": "index-corruption",
+    "total_exchanges": 22,
+    "generation_id": "seed_370"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a web search engine. I want to focus on a disaster scenario: index corruption. But first, walk me through the indexing pipeline at a high level.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "indexing_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The indexing pipeline has several stages. Crawlers fetch web pages and put raw HTML into a message queue. The parser stage extracts text, metadata, and links. The tokenizer processes the text into terms — lowercasing, stemming, removing stop words. The index builder creates an inverted index: for each term, it stores a posting list of document IDs and positions. This inverted index is partitioned into shards — each shard covers a subset of the document space. Shards are replicated for redundancy and distributed across a cluster. Finally, the query serving layer routes search queries to the appropriate shards, merges results, and ranks them.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["inverted_index", "posting_list", "sharding", "crawling_pipeline", "tokenization"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now the scenario: a bug in your tokenizer — introduced 6 hours ago — has been corrupting posting lists. Instead of correct document IDs, it's writing garbage data. 10% of your index shards have been affected. You discover this when users report bizarre search results. Walk me through your response.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "index_corruption" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, first things first: stop the bleeding. Immediately halt the indexing pipeline to prevent further corruption. Roll back the tokenizer to the last known good version. Now we need to assess the damage. The bug has been active for 6 hours, so any documents indexed in that window on affected shards have corrupt posting lists. We need to identify exactly which shards and which documents are affected.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["incident_response", "rollback", "damage_assessment"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you identify which shards are corrupt? You said 10% — but how do you know which 10%?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "corruption_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several approaches. First, check which indexer workers processed documents during the 6-hour window. Our pipeline should log which shard each document was written to. Cross-reference the faulty tokenizer deployment with the indexer logs to identify affected shards. Second, checksums. Each shard segment should have a checksum computed before the bug was deployed. We can run a verification pass comparing current shard checksums against known-good checksums from our last verified state. Third, run a consistency check: for a sample of documents on each shard, fetch the document, re-tokenize with the correct tokenizer, and compare the expected posting list entries with what's actually in the index. If they differ, the shard is corrupt.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["corruption_detection", "checksums", "audit_logs", "consistency_verification"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now you know which shards are bad. What do you do while you fix them? Users are still searching.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "degraded_serving" }
+    },
+    {
+      "role": "candidate",
+      "content": "We need to serve degraded but correct results rather than corrupt results. Option one: take the corrupt shards out of the serving path entirely. If 10% of shards are down, users get results from 90% of the index. Search quality degrades — some relevant documents won't appear — but at least the results are correct. The query router marks those shards as unhealthy and skips them. Option two: if we have replicas, check whether the replicas are also corrupt. If the corruption only affected primary shards and replicas haven't been updated yet, promote the clean replicas and serve from them. Option three: fall back to a stale but known-good snapshot of the corrupt shards — if we have point-in-time snapshots from before the bug.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["degraded_serving", "shard_exclusion", "replica_promotion", "snapshot_rollback"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's say the replicas are also corrupt because replication happened within the 6-hour window. And your last snapshot was 24 hours ago. What now?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "recovery_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Then we have two options for recovery. First, restore from the 24-hour-old snapshot and accept that 24 hours of newly indexed documents are missing from those shards until we rebuild. Those 10% of shards will serve stale data. Second, do a full rebuild of the affected shards from the raw document store. We have all the original documents in our document store — we re-run the corrected indexing pipeline for only the documents assigned to the affected shards. The question is speed. If a full shard rebuild takes, say, 4 hours, that's our recovery time. I'd do both: immediately restore the 24-hour snapshot for quick partial recovery, then rebuild from scratch in the background. Once the rebuild is done, hot-swap the rebuilt shards in.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["snapshot_restore", "full_rebuild", "parallel_recovery", "hot_swap"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "During the rebuild, you're re-indexing millions of documents for those shards. How do you make sure the rebuild doesn't affect serving performance?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "rebuild_isolation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Build the new index offline on separate infrastructure. Don't rebuild in-place — that would compete with query serving for CPU, memory, and I/O. I'd spin up a separate indexing cluster specifically for the rebuild. It reads documents from the document store, processes them through the corrected pipeline, and writes new shard files to a staging area. Once a shard is fully rebuilt and verified with checksums, we do an atomic swap: point the serving tier to the new shard files and drop the old ones. The serving tier sees no disruption — one moment it's serving from the snapshot, the next from the fresh rebuild. Zero impact on query latency during the rebuild process.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["offline_rebuild", "infrastructure_isolation", "atomic_swap", "zero_downtime"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you verify the rebuilt shards are correct before swapping them in? You don't want to swap in a different kind of corruption.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "rebuild_verification" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multi-level verification. Level 1: structural integrity. The index files should pass format validation — no truncated posting lists, valid document IDs, correct term dictionary structure. This is a quick automated check. Level 2: statistical consistency. Compare the new shards against expected distributions. Term frequency distributions should follow Zipf's law. Document count per shard should match expectations. If a shard suddenly has 10x more postings for a common term, something is wrong. Level 3: query-level validation. Run a golden set of queries — say 10,000 queries with known-correct results — against the new shards and compare the results to expected output. If recall and precision are within expected bounds, the shard is good. Level 4: canary deployment. Route 1% of live traffic to the new shard alongside the old one. Compare result quality metrics.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["structural_validation", "statistical_verification", "golden_set_testing", "canary_deployment"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great verification approach. Now, how do you prevent this from happening again? The root cause was a bad tokenizer deployment.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "prevention" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several preventive measures. First, the indexing pipeline should have inline quality gates. After tokenization, a validation step compares a sample of outputs against expected results before writing to the index. If the error rate exceeds a threshold, halt the pipeline automatically. Second, canary deployments for pipeline code. Roll the new tokenizer to one shard first, run the golden query set, and only proceed if quality metrics are unchanged. Third, maintain the ability to rebuild any shard from scratch within a bounded time — this means keeping the raw document store complete and the pipeline idempotent. Fourth, reduce the blast radius: deploy pipeline changes shard by shard, not globally. If we had deployed one shard at a time, we'd have caught the bug after corrupting 1% of the index instead of 10%.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["quality_gates", "canary_deployment", "pipeline_validation", "blast_radius_reduction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about continuous integrity monitoring? How do you detect corruption that happens slowly over time — not a sudden bug?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "continuous_monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Run a background integrity checker continuously. It samples random documents from each shard, re-indexes them from the raw document store, and compares the expected posting list entries with what's in the live index. If the mismatch rate exceeds a threshold — say 0.1% — alert. Also monitor search quality metrics continuously: click-through rate, result diversity, zero-result rate, and user-reported 'bad result' signals. Gradual corruption would show up as a slow degradation in these metrics. I'd also compute per-shard checksums on a rolling basis and compare against expected values. Any deviation triggers investigation. Think of it like data integrity checks in a database — you run DBCC CHECKDB periodically.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["continuous_monitoring", "background_verification", "search_quality_metrics", "checksum_validation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong interview. You demonstrated thorough incident response thinking and solid prevention strategies. I would have liked more discussion on the trade-off between recovery speed and data freshness, and the cost of maintaining redundant infrastructure for rebuilds. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 75,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 6,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 6,
+      "scalability": 8,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Excellent multi-level verification strategy for rebuilt index shards",
+      "Strong parallel recovery approach — restore snapshot immediately, rebuild in background",
+      "Good prevention strategy with canary deployments and quality gates in the pipeline"
+    ],
+    "weaknesses": [
+      "Didn't quantify rebuild time or infrastructure costs for offline rebuilds",
+      "Trade-off between recovery speed and data freshness was not explicitly discussed",
+      "Didn't address how to communicate degraded search quality to users during recovery"
+    ]
+  }
+}

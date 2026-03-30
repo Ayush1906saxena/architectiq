@@ -1,0 +1,140 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_479"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a real-time messaging system — think WhatsApp or Slack. Users send 1:1 and group messages. I expect you to drive this conversation.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll start by framing the problem and clarifying requirements, then move into architecture. Key questions: what's our scale — DAU, concurrent connections, messages per second? What's the max group size? Do we need end-to-end encryption? What's our latency target for message delivery? And do we need features like message editing, reactions, threads, and file sharing?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["requirements_framing", "scale", "concurrency", "encryption", "latency", "feature_scope"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "200M DAU, 20M concurrent connections, 500K messages per second. Max group size 1000. E2E encryption required. Sub-200ms delivery when both online. Text messages and file sharing — skip editing and reactions for now.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do capacity math. 500K messages per second at roughly 200 bytes average text = 100MB/s of message throughput. For storage: 500K × 86,400 seconds × 200 bytes × 365 days = about 3PB per year of message data. With replication, call it 10PB. That's significant but manageable with modern object storage or distributed databases. For connections: 20M concurrent WebSockets. Each connection uses roughly 10KB of memory for buffers. That's 200GB of connection state. Across 200 WebSocket servers (100K connections each), that's 1GB per server — comfortable. Network: at peak, each server handles about 2,500 messages per second of delivery fan-out.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "message_throughput", "storage_calculation", "connection_memory", "server_sizing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thorough math. Walk me through the architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Five core services. Gateway Service: manages WebSocket connections. Stateful — each instance maintains a set of active connections. Uses a connection registry (Redis) to map user_id → gateway_instance. Message Service: receives messages from senders, persists them, and routes to recipients. This is the central orchestrator. Sequence Service: assigns globally-ordered sequence numbers per conversation. Critical for message ordering guarantees. Storage Service: durable message storage. I'd use Cassandra with partition key = conversation_id and clustering key = sequence_number. This gives us ordered reads per conversation with high write throughput. Presence Service: tracks who's online/offline and their last-seen timestamp. Lossy and eventually consistent — fine for presence. The message flow: sender's gateway receives the message over WebSocket → forwards to Message Service → Message Service calls Sequence Service to get the next sequence number → writes to Cassandra → looks up recipient's gateway in the connection registry → routes message to recipient's gateway → gateway pushes to recipient's WebSocket. If recipient is offline, the message sits in Cassandra and gets delivered on next connect via a sync protocol.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gateway_service", "message_service", "sequence_service", "storage_service", "presence_service", "cassandra", "connection_registry", "message_routing", "offline_delivery"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You introduced a Sequence Service. Why not just use the Cassandra write timestamp for ordering?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "message_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Timestamps are unreliable for ordering because of clock skew between servers. If two messages from different senders arrive at different Message Service instances, their wall clocks might disagree on which came first. The Sequence Service is a centralized counter per conversation that provides a strict total order. The trade-off: it's a potential bottleneck and SPOF. To mitigate the bottleneck, the Sequence Service can pre-allocate ranges — each Message Service instance gets a batch of 1000 sequence numbers and increments locally until exhausted. This reduces calls to the Sequence Service by 1000x. For SPOF: the Sequence Service itself is backed by a Raft consensus group for durability and automatic failover. At 500K messages per second across millions of conversations, the Sequence Service handles roughly 500 range allocations per second — trivial for a Raft cluster.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["clock_skew", "total_ordering", "centralized_counter", "range_allocation", "raft_consensus", "spof_mitigation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong solution. How does E2E encryption work in this architecture?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "e2e_encryption" }
+    },
+    {
+      "role": "candidate",
+      "content": "E2E encryption means the server never sees plaintext messages. Only the sender and recipient have the keys. For 1:1 chats: use the Signal Protocol. Each user generates an identity key pair and a set of pre-keys (one-time-use public keys). When Alice wants to message Bob, she fetches Bob's pre-key bundle from the server, performs an X3DH key agreement to establish a shared secret, then uses the Double Ratchet algorithm to derive per-message encryption keys. Every message is encrypted with a unique key, and the ratchet advances after each message for forward secrecy. The server only stores and forwards ciphertext — it cannot decrypt. For groups: this is harder. The simple approach is sender keys — the sender distributes a symmetric key to all group members via 1:1 encrypted channels. Each message is encrypted once with the sender key. When a member leaves, the sender must rotate the key and distribute the new one to remaining members. At group size 1000, that's 999 1:1 key distributions on every membership change. The more scalable approach is MLS (Messaging Layer Security), which uses a tree-based key agreement — member addition or removal is O(log N) key operations instead of O(N).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["signal_protocol", "x3dh", "double_ratchet", "forward_secrecy", "sender_keys", "mls", "tree_based_key_agreement", "key_rotation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent depth on encryption. How does the sync protocol work when a user comes back online after being offline for 12 hours?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "offline_sync" }
+    },
+    {
+      "role": "candidate",
+      "content": "The client maintains a local database of messages per conversation, with the last-known sequence number for each. On reconnect, it sends a sync request: 'here are my conversations and my last sequence number for each.' The server responds with all messages newer than those sequence numbers. For efficiency, we batch: the server sends a summary first — 'you have 47 new messages across 12 conversations' — and the client can prioritize which conversations to sync first (probably the ones the user is likely to open). For users with thousands of unread messages, we paginate — send the most recent 50 per conversation first, and fetch older ones on demand as the user scrolls. File attachments are handled lazily — the message includes a file reference (URL + decryption key), and the actual file is downloaded only when the user views it. We also maintain a per-user 'inbox' — a lightweight queue of conversation IDs that have unread messages. This is cheaper to query than scanning all conversations.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["incremental_sync", "sequence_based_sync", "batch_summary", "pagination", "lazy_file_loading", "inbox_queue"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the presence system at 200M DAU?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "presence_system" }
+    },
+    {
+      "role": "candidate",
+      "content": "Presence is deceptively expensive. If every user subscribes to the online status of 200 contacts, and status changes happen frequently (open app, close app, switch networks), the fan-out is massive — a single user going online triggers 200 notifications. My approach: lazy presence. Don't push presence updates proactively. When a user opens a conversation with Bob, the client queries Bob's presence on demand. Cache the result for 30 seconds. This converts a push problem (fan-out) into a pull problem (point query). For the 'last seen' timestamp — update it on every message send or app heartbeat. Store it in Redis with a TTL. If the key exists and was updated within 60 seconds, the user is 'online.' If it exists but is older, show 'last seen X minutes ago.' If the key is expired, the user has been offline for a while. For typing indicators: purely ephemeral, fire-and-forget over WebSocket. Don't persist, don't retry. If a typing indicator is lost, the UX impact is negligible.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lazy_presence", "pull_vs_push", "presence_caching", "last_seen", "redis_ttl", "typing_indicators", "ephemeral_signals"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a gateway server crashes with 100K active connections?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "gateway_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "100K users instantly disconnect. Three things happen: clients detect the broken connection and reconnect automatically — the load balancer routes them to healthy gateways. The connection registry entries for those users become stale. We solve this with TTLs — gateway heartbeats refresh the registry entry every 10 seconds. After 30 seconds without a heartbeat, entries auto-expire. New connections register fresh entries. Messages sent during the window where the user has no active connection are not lost — they're persisted in Cassandra and delivered via the sync protocol on reconnect. The blast radius is 100K/20M = 0.5% of users experience a 5-10 second interruption. For the system overall, the remaining 199 gateways absorb the reconnections. We should over-provision by 10-15% to handle this gracefully. Monitoring: alert on sudden connection drops per gateway, and track reconnection success rate.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["automatic_reconnection", "stale_registry_cleanup", "ttl_heartbeat", "message_durability", "blast_radius", "over_provisioning", "monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about a full datacenter failure? Your primary region goes down.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "regional_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "We need multi-region architecture. Active-passive is simpler: one primary region handles all writes, a secondary region has read replicas of Cassandra and a warm standby of all services. On primary failure, DNS failover redirects traffic to the secondary. RTO is 2-5 minutes. RPO depends on replication lag — with async replication, we might lose the last few seconds of messages. Active-active is harder but better: both regions accept writes. Cassandra supports multi-datacenter replication natively with tunable consistency. The challenge is the Sequence Service — we can't have two regions independently assigning sequence numbers for the same conversation. Solutions: partition conversations by home region (Alice's conversations are mastered in US-East, Bob's in EU-West), or use a globally-ordered ID scheme like hybrid logical clocks. I'd start with active-passive for simplicity and migrate to active-active once we have strong operational maturity.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["active_passive", "active_active", "dns_failover", "rto_rpo", "cassandra_multi_dc", "sequence_conflict", "hybrid_logical_clocks", "phased_approach"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Push notifications for offline users via APNs and FCM — critical for engagement. A media pipeline for file sharing: files upload to S3, get a reference in the message, and are E2E encrypted client-side before upload so we never see plaintext files. Abuse prevention: rate limiting, spam detection, and content scanning — though with E2E encryption, server-side content scanning is impossible, which is the fundamental tension between privacy and safety that regulators are pushing on. And message search — since messages are E2E encrypted, search must happen client-side on the local database. We can't build server-side search over encrypted content without compromising the encryption model.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["push_notifications", "media_pipeline", "e2e_file_encryption", "abuse_prevention", "privacy_safety_tension", "client_side_search"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. You drove the conversation, showed deep understanding of distributed messaging and cryptographic protocols, and handled failure scenarios rigorously. Strong hire.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 82,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Outstanding capacity math — calculated message throughput, storage, connection memory, and server sizing upfront",
+      "Deep E2E encryption knowledge — Signal Protocol, X3DH, Double Ratchet, sender keys, and MLS with complexity analysis",
+      "Excellent failure handling — gateway crash blast radius analysis and multi-region trade-offs with phased approach",
+      "Smart presence design — lazy pull-based approach avoids the fan-out explosion"
+    ],
+    "weaknesses": [
+      "API design was implicit — didn't define REST/gRPC endpoints or message format schema",
+      "Could have discussed message delivery guarantees more formally — at-most-once, at-least-once, exactly-once at the application level"
+    ]
+  }
+}

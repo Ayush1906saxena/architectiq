@@ -1,0 +1,179 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_112"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed key-value store. Something that could serve as infrastructure for other services. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several questions. What consistency model do we need — strong consistency or eventual? What's the expected data size — total and per key-value pair? What are the latency requirements for reads and writes? Do we need transactions or just simple get/put? And what's more important — availability or consistency during network partitions?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistency_model", "cap_theorem", "latency", "transactions"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's say you get to choose the consistency model — what would you pick and why? Assume 10TB of data, key-value pairs up to 1MB, sub-10ms reads. No transactions needed.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "consistency_model" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd design a CP system — strong consistency. Most distributed KV stores like DynamoDB and Cassandra are AP, prioritizing availability. But I think strong consistency is undervalued. When you offer eventual consistency, every downstream service needs to handle stale reads, implement retry logic, and reason about race conditions. That complexity proliferates across every team that uses your store. With a CP system, the contract is simple: if a write succeeds, all subsequent reads see it. The complexity is contained within the storage layer rather than spread across consumers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cap_theorem", "strong_consistency", "cp_system", "api_contract"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Most KV stores are AP. Why CP? What do you give up?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "cap_theorem" }
+    },
+    {
+      "role": "candidate",
+      "content": "We give up availability during network partitions. If a majority of replicas for a key's partition are unreachable, writes — and linearizable reads — will fail. That's the CAP trade-off. But in practice, within a single data center or a well-connected multi-AZ deployment, partitions are rare and brief. Most 'unavailability' in AP systems is actually due to capacity issues, not partitions. And when an AP system does have a partition, you get silent data loss or conflicts that are much harder to debug than an explicit error from a CP system. I'd rather have the system say 'I can't serve this right now' than silently return stale data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cap_theorem", "network_partitions", "availability", "data_conflicts"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Compelling argument. How do you implement strong consistency in a distributed system?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "consensus_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use the Raft consensus algorithm. Each partition — or shard — of the key space is managed by a Raft group of 3 or 5 replicas. One replica is the leader, and all writes go through the leader, which replicates them to a majority before acknowledging. Reads can also go through the leader to ensure linearizability. Raft is my choice over Paxos because it's more understandable and implementable — same theoretical guarantees, better engineering properties. There's a reason etcd, CockroachDB, and TiKV all chose Raft.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["raft_consensus", "leader_based_replication", "linearizability", "quorum"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the full architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three layers. First, a Routing Layer — stateless proxy servers that accept client requests. They maintain a partition map that tells them which Raft group handles which key range. They forward the request to the correct Raft leader. Second, the Storage Layer — nodes that participate in Raft groups. Each node might be part of multiple Raft groups for different partitions. Each partition stores its data in an embedded storage engine — I'd use RocksDB (LSM-tree based) for the underlying on-disk storage. Third, a Metadata Service — a small, highly available cluster (itself running Raft) that manages the partition map, tracks which nodes are alive, and coordinates shard splits and rebalancing. Think of it like etcd for the cluster's configuration.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["routing_layer", "storage_layer", "metadata_service", "raft_consensus", "rocksdb", "partition_map"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you partition the key space?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use range-based partitioning rather than hash-based. The key space is divided into contiguous ranges, each managed by one Raft group. The advantage of range partitioning: it supports efficient range scans — 'give me all keys from user:1000 to user:2000'. Hash partitioning destroys key locality. The disadvantage is potential hot spots — if one range gets more traffic, it becomes overloaded. To mitigate, the metadata service monitors partition sizes and throughput. When a partition gets too large or too hot, it splits into two, and the metadata service reassigns the new partitions. TiKV and CockroachDB use this exact approach.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["range_partitioning", "hash_partitioning", "partition_splitting", "hot_spots"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the read path in detail. How do you achieve sub-10ms reads with strong consistency?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "read_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "Naive linearizable reads go through the Raft leader, which must confirm it's still the leader — a round of heartbeats — before responding. That adds latency. Two optimizations. First, lease-based reads: the leader holds a time-based lease. As long as the lease hasn't expired, the leader knows no other leader has been elected, so it can serve reads locally without a consensus round. This gets reads down to a single local RocksDB lookup — sub-millisecond. Second, follower reads with a read index: the follower asks the leader 'what's the latest committed index?', waits until its local log catches up to that index, then serves the read locally. This spreads read load across replicas while still providing linearizability.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lease_based_reads", "read_index", "follower_reads", "linearizability", "rocksdb"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the write path? Walk me through a put operation.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "write_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "Client sends PUT(key, value) to the routing layer. The router looks up the partition for that key and forwards to the Raft leader for that partition. The leader appends the write to its local Raft log, then sends AppendEntries RPCs to all followers in parallel. Once a majority (2 out of 3, or 3 out of 5) acknowledge, the entry is committed. The leader applies the write to RocksDB and responds to the client. Followers apply the write to their RocksDB instances asynchronously after learning of the commit. Total latency: one round-trip to followers plus local RocksDB write — typically 2-5ms within a data center.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["raft_consensus", "write_path", "quorum", "rocksdb", "latency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a node fails? Say the leader of a Raft group crashes.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "leader_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Raft handles this natively. Followers have an election timeout — typically 150-300ms randomized. When a follower doesn't receive a heartbeat within the timeout, it becomes a candidate and starts an election. It votes for itself and requests votes from other replicas. If it gets a majority, it becomes the new leader. The new leader has all committed entries (Raft guarantees this). In-flight uncommitted writes that the old leader hadn't replicated to a majority are lost — the client gets a timeout and should retry. The total unavailability window for that partition is the election timeout plus a few hundred milliseconds for the election itself — about 500ms to 1 second. Other partitions are unaffected.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leader_election", "raft_consensus", "election_timeout", "partial_failure"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the capacity side — 10TB of data across how many nodes?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "With 3x replication, 10TB of data becomes 30TB of raw storage. If each node has 1TB of SSD, we need at least 30 nodes for storage alone. But we also need to consider throughput. Let's say we target 100K operations per second. Each Raft leader handles maybe 10K writes per second (limited by disk fsync and replication latency). With range partitioning, we'd have maybe 100-200 partitions. Each node hosts 3-7 Raft groups as a leader and more as followers. I'd start with 50 nodes — 30TB storage with room to grow, and enough Raft leaders distributed across nodes to handle the throughput. The metadata service rebalances Raft groups across nodes to distribute load evenly.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "replication_factor", "storage_estimation", "throughput_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you add nodes and rebalance without downtime?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "rebalancing" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a new node joins, the metadata service identifies overloaded nodes and selects Raft groups to transfer. The transfer uses Raft's membership change mechanism — add the new node as a learner (non-voting member) to a Raft group. The leader sends a snapshot of the partition's data to the learner, then streams log entries to catch it up. Once caught up, the learner is promoted to a full voter, and one of the old replicas is removed. This is a live migration — the Raft group continues serving reads and writes throughout. The metadata service throttles transfers to avoid overwhelming the network — maybe 2-3 concurrent transfers per node.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rebalancing", "raft_membership_change", "live_migration", "snapshot_transfer"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about compaction and garbage collection in RocksDB?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "storage_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "RocksDB uses LSM-trees, so compaction is essential. Writes go to a memtable, then flush to sorted string table (SST) files on disk. Background compaction merges SST files, removing deleted keys and old versions. For our KV store, I'd configure leveled compaction — it has better read amplification than size-tiered compaction at the cost of more write amplification, which fits our 'sub-10ms reads' requirement. We'd need to tune the compaction rate to keep up with write throughput — if compaction falls behind, read latency spikes because reads must check more SST files. I'd monitor the LSM tree depth and SST file count as key health metrics.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lsm_tree", "compaction", "leveled_compaction", "read_amplification", "write_amplification"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last topic — how would you expose this to clients? What's the client library API?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "The client library abstracts away the distributed nature. API: get(key) -> value, put(key, value) -> success/error, delete(key) -> success/error, and scan(start_key, end_key, limit) -> list of key-value pairs. Internally, the client caches the partition map from the metadata service. On a request, it resolves the key to a partition, looks up the current leader, and sends the RPC directly — no intermediate routing layer needed for performance-critical paths. If the leader has changed, the request returns a 'not leader' error with a hint of the new leader, and the client updates its cache and retries transparently. This keeps the routing layer out of the hot path.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "client_library", "partition_map_caching", "leader_redirect"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's wrap up. What would you add given more time?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three things. First, multi-version concurrency control — storing multiple versions of a value with timestamps enables snapshot reads and lays the groundwork for distributed transactions. Second, cross-region replication using Raft learners in remote data centers for disaster recovery — reads from remote replicas with bounded staleness. Third, a watch API — clients can subscribe to changes on a key, useful for configuration management and leader election use cases. This is what makes etcd so powerful.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["mvcc", "cross_region_replication", "watch_api", "bounded_staleness"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent design. The CP choice was bold but well-defended, and the Raft implementation details were very thorough. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 76,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 8,
+      "api_design": 8,
+      "database_design": 9,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Strong, well-justified choice of CP over AP with clear reasoning about complexity allocation",
+      "Deep Raft consensus knowledge — lease reads, membership changes, election mechanics",
+      "Excellent storage engine discussion including compaction tuning and RocksDB internals"
+    ],
+    "weaknesses": [
+      "Caching layer was not discussed — no mention of read-through caches or hot key handling",
+      "Could have discussed multi-tenancy, rate limiting, or access control for the KV store"
+    ]
+  }
+}

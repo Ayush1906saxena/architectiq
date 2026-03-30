@@ -1,0 +1,169 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_001"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service — think bit.ly or tinyurl. The system needs to handle a large scale. Before we start designing, what questions do you have about the requirements?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. A few questions: What's our expected scale — how many new URLs per day and what's the read-to-write ratio? Do we need to support custom short URLs or just auto-generated ones? And what's our latency target for redirects?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "read_write_ratio", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good questions. Assume 100 million new URLs per day, with a 100:1 read-to-write ratio. We need both custom aliases and auto-generated codes. Redirect latency should be under 50 milliseconds at p99. Anything else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "What about URL expiration — do short URLs live forever or should they have a configurable TTL? And do we need analytics — click counts, geographic data, referrer tracking?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["url_expiration", "analytics"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes to both. Configurable TTL with a default of 5 years. Basic analytics — click count and timestamp. Let's start designing.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do a quick capacity estimation first. 100M URLs per day is about 1,150 writes per second. With a 100:1 read ratio, that's 115,000 reads per second. For storage — if each URL record is roughly 500 bytes, that's 50GB per day, about 91TB over 5 years. We'll definitely need to plan for that scale.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid math. How about the cache sizing? If we want to cache the hot URLs, how much memory would that take?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "redis_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good point. Following the 80/20 rule — 20% of URLs get 80% of traffic. 20% of 100M daily URLs is 20M URLs. At 500 bytes each, that's about 10GB of cache memory per day's hot set. With a Redis cluster, that's very manageable. I'd use cache-aside pattern with an LRU eviction policy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "cache_eviction", "cache_aside"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Walk me through the high-level architecture — how does a request flow from the user to the redirect?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Two main flows. For URL creation: the client sends a POST to /api/shorten with the long URL. The request hits a load balancer, which routes to one of our application servers. The app server generates a unique short code using base62 encoding of an auto-incrementing ID, stores the mapping in the database, and returns the short URL. For redirect: GET /abc123 hits the load balancer, app server checks the Redis cache first — if it's a cache hit, we redirect immediately with a 301. On cache miss, we query the database, populate the cache, then redirect.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "load_balancing", "base62_encoding", "redis_caching", "database_choice"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You said 301 redirect. Why 301 and not 302? What's the trade-off?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good catch — there's actually a meaningful trade-off here. 301 is a permanent redirect, so browsers will cache it and go directly to the destination next time without hitting our servers. That reduces our load significantly. But the downside is we lose analytics data on repeat visits. 302 is temporary, so every visit comes through us — better for analytics but more server load. I'd default to 302 for URLs with analytics enabled and offer 301 as an option for users who just want fast redirects.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice trade-off analysis. Let's talk about your encoding strategy. You mentioned base62 with an auto-incrementing ID. How do you handle the ID generation across multiple servers?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "base62_encoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, a single auto-incrementing counter is a bottleneck and a single point of failure. A few options: we could use a distributed ID generator like Twitter's Snowflake, which gives us 64-bit IDs combining timestamp, machine ID, and sequence number. Or we could pre-allocate ID ranges — each server gets a batch of, say, 10,000 IDs from a central service, and generates locally until they run out. I'd go with the range-based approach because it's simpler, and the central service only needs to be called once per 10K URLs, not per-request.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["base62_encoding", "snowflake_id"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "With sequential IDs, anyone can guess the next short URL by incrementing. Is that a security concern?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "base62_encoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes, that's a valid concern. If URLs contain sensitive information, sequential codes make them enumerable. We could mitigate this by applying a bijective function — essentially scrambling the ID before base62 encoding. Something like a Feistel cipher on the integer. The mapping is still 1:1 so no collisions, but the output looks random. Alternatively, we could use a random 7-character code and check for collisions, but that requires a database lookup on every creation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["collision_handling", "base62_encoding"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's talk about the database. What would you use and why?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "For this use case, I'd go with PostgreSQL as the primary datastore. The access pattern is simple — point lookups by short_code for reads, and single-row inserts for writes. PostgreSQL handles this well with a B-tree index on short_code. At 1,150 writes per second, a single Postgres instance is fine. For 115K reads, I'd add 2-3 read replicas with async replication — the slight replication lag is acceptable since we have the Redis cache handling most reads anyway.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "read_replicas", "database_schema"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "After 5 years, you'll have 180 billion rows. How does PostgreSQL handle a table that size?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "It doesn't — not well, at least. We'd need to shard. I'd use hash-based sharding on the short_code. With 64 shards initially, each shard holds about 2.8 billion rows over 5 years — manageable for Postgres. The application layer or a proxy like Vitess can route queries based on the hash prefix. For future growth, consistent hashing lets us add shards without rehashing everything — only a fraction of data moves.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_strategy", "consistent_hashing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's zoom out to failure scenarios. Your primary Redis cache goes down. What happens?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If Redis goes down, all 115K reads per second hit the database directly. Even with read replicas, that's a thundering herd scenario — the database likely can't handle the full read load immediately. My mitigation: first, run Redis as a cluster with replicas, so a single node failure doesn't take out the whole cache. Second, implement a circuit breaker — if cache miss rate spikes above 50%, start returning stale data from a local in-process cache (even a small LRU of recent lookups helps). Third, the database read replicas provide some buffer. The system degrades but doesn't crash.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_failure", "single_point_of_failure", "circuit_breaker"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong answer. What about analytics — how do you track clicks without slowing down the redirect path?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "analytics_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "Analytics should be completely async — never on the redirect hot path. When a redirect happens, we fire an event to Kafka with the short_code, timestamp, user agent, and IP. A separate consumer reads from Kafka, aggregates the data, and writes to an analytics store — something like ClickHouse or even a simple time-series table. The redirect returns immediately after the cache/DB lookup. If Kafka is down, we drop the analytics event — redirects still work. We can also batch the Kafka writes for efficiency.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["analytics_pipeline", "kafka", "async"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running low on time. Anything you'd want to add to this design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things I'd add in a production system: rate limiting on the creation endpoint to prevent abuse, a CDN layer for the most popular redirects to serve them at the edge without hitting our servers at all, monitoring and alerting on cache hit rates and redirect latency, and a cleanup job that expires old URLs based on TTL. I'd also consider a warm-up process for the cache when deploying new cache nodes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "cdn_redirect", "monitoring"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great interview. You covered a lot of ground with solid depth. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 82,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 9,
+      "api_design": 8,
+      "database_design": 9,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Excellent capacity estimation — did the math upfront without prompting",
+      "Strong trade-off analysis on 301 vs 302 redirects",
+      "Proactively addressed failure scenarios with multi-layer mitigation"
+    ],
+    "weaknesses": [
+      "Could have discussed monitoring and observability earlier",
+      "Didn't mention geographic distribution or multi-region deployment"
+    ]
+  }
+}

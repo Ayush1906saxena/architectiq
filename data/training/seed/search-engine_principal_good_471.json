@@ -1,0 +1,131 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "principal",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_471"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's discuss designing a web search engine at scale. As a principal, I'm interested in how you'd approach architecture across teams, cost trade-offs, and the migration from traditional to ML-driven ranking. Where do you start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Search has three major subsystems that map to team boundaries. Crawling and indexing — getting web pages into a queryable format. Serving — handling user queries with low latency. And ranking quality — the ML and algorithms that determine what results to show. The most impactful investment is ranking quality, because a 1% improvement in relevance directly impacts user retention and ad revenue. But serving infrastructure is the biggest cost center, and crawling determines the freshness ceiling.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["subsystem_decomposition", "team_boundaries", "ranking_quality_leverage", "cost_centers"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good framing. Let's say 10 billion indexed pages, 100K queries per second. Walk me through the serving architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "serving_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "The serving path is the latency-critical path. A query comes in, goes through query understanding (spell correction, intent detection, query expansion), then to the index servers for candidate retrieval, then through ranking stages, and finally result assembly. The index is sharded by document — 10 billion pages across maybe 10,000 shards, each holding 1 million documents. Each shard is replicated 3x for availability and load distribution. A query hits a scatter-gather layer that fans out to all shards, each returns its top-K candidates (say top 100), and the scatter-gather layer merges results. This merge step is where the ranking model takes over — re-ranking the top 1000 aggregate candidates using a heavier ML model.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["query_understanding", "spell_correction", "scatter_gather", "document_sharding", "multi_stage_ranking", "replication"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10,000 shards × 3 replicas = 30,000 index servers. At 100K QPS, each shard handles 100K queries per second, which each replica shares. That's a massive fleet. How do you think about the cost?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "cost_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "It is massive. Cost optimization at this scale is about reducing the work per query. A few strategies. First, early termination — once the index shard has found enough high-quality candidates, stop scanning. Not every query needs to evaluate every document in the shard. Second, tiered index — maintain a 'hot' index of the top 1 billion highest-quality pages in memory, and a 'cold' index on disk for the long tail. Most queries are well-served by the hot tier. Only queries that don't find enough candidates in the hot tier fall through to the cold tier. This dramatically reduces the number of shards that participate in most queries. Third, query routing — common queries like 'weather' or 'facebook login' can be served from a cached result without touching the index at all. Maybe 10-15% of queries are cache hits.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["early_termination", "tiered_index", "hot_cold_index", "query_caching", "cost_reduction"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The tiered index is interesting. How do you decide which pages go in the hot tier?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "index_tiering" }
+    },
+    {
+      "role": "candidate",
+      "content": "A combination of page quality signals. PageRank gives a baseline importance score. Query-document click data — pages that get clicked from search results frequently are clearly valuable. Freshness — recent pages from authoritative domains (news sites, government sites) should be in the hot tier. And domain authority — all pages from top-1000 domains (Wikipedia, Stack Overflow, major news outlets) go in the hot tier regardless of individual page score. The hot tier is rebuilt daily — we run a batch job that scores all 10 billion pages, selects the top 1 billion, and rebuilds the in-memory index. The cold tier covers the remaining 9 billion for comprehensive coverage.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["page_quality_signals", "pagerank", "click_data", "freshness", "domain_authority", "daily_rebuild"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the ranking evolution. You mentioned ML-driven ranking. How do you migrate from a hand-tuned ranking system to ML?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ranking_migration" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a multi-year journey. Phase 1 — feature extraction: take the hand-tuned signals (TF-IDF, PageRank, field matches, freshness) and formalize them as features. This is mostly engineering — ensuring features are computed consistently between training and serving. Phase 2 — learned ranking: train a gradient-boosted tree model (like LambdaMART) on click data to learn the optimal weighting of these features. The model replaces the hand-tuned scoring formula. This typically gives a 10-15% NDCG improvement because the model finds non-obvious feature interactions that humans miss. Phase 3 — neural ranking: replace or augment the tree model with a transformer-based model that can understand query-document semantics. This is where 'does this page answer the user's question?' becomes possible, not just 'does this page contain the user's keywords.'",
+      "annotation": { "quality": "good", "concepts_mentioned": ["feature_extraction", "lambdamart", "click_data_training", "ndcg_improvement", "neural_ranking", "transformer"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Running BERT-scale models at serving time on thousands of candidate documents per query sounds expensive. How do you manage the compute cost?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "ml_serving_cost" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multi-stage funnel. Stage 1 — retrieval: cheap signals (BM25, lightweight embedding similarity) retrieve 10K candidates per query from the index. Cost: negligible per document. Stage 2 — first-pass ranking: a fast model (small neural net or gradient-boosted tree) on features that are cheap to compute. Scores 10K candidates, keeps top 500. Stage 3 — heavy ranking: the full transformer model on the top 500 candidates. This is GPU-intensive. Stage 4 — re-ranking with business logic: apply diversity rules, freshness boosts, ad placement, and policy filters on the top 100. Each stage is 10-100x more expensive per document but sees 10-20x fewer documents. The total compute cost is dominated by Stage 3. At 100K QPS with 500 documents per query, that's 50M transformer inferences per second. We'd need a substantial GPU fleet for this — maybe 1000+ GPUs.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["multi_stage_funnel", "retrieval", "lightweight_ranking", "heavy_ranking", "gpu_fleet", "compute_estimation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you ensure a ranking change doesn't accidentally degrade search quality? What's the safety process?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "ranking_safety" }
+    },
+    {
+      "role": "candidate",
+      "content": "Four layers of safety. Offline evaluation: every model change is tested against a golden set of 100K+ queries with human-judged relevance labels. NDCG must improve or stay neutral. Shadow scoring: the new model runs alongside production, scoring the same queries, but its results aren't shown. We compare the outputs for distribution shifts. Interleaving experiment: the most rigorous test — for each query, mix results from the old and new model and track which results users click. This directly measures user preference. Guardrail metrics: even during a live experiment, if core metrics degrade (abandonment rate up, pogo-sticking up, revenue down), the experiment auto-stops. The full pipeline from 'I have a new model' to 'it's serving 100% of traffic' takes 2-4 weeks.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["offline_evaluation", "golden_set", "shadow_scoring", "interleaving_experiment", "guardrail_metrics", "auto_stop"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you organize the engineering teams around this system?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "team_structure" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd structure around the three subsystems plus cross-cutting concerns. Crawl and Index team (25 engineers): owns the crawler fleet, content processing, index build pipeline, and freshness. Their success metric is index coverage and freshness — are we indexing what matters, and how quickly? Search Quality team (30 engineers + 15 ML researchers): the highest-leverage team. Owns ranking models, relevance evaluation, the experimentation platform, and query understanding. Their metric is NDCG and user satisfaction. Serving Infrastructure team (20 engineers): owns the query serving path, scatter-gather, caching, latency optimization. Their metric is p99 latency and availability. Platform team (15 engineers): shared ML training infrastructure, feature store, model serving framework. Trust and Safety (10 engineers + policy analysts): content moderation in results, spam detection, compliance. I'd report directly to the CTO and have a dotted line to the CPO, because search quality decisions are product decisions.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["team_decomposition", "metric_ownership", "research_allocation", "reporting_structure"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The biggest strategic investment over the next 3 years is making the search engine understand intent, not just match keywords. That means semantic search via embeddings, answer generation via LLMs, and conversational search for complex queries. The company that gets this right first has a durable competitive advantage because the data flywheel — more users, more clicks, better ranking, more users — is extremely hard to replicate.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["semantic_search", "answer_generation", "conversational_search", "data_flywheel", "competitive_moat"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good strategic closing. Solid interview overall — strong on serving architecture and ranking pipeline, with room for more depth on compliance and cost modeling. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 6,
+      "communication": 8
+    },
+    "strengths": [
+      "Strong multi-stage ranking funnel with concrete numbers on candidate counts and GPU estimation",
+      "Good ranking safety process — shadow scoring and interleaving experiments show production ML experience",
+      "Clear team decomposition with metric-based ownership"
+    ],
+    "weaknesses": [
+      "No discussion of GDPR, right to be forgotten, or content regulation — expected at principal level",
+      "Cost modeling was directional but not quantified — didn't estimate total infrastructure cost or compare against cloud spend",
+      "Failure handling was absent — didn't discuss index corruption, serving degradation, or disaster recovery",
+      "Crawler architecture was glossed over — briefly mentioned but not designed"
+    ]
+  }
+}

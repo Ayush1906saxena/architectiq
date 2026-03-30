@@ -1,0 +1,140 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_161"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed key-value store. Think of something like DynamoDB or a simplified Redis that persists data. What clarifying questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several questions. What's the expected data size and throughput — total data volume, reads/sec, writes/sec? What's the value size range — small values like session data or large blobs? What consistency model do we need — strong or eventual? And should this be optimized for reads or writes?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_volume", "throughput", "value_size", "consistency_model", "read_write_optimization"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10TB total data, 100K writes/sec and 500K reads/sec. Values are 1KB-10KB. Eventual consistency is fine. The workload is write-heavy relative to typical KV stores. Let's go.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Write-heavy workload — that immediately points me toward an LSM tree-based storage engine. Traditional B-tree storage does random I/O on every write, which doesn't scale well at 100K writes/sec. An LSM tree converts random writes into sequential writes, which is dramatically faster on both SSDs and especially HDDs. Let me walk through the architecture from the write path up.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lsm_tree", "b_tree_comparison", "sequential_writes", "write_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Go ahead. Walk me through a write operation.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "write_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a write arrives: first, we append it to a Write-Ahead Log on disk. This is a sequential append, very fast — ensures durability in case of crash. Second, we insert the key-value pair into an in-memory data structure called the memtable — I'd use a red-black tree or skip list to maintain sorted order. Writes are served entirely from memory at this point, so they're fast. When the memtable reaches a threshold — say 64MB — it's frozen, a new empty memtable is created for incoming writes, and the frozen memtable is flushed to disk as an SSTable — a Sorted String Table. The SSTable is immutable once written: keys sorted, with an index block at the end for binary search. The corresponding WAL segment can be discarded after the flush.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["write_ahead_log", "memtable", "skip_list", "sstable", "flush_process", "sequential_io"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid. How does a read work with this structure?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "read_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "Reads check multiple layers. First, the active memtable — if the key is there, return it. Second, any frozen memtable that hasn't been flushed yet. Third, the SSTables on disk, starting from the most recent. For disk lookups, each SSTable has a sparse index loaded in memory — we binary search the index to find the data block, then read that block from disk. The problem is that as SSTables accumulate, reads get slower because we might check many files. Two optimizations: Bloom filters on each SSTable — before doing the disk read, check a probabilistic filter that tells us if the key is definitely NOT in that SSTable. This eliminates most unnecessary disk reads. Second, a block cache in memory for frequently accessed SSTable blocks.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_path", "memtable_check", "sstable_lookup", "sparse_index", "bloom_filter", "block_cache"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned SSTables accumulate over time. How do you manage that?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Compaction. Periodically, we merge multiple SSTables together, removing deleted keys (tombstones) and keeping only the latest version of each key. I'd use a leveled compaction strategy. SSTables are organized into levels. Level 0 contains the raw flushed memtables — they can have overlapping key ranges. Level 1 and beyond have non-overlapping key ranges within the same level. When level 0 has too many files, we merge them into level 1. When level N gets too large, we pick an SSTable from level N, find all overlapping SSTables in level N+1, merge them, and write the result back to level N+1. The benefit of leveled compaction is predictable read performance — at most one SSTable per level needs to be checked for a given key. The cost is higher write amplification — data gets rewritten multiple times as it moves down levels.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["compaction", "leveled_compaction", "tombstones", "key_range_overlap", "write_amplification"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the write amplification like? Can you estimate it?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "write_amplification" }
+    },
+    {
+      "role": "candidate",
+      "content": "With leveled compaction, each level is typically 10x larger than the previous. Data written to level 0 eventually gets merged through each level. In the worst case, moving data from level N to N+1 rewrites up to 10 SSTables in level N+1, so the amplification per level is about 10x. With 4-5 levels to reach the bottom, total write amplification can be 20-30x. Meaning for each 1KB value we write, the storage engine might write 20-30KB total across compaction cycles. At 100K writes/sec with average 5KB values, that's 500MB/sec of logical writes but potentially 10-15GB/sec of actual disk writes from compaction. This is why fast SSDs are critical for LSM-tree workloads. The alternative is size-tiered compaction — lower write amplification but higher space amplification and worse read performance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["write_amplification_estimation", "compaction_cost", "disk_throughput", "size_tiered_compaction", "ssd_requirement"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good depth. Now let's distribute this. How do you shard 10TB of data across multiple nodes?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "distribution" }
+    },
+    {
+      "role": "candidate",
+      "content": "Consistent hashing with virtual nodes. Each physical node is mapped to, say, 256 positions on the hash ring. Keys are hashed and assigned to the next node clockwise on the ring. Virtual nodes ensure even distribution even when physical nodes have different capacities. For replication, each key is stored on the next N nodes on the ring — I'd use N=3 for durability. With eventual consistency, writes go to any one of the 3 replicas (sloppy quorum) and are asynchronously replicated to the others. For reads, we can read from any single replica for low latency, or from 2 of 3 for stronger consistency via read-repair.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing", "virtual_nodes", "replication_factor", "sloppy_quorum", "read_repair"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "With eventual consistency and concurrent writes to the same key on different replicas, how do you resolve conflicts?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "conflict_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "Vector clocks. Each replica maintains a vector clock that tracks the causal order of writes. When replicas sync, if one version causally follows the other, the later one wins. If two versions are concurrent — neither causally follows the other — we have a true conflict. The system can either use last-writer-wins with a physical timestamp (simple but lossy), or return both versions to the client and let the application resolve it (like DynamoDB's approach). For most use cases, last-writer-wins with Lamport timestamps is sufficient and simpler to implement.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["vector_clocks", "causal_ordering", "last_writer_wins", "conflict_resolution", "lamport_timestamps"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a node crashes and comes back? How does it catch up?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "node_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two mechanisms. For short outages, hinted handoff: while a node is down, its replicas accept writes on its behalf and store 'hints' — basically queued updates. When the node comes back, the hints are forwarded to it. For longer outages where hints expire or the node's data is significantly stale, we use Merkle tree-based anti-entropy repair. Each node maintains a Merkle tree of its key space — a hash tree where each leaf is a hash of a key range. Two replicas compare their Merkle trees top-down — if the root hashes match, they're in sync. If not, they drill down to find the specific key ranges that differ and sync only those. This makes repair efficient — O(log N) comparisons instead of scanning all keys.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hinted_handoff", "merkle_tree", "anti_entropy_repair", "efficient_sync"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're wrapping up. Any final additions?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. Gossip protocol for cluster membership — each node periodically exchanges state with random peers to detect failures and propagate membership changes. Rate limiting on compaction to prevent it from starving write throughput. Monitoring on key metrics: memtable size, SSTable count per level, compaction backlog, read/write latency percentiles, and bloom filter false positive rates. And for clients, I'd provide a consistent hashing-aware client library that routes requests directly to the correct node, avoiding an extra hop through a proxy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gossip_protocol", "compaction_throttling", "monitoring", "client_side_routing"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. Deep understanding of LSM trees and distributed systems fundamentals. One of the strongest KV store designs I've seen. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 78,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 10,
+      "caching_strategy": 7,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional depth on LSM tree internals — memtable, SSTable, compaction strategies, write amplification analysis",
+      "Strong distributed systems knowledge — consistent hashing, vector clocks, Merkle tree repair, gossip protocol",
+      "Write amplification estimation with concrete numbers tying back to hardware requirements"
+    ],
+    "weaknesses": [
+      "API design was not explicitly discussed — no mention of GET/PUT/DELETE semantics or consistency parameters",
+      "Didn't discuss range queries or scan operations and how they work with the LSM structure",
+      "No mention of compression for SSTables which is standard in production LSM implementations"
+    ]
+  }
+}

@@ -1,0 +1,373 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_486"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Thanks for joining. Today I'd like you to design Google Search -- the core web search experience. You type a query, you get ranked results. Where do you want to start?",
+      "annotations": {
+        "action": "opening",
+        "phase": "requirements",
+        "target_concept": "web_search_system"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Great problem. Before diving in, let me clarify scope. Are we designing the full stack -- crawling, indexing, query serving, and ranking? Or focusing on the serving and ranking side assuming we already have a crawled corpus?",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["crawling", "indexing", "query_serving", "ranking"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's cover the full pipeline end-to-end. We can go deeper on the parts that matter most, but I want to see how you think about the whole system.",
+      "annotations": {
+        "action": "answer_requirements",
+        "phase": "requirements",
+        "target_concept": "full_pipeline_scope"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Understood. Let me set some numbers first. The web has roughly 30-50 billion indexable pages. Google processes around 8.5 billion queries per day, so roughly 100K QPS average, with peaks around 200-300K QPS. The compressed index for 50 billion documents, assuming maybe 2KB of metadata and posting list entries per document on average, puts us at around 100TB of index data. For serving, if each query needs maybe 10ms of CPU time across multiple stages, we're looking at needing thousands of serving machines just for the query path. Does that ballpark seem reasonable to work with?",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["index_size", "qps_estimation", "serving_fleet_sizing", "capacity_math"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Those numbers are solid. Walk me through the high-level architecture now.",
+      "annotations": {
+        "action": "transition",
+        "phase": "high_level_design",
+        "target_concept": "system_architecture"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll break it into four major subsystems. First, the Crawling Pipeline: a distributed crawler fleet that fetches pages from the web, respects robots.txt, deduplicates content, and feeds raw HTML into a processing pipeline. Second, the Indexing Pipeline: this processes crawled documents -- extracts text, computes PageRank offline, builds the inverted index and document store, and produces index segments that get pushed to the serving tier. Third, the Serving Tier: this is the online query path. A query hits a frontend that does query parsing, spell correction, and intent classification. Then it fans out to index servers that perform retrieval and multi-stage ranking, collects results, and returns them. Fourth, the Freshness Pipeline: a near-real-time path for breaking news and frequently changing pages that bypasses the full batch indexing cycle.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["crawling_pipeline", "indexing_pipeline", "serving_tier", "freshness_pipeline", "pagerank", "inverted_index", "query_parsing"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good structure. Let's go deep on the serving path. How does a query go from the user's browser to a ranked list of ten blue links?",
+      "annotations": {
+        "action": "deepen",
+        "phase": "deep_dive",
+        "target_concept": "query_serving_path"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "A query arrives at a load balancer, gets routed to a Query Frontend server. The frontend does several things: tokenization, spell correction using a noisy channel model, query expansion with synonyms, and intent classification to decide if this needs special verticals like images, news, or local results. Then we fan out to the Index Serving tier. The index is sharded by document ID across thousands of machines -- say we have 100TB of index data sharded across 10,000 machines, each holding about 10GB of index in memory. Each shard gets the query in parallel and performs local retrieval using an inverted index lookup.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["load_balancing", "query_frontend", "spell_correction", "noisy_channel_model", "query_expansion", "intent_classification", "index_sharding", "fan_out"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned multi-stage ranking earlier. Walk me through the ranking funnel in detail.",
+      "annotations": {
+        "action": "deepen",
+        "phase": "deep_dive",
+        "target_concept": "ranking_funnel"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, the ranking funnel is critical because we can't run expensive models on millions of candidate documents. Stage one is Retrieval: on each shard, we use BM25 over the inverted index to pull maybe the top 1000 candidates per shard. BM25 is fast because it's just posting list intersection with term frequency scoring. Stage two is Lightweight ML Ranking: we take those candidates and apply a relatively cheap model -- something like a gradient-boosted tree using features like BM25 score, PageRank, click-through rate, domain authority, and URL features. This narrows us down to maybe top 100-200 candidates per shard. Stage three happens after we merge results from all shards. We take the global top 500 or so candidates and run a heavy BERT-based cross-encoder that actually reads the query-document pair together. This is the most expensive step -- a BERT inference might take 5-10ms per document on a GPU, so running it on 500 docs takes maybe 50-100ms with batching across a small GPU fleet. The cross-encoder dramatically improves relevance for ambiguous or complex queries. Finally, we apply business logic: diversity filtering, safe search, freshness boosts, and personalization signals.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["BM25", "posting_list_intersection", "gradient_boosted_trees", "pagerank", "click_through_rate", "BERT_reranking", "cross_encoder", "gpu_inference", "diversity_filtering", "personalization"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Why BM25 over something like embedding-based retrieval in that first stage?",
+      "annotations": {
+        "action": "challenge",
+        "phase": "deep_dive",
+        "target_concept": "retrieval_tradeoffs"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Good question, and honestly in a modern system you'd likely use both. BM25 has two big advantages for the first stage: it's extremely fast because inverted index lookups are just pointer chasing through sorted posting lists, and it has very predictable latency. Embedding-based retrieval using approximate nearest neighbor search -- something like HNSW or ScaNN -- is great for semantic matching where the user's query doesn't share exact terms with the document, but ANN search at this scale introduces more latency variance and requires storing dense vectors for every document, which is expensive at 50 billion docs. The practical approach is a hybrid: run BM25 and ANN retrieval in parallel, merge the candidate sets, then feed into stage two. That way you get both lexical precision and semantic recall.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["BM25_efficiency", "inverted_index_performance", "ANN_search", "HNSW", "ScaNN", "semantic_retrieval", "hybrid_retrieval", "latency_variance"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the index update pipeline. How do you keep the index fresh when the web is constantly changing?",
+      "annotations": {
+        "action": "transition",
+        "phase": "deep_dive",
+        "target_concept": "index_freshness"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "There are two paths. The batch path runs on a cycle -- say every few hours to daily depending on the page's change frequency. The crawler re-fetches pages, the indexer rebuilds index segments, and these get deployed to the serving fleet via a segment swap. Servers load the new segment alongside the old one, switch traffic over, then drop the old segment. That gives us atomic updates with no downtime. But batch is too slow for breaking news. For that, we have a near-real-time freshness pipeline. High-priority URLs -- news sites, trending topics, social media -- get crawled with very short intervals, maybe every few minutes. These go through a lightweight indexer that produces small delta index segments. The serving tier maintains a small real-time index alongside the main base index. Query results merge candidates from both. The real-time index segments are small and get periodically compacted into the base index during the next batch cycle. The tradeoff is that the real-time path skips some expensive offline signals like full PageRank computation, so we rely more on source authority and content freshness signals for ranking those documents.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["batch_indexing", "segment_swap", "atomic_updates", "near_real_time_pipeline", "delta_index", "real_time_index", "compaction", "freshness_signals"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now for failure scenarios. Suppose you discover that a bad index build has shipped corrupted data to a subset of your serving fleet. How do you detect and handle that?",
+      "annotations": {
+        "action": "failure_probe",
+        "phase": "scaling_failures",
+        "target_concept": "index_corruption"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Index corruption is one of the scariest failure modes because it silently degrades quality. Detection has multiple layers. First, the build pipeline itself runs validation: checksum verification on every segment, sanity checks like document count shouldn't drop by more than some threshold compared to the previous build, and automated quality probes -- a set of golden queries where we know the expected top results, and we run them against the new index before deployment. Second, during the rollout we use a canary deployment. Push the new index to maybe 1% of the serving fleet, compare quality metrics -- click-through rate, pogo-sticking rate, query refinement rate -- against the control fleet. If metrics degrade beyond a threshold, automatically halt the rollout. For detection after the fact, we monitor serving-side signals: if a shard suddenly returns far fewer results than its peers for the same queries, or if its result quality scores diverge, we flag it. The mitigation is straightforward because we keep the previous index version available: roll back the affected shards to the last known good index, route traffic around them while rebuilding, and trigger an investigation of the build pipeline. We should also have an emergency kill switch that can revert the entire fleet to a previous index version within minutes.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["checksum_verification", "golden_queries", "canary_deployment", "quality_metrics", "click_through_rate", "pogo_sticking", "shard_health_monitoring", "rollback", "kill_switch"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Another scenario: a specific query pattern is causing your serving tier to crash -- a query of death situation. How do you protect against that?",
+      "annotations": {
+        "action": "failure_probe",
+        "phase": "scaling_failures",
+        "target_concept": "query_of_death"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Query of death is a classic cascading failure risk. The immediate defense is isolation and timeouts. Each query execution should have a strict timeout -- say 500ms at the shard level. If a query exceeds that, we kill the execution and return partial results or a degraded response rather than letting it consume resources indefinitely. But we need more proactive defenses. First, query analysis at the frontend: reject or rewrite pathologically expensive queries. For example, if a query after expansion would require intersecting posting lists that are each billions of entries long, cap the expansion or switch to a sampling strategy. Second, circuit breakers: if a particular query pattern causes repeated timeouts or OOM kills on shards, the frontend should detect this pattern and short-circuit future instances, maybe returning cached results from a previous similar query or a graceful degradation page. Third, resource isolation: each query should execute within a bounded memory and CPU budget. If a query starts consuming excessive memory during posting list operations, we abort early. Fourth, postmortem tooling: log the queries that triggered crashes, reproduce them in a sandboxed environment, fix the root cause in the index or query planner, and add the pattern to a regression test suite. The key principle is that no single query should ever be able to take down a serving node, let alone cascade across the fleet.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["timeouts", "partial_results", "graceful_degradation", "query_cost_analysis", "circuit_breakers", "resource_isolation", "memory_budgets", "cascading_failure_prevention", "regression_testing"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the fan-out problem at scale? You're sending every query to thousands of shards.",
+      "annotations": {
+        "action": "scaling_probe",
+        "phase": "scaling_failures",
+        "target_concept": "fan_out_at_scale"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "The tail latency problem with high fan-out is brutal. If you fan out to 10,000 shards and each has a p99 of 20ms, your effective p99 for the whole query is terrible because you're waiting for the slowest shard. Several strategies help. First, replication: each shard has multiple replicas, and the query router picks the least-loaded replica, or sends to two replicas and takes the first response -- hedged requests. That dramatically cuts tail latency. Second, you don't actually need to fan out to every shard for every query. We can build a shard routing map: use term-to-shard metadata to identify which shards are likely to have relevant documents for the query terms. For a typical query, you might only need to hit 10-20% of shards. Third, set aggressive per-shard timeouts and proceed with partial results. If 9,950 out of 10,000 shards respond within 50ms but 50 are slow, return results from the shards that responded. For most queries, the top-10 results come from a small fraction of shards anyway. Fourth, tiered architecture: have a first tier of shards holding the highest-quality documents -- the top billion pages by PageRank -- and a second tier with the long tail. Most queries can be fully satisfied from tier one with much lower fan-out.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["tail_latency", "replication", "hedged_requests", "shard_routing", "term_to_shard_mapping", "partial_results", "tiered_index", "fan_out_reduction"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about caching? Where does it fit in this architecture?",
+      "annotations": {
+        "action": "probe",
+        "phase": "deep_dive",
+        "target_concept": "caching_strategy"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Caching is huge for search because query distributions follow a power law -- a small fraction of queries account for a large fraction of traffic. There are multiple caching layers. At the result cache level, we cache the final rendered result page for exact query matches. Popular queries like 'facebook' or 'weather' get served entirely from cache, bypassing the serving tier completely. This alone can handle 30-40% of all queries. At the index serving level, each shard caches hot posting lists and document metadata in memory. The OS page cache helps here too since index files are memory-mapped. At the intermediate level, we can cache the output of stage-one retrieval for frequent queries, so if the same query comes in again we skip BM25 and go straight to the ML ranking stages, which might use slightly different personalization signals. The invalidation strategy is time-based with a short TTL for the result cache -- maybe 15 minutes for most queries, shorter for queries classified as time-sensitive. The freshness pipeline can also explicitly invalidate cached results when it detects major content changes for trending topics.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["power_law_distribution", "result_caching", "posting_list_caching", "memory_mapped_files", "intermediate_caching", "cache_invalidation", "TTL", "time_sensitive_queries"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let me push on something. You mentioned memory-mapping the index. What happens during a segment swap when you're loading a new index version?",
+      "annotations": {
+        "action": "challenge",
+        "phase": "deep_dive",
+        "target_concept": "index_swap_mechanics"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Good catch -- the swap is tricky. If you naively mmap the new segment, you'll get a storm of page faults as queries start hitting cold pages, causing a latency spike. The approach is to pre-warm the new index before switching traffic. The serving process loads the new segment file, sequentially reads through it to populate the OS page cache, and optionally runs a set of warm-up queries against it in shadow mode. Only once the new segment is warm do we atomically swap the pointer so live queries start using it. On machines with enough RAM, you briefly hold both old and new segments in memory during the transition. On memory-constrained machines, you might need to drain the machine from the load balancer first, swap, warm, then re-add it. The replication factor gives us headroom -- if each shard has 3 replicas, we can roll through them one at a time with no capacity impact.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["page_faults", "index_pre_warming", "shadow_queries", "atomic_pointer_swap", "load_balancer_drain", "rolling_deployment", "replication_headroom"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you think about the crawler at scale? 50 billion pages is a lot to keep fresh.",
+      "annotations": {
+        "action": "probe",
+        "phase": "deep_dive",
+        "target_concept": "crawler_design"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "The crawler is essentially a massive distributed BFS over the web graph with politeness constraints. The core challenge is prioritization -- you can't recrawl 50 billion pages fast enough to keep them all fresh, so you need a crawl scheduler that prioritizes based on page importance (PageRank), change frequency (estimated from past crawls), and type (news sites get crawled much more frequently). Architecture-wise: a URL Frontier holds the queue of URLs to crawl, partitioned by domain to enforce politeness -- you don't want to hammer any single site. A fleet of crawler workers pulls URLs, fetches pages respecting robots.txt and crawl-delay directives, and pushes raw content to a distributed storage layer like GFS or Colossus. A deduplication step using content hashing -- SimHash or MinHash for near-duplicate detection -- filters out duplicate and near-duplicate pages. The scale is something like 1-2 billion pages per day for the continuous crawl, with a full recrawl of the important subset happening on a weekly cadence. Network bandwidth is significant: at an average page size of 500KB, crawling a billion pages a day is about 500TB of data transfer daily.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["distributed_BFS", "crawl_prioritization", "URL_frontier", "politeness", "robots_txt", "content_deduplication", "SimHash", "MinHash", "crawl_scheduling", "bandwidth_estimation"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've covered a lot of ground. If you had to pick the single hardest operational challenge in running this system, what would it be?",
+      "annotations": {
+        "action": "probe",
+        "phase": "scaling_failures",
+        "target_concept": "operational_challenges"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd say it's managing quality at scale through continuous change. The system is never static -- the web changes, user behavior shifts, ranking models get updated, index formats evolve. The hardest part is making changes safely. A ranking model update that improves relevance for 99% of queries but catastrophically degrades 1% is a disaster at 8 billion queries a day -- that's 80 million bad experiences. So you need incredibly robust experimentation infrastructure: A/B testing with sensitive metrics, holdback groups, long-running quality monitors, and the ability to detect and roll back subtle regressions. The ranking funnel I described has dozens of interacting components, and a change in one stage can have surprising effects downstream. You need end-to-end evaluation, not just per-component metrics. That's the unsexy but critical part -- the testing and deployment infrastructure that lets you evolve the system without breaking it.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["quality_at_scale", "experimentation_infrastructure", "AB_testing", "regression_detection", "rollback", "end_to_end_evaluation", "deployment_safety"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid answer. Last question: how would you handle geographic distribution? Users are worldwide.",
+      "annotations": {
+        "action": "scaling_probe",
+        "phase": "scaling_failures",
+        "target_concept": "geographic_distribution"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "You need the full index replicated across multiple data center regions -- at minimum US, Europe, and Asia-Pacific. Users get routed to the nearest DC via anycast DNS or a global load balancer. Each DC runs a complete, independent serving stack so it can handle queries autonomously with low latency. The index build pipeline produces one set of artifacts that gets distributed to all DCs. The tricky part is maintaining consistency -- you want all DCs to be serving roughly the same index version, so rollouts are coordinated globally but executed locally. For localization, each DC can have supplemental index shards for region-specific content -- local language pages, local businesses -- that aren't replicated globally. The crawler also benefits from geographic distribution: crawl nodes in different regions can access geo-restricted content and get lower latency to nearby web servers. One nuance: you can optimize by having the result cache be region-specific since query distributions vary by locale.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["multi_region_replication", "anycast_DNS", "global_load_balancing", "independent_serving_stacks", "coordinated_rollouts", "localized_index_shards", "distributed_crawling", "regional_caching"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great discussion. You covered the full pipeline with solid depth, especially on the ranking funnel and failure scenarios. We're out of time -- thanks for walking through this.",
+      "annotations": {
+        "action": "wrap_up",
+        "phase": "wrap_up",
+        "target_concept": "session_end"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Thank you. This was a fun one to work through. The ranking funnel and freshness pipeline are areas I've spent a lot of time thinking about, so I enjoyed going deep there. Happy to follow up on anything.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": [],
+        "depth": "none",
+        "has_reasoning": false,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    }
+  ],
+  "scorecard": {
+    "overall": 81,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 9,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent capacity estimation with concrete numbers for index size, QPS, and serving fleet",
+      "Detailed multi-stage ranking funnel with clear reasoning for BM25 -> lightweight ML -> BERT reranking progression",
+      "Strong failure mode analysis covering index corruption detection, query-of-death protection, and cascading failure prevention",
+      "Near-real-time freshness pipeline design with clear tradeoff articulation against batch indexing",
+      "Thoughtful fan-out mitigation strategies including hedged requests and tiered indexing"
+    ],
+    "weaknesses": [
+      "Could have discussed API design and query interface in more detail",
+      "Did not deeply explore the document store or storage layer schema",
+      "Geographic distribution answer was somewhat surface-level compared to other sections"
+    ]
+  }
+}

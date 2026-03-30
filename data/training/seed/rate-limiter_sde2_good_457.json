@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "sde2",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_457"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter — a system that limits how many API requests a user can make in a given time window. Think of it as protecting your API from abuse. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Is this a standalone rate limiting service, or embedded in the API gateway? What granularity — per user, per IP, per API key? And what time windows — requests per second, per minute, per hour?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["deployment_model", "rate_limit_granularity", "time_windows"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "It'll be a standalone service that API gateways call. Rate limit per API key, with configurable windows — for example, 100 requests per minute and 1000 per hour. The system itself handles 1 million requests per second across all clients. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "What should happen when a client exceeds the limit? Return HTTP 429? And do we need to be exact — is it okay if we occasionally allow 101 requests when the limit is 100, or must it be strictly enforced?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["rate_limit_response", "exactness_requirement"], "depth": "applied", "has_reasoning": false, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "429 Too Many Requests with a Retry-After header. Slight over-allowance is acceptable — within 1-2%. Let's design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "There are a few classic algorithms for rate limiting. The simplest is a fixed window counter: divide time into 1-minute windows, count requests per key per window. If the count exceeds the limit, reject. Easy to implement with Redis — INCR on a key like 'rate:api_key_123:minute:1711843200' and set a TTL. But fixed windows have a burst problem: if a user sends 100 requests at 0:59 and 100 more at 1:00, they've sent 200 in a 2-second window even though both individual windows show 100.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fixed_window", "redis_incr", "ttl", "burst_problem"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good identification of the edge case. How would you fix it?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "sliding_window" }
+    },
+    {
+      "role": "candidate",
+      "content": "A sliding window log would be exact: store the timestamp of every request and count how many fall within the last 60 seconds. But storing every timestamp is expensive in memory. A better approach is the sliding window counter — a hybrid. Take the current window's count and the previous window's count, and weight them. If we're 30 seconds into the current minute, the rate is: (previous_minute_count × 0.5) + current_minute_count. If that exceeds 100, reject. This approximates a sliding window with minimal memory — just two counters per key per window.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sliding_window_log", "sliding_window_counter", "weighted_average", "memory_efficiency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great comparison. There's also the token bucket algorithm. Can you describe it?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Each API key gets a bucket that holds tokens. The bucket fills at a steady rate — say 100 tokens per minute. When a request comes in, it removes one token. If the bucket is empty, the request is rejected. The bucket has a max capacity to cap bursts — if max is 100, a user who's been idle accumulates up to 100 tokens and can burst all 100 at once, but then must wait for tokens to refill. This naturally smooths traffic while allowing short bursts. The state per key is just two values: remaining tokens and last refill timestamp.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["token_bucket", "refill_rate", "burst_allowance", "compact_state"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. At 1 million requests per second, where do you store this state? And how do you handle the distributed aspect — multiple API gateways checking the same limit?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Redis is the natural choice — it's in-memory, fast, and supports atomic operations. For the token bucket: store {tokens_remaining, last_refill_time} per key in Redis. When a request comes in: calculate how many tokens should have been added since last_refill_time, add them (capped at max), then try to deduct one. If tokens > 0, allow; otherwise, reject. The critical thing is atomicity. Two gateway servers checking the same key simultaneously could both see 1 token remaining and both allow — exceeding the limit. We need to make the check-and-decrement atomic. Redis Lua scripts solve this — the entire logic runs as a single atomic operation on the Redis server.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis", "atomic_operations", "lua_scripts", "race_conditions", "token_bucket_implementation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Lua scripts for atomicity — exactly right. At 1M requests per second, can a single Redis handle that?",
+      "annotation": { "action": "scaling_probe", "phase": "deep_dive", "target_concept": "redis_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Redis can handle around 100K-200K operations per second on a single node. For 1M, we'd need to shard. Since rate limits are per-API-key, we can shard by API key — hash the key and route to one of several Redis instances. With 10 Redis nodes, each handles 100K requests per second, which is comfortable. The routing happens in the rate limiter service — it hashes the API key and sends the request to the correct Redis node.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["redis_throughput", "sharding", "key_based_routing"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if one of those Redis nodes goes down? A shard is unavailable.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "redis_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "We have two options. Fail open: if we can't check the rate limit, allow the request. This is the safer choice for the end user — they don't get blocked because of our infrastructure failure. But it temporarily disables rate limiting for that shard's keys, which could allow abuse. Fail closed: reject requests if we can't check the limit. Safer from an abuse perspective but causes legitimate users to be blocked by our own failure. I'd default to fail open with aggressive monitoring and alerting. Also, each Redis node should have a replica. If the primary fails, promote the replica. The window where rate limits aren't enforced is small — seconds during failover.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fail_open", "fail_closed", "redis_replica", "failover", "monitoring"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good trade-off analysis on fail-open vs fail-closed. How does the rate limiter communicate the limit status back to the client?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "response_headers" }
+    },
+    {
+      "role": "candidate",
+      "content": "Standard headers: X-RateLimit-Limit: 100 (the max), X-RateLimit-Remaining: 42 (how many left), X-RateLimit-Reset: 1711843260 (Unix timestamp when the window resets). On rejection, return 429 with Retry-After: 18 (seconds until they can try again). This lets well-behaved clients pace themselves and avoid hitting the limit. It's also useful for debugging — developers can see in response headers how close they are to the limit.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["rate_limit_headers", "retry_after", "client_pacing", "developer_experience"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle multiple rate limit rules? Like 100/minute AND 1000/hour for the same key.",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "multiple_rules" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each rule runs independently. For a request, we check all applicable rules. If any rule rejects, the request is rejected. In the Lua script, we'd check the per-minute token bucket and the per-hour token bucket in the same atomic operation. Only if both have tokens available do we decrement both and allow. The rules could be stored in a config — per API key, list of {limit, window} pairs. The rate limiter service loads this config and applies all rules.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["independent_rules", "all_must_pass", "atomic_multi_check", "configurable_rules"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. We're out of time — anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A dashboard for monitoring: top rate-limited keys, rejection rates over time, Redis latency. And a way for the ops team to dynamically update rate limits without redeploying — like a config service or feature flags. Also, we should have different limits for different tiers — free tier gets 100/min, paid tier gets 1000/min.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["monitoring_dashboard", "dynamic_configuration", "tier_based_limits"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice practical touches. Good interview — you showed solid knowledge of rate limiting algorithms and handled the distributed challenges well. Thanks!",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 68,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 6,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 7
+    },
+    "strengths": [
+      "Strong algorithm knowledge — compared fixed window, sliding window, and token bucket with clear trade-offs",
+      "Correctly identified the race condition problem and solved it with Redis Lua scripts",
+      "Good fail-open vs fail-closed analysis with reasonable default"
+    ],
+    "weaknesses": [
+      "Could have done more capacity math — didn't estimate Redis memory usage per key or total cluster size",
+      "Didn't discuss local rate limiting (in-process cache) to reduce Redis calls — important at 1M RPS",
+      "No mention of rate limiting at different layers (API gateway, application, database)"
+    ]
+  }
+}

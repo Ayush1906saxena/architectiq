@@ -1,0 +1,180 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "principal",
+    "candidate_profile": "good",
+    "total_exchanges": 24,
+    "generation_id": "seed_065"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's say your company currently stores session data and feature flags in MySQL, but it's hitting scaling limits. Your team has been asked to evaluate building or adopting a distributed key-value store. Walk me through how you'd approach this.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Before jumping into technical design, I'd want to understand the organizational context. Who are the stakeholders? Is this a request from a single team or are multiple teams hitting the same MySQL bottleneck? What's the timeline — is this urgent because MySQL is failing in production, or is this proactive planning? And what's the appetite for build vs buy?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["stakeholder_management", "build_vs_buy", "organizational_context"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good framing. Three teams are feeling the pain — the auth team (session store), the experimentation team (feature flags), and the product team (user preferences). MySQL is handling it but latency is creeping up. You have 6 months. The company has about 200 engineers total.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "organizational_context" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, so first question is build vs buy. For a 200-person engineering org, I'd lean heavily towards buy. Building a distributed KV store is probably the hardest infrastructure project you can take on — years of engineering time, operational expertise, on-call burden. My recommendation would be to evaluate DynamoDB if we're on AWS, or Cloud Bigtable on GCP. If we need to be cloud-agnostic or self-host, then managed Cassandra or Redis Enterprise. The key question isn't 'can we build one' — it's 'should a team of 3-5 infra engineers maintain a distributed database when that's not our core competency?'",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["build_vs_buy", "team_sizing", "core_competency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's say leadership wants to evaluate both options. Can you sketch the technical design assuming we go with building our own, and then we'll discuss the migration either way?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "system_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Let me first characterize the workload from the three teams. Session store: very high read QPS, writes on login/logout, TTL-based expiration, value size is small — maybe 2KB per session. Feature flags: low write QPS, high read QPS, strong consistency preferred so flag changes propagate fast. User preferences: moderate reads and writes, 5-10KB values, eventual consistency is fine. So we have mixed consistency requirements, which is important.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["workload_characterization", "consistency_requirements", "multi_tenant"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good workload analysis. Go ahead with the architecture.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "system_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the architecture: consistent hashing ring with virtual nodes for data distribution, replication factor of 3 across availability zones, and tunable consistency using quorum reads and writes. The storage engine on each node would be LSM-tree based — probably just embed RocksDB rather than building our own. The coordinator pattern for routing, with a gossip protocol for cluster membership. This is essentially the DynamoDB paper architecture. I won't pretend we're innovating here — we're implementing a known design.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing", "replication", "lsm_tree", "gossip_protocol", "dynamo"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned this is essentially Dynamo. What's the operational cost of running this? How would you structure the team?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "team_structure" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where it gets real. A distributed KV store needs a dedicated platform team — I'd say minimum 4 engineers: 2 senior backend engineers for development and maintenance, 1 SRE focused on operational tooling, and 1 senior engineer who's the tech lead and has actual distributed systems experience. The on-call rotation needs at least 4 people to be sustainable, so we'd share on-call with adjacent platform teams initially. The team owns the SLA: 99.95% availability, p99 read latency under 5ms. They're responsible for capacity planning, incident response, and client library development.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["team_structure", "sla", "on_call", "capacity_planning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now the really interesting part — how do you migrate from MySQL to this new KV store with zero or near-zero downtime?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "migration_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Migration is where most projects like this fail, so I'd plan this very carefully. Phase 1: Dual-write. We update the application layer to write to both MySQL and the KV store. Reads still go to MySQL. This lets us validate that the KV store is receiving correct data without any risk. We run a background job to backfill historical data from MySQL into the KV store.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dual_write", "migration_strategy", "backfill"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Continue with the phases.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "migration_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Phase 2: Shadow reads. We read from both MySQL and the KV store, compare the results, but return MySQL's result to the client. We log any discrepancies. This validates data consistency without affecting users. We need metrics: mismatch rate, latency comparison, error rate from the KV store. Phase 3: Traffic shifting. Once mismatch rate is below 0.01%, we flip reads to the KV store. We use a feature flag to control the percentage — start at 1%, then 10%, 50%, 100%. MySQL is still the fallback. Phase 4: Cut MySQL writes. Once reads are stable for 2 weeks on the KV store, we stop dual-writing to MySQL. We keep MySQL around for another month as a safety net, then decommission.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["shadow_traffic", "traffic_shifting", "feature_flags", "data_validation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What are the risks with dual-write? What can go wrong?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "dual_write_risks" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several risks. First, if one write succeeds and the other fails, data diverges. We can't wrap both in a transaction since they're different systems. I'd make MySQL the source of truth during migration — if the KV store write fails, we log it and retry asynchronously, but the request succeeds. Second, ordering issues — two rapid writes might arrive in different order at each store. For our use cases this is tolerable since session data and preferences are single-writer per user. Third, the dual-write path adds latency. We can mitigate by making the KV write async — fire and forget with a reconciliation job to catch failures.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dual_write_risks", "data_consistency", "async_writes", "reconciliation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now let's talk about the operational side once this is running. A node goes down at 3 AM. What's the runbook?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "operational_runbook" }
+    },
+    {
+      "role": "candidate",
+      "content": "The runbook for a single node failure should be mostly automated. Step 1: The gossip protocol detects the node is down within 30 seconds. Hinted handoff kicks in — neighboring nodes absorb the writes. Reads continue from the other 2 replicas. No page needed yet. Step 2: If the node doesn't recover within 15 minutes, an alert fires. The on-call checks if it's a host issue (hardware, OS) or a process crash. For a process crash, the runbook is: check logs, restart the process, verify it rejoins the ring and starts streaming missed data via anti-entropy. Step 3: If the host is unrecoverable, the runbook triggers a node replacement — spin up a new node, add it to the ring, it bootstraps by streaming data from replicas. The whole process should be one command: `kvstore replace-node <dead-node-id>`.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["operational_runbook", "hinted_handoff", "anti_entropy", "automation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about capacity planning? How do you know when to add nodes?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "capacity_planning" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd set up capacity planning as a quarterly process. Key metrics to track: disk usage per node (alert at 70%, add capacity before 80%), CPU utilization (sustained >60% means we need more nodes), p99 latency trend (if it's creeping up month over month, we're getting saturated), and QPS growth rate. I'd build a simple model: current storage is X TB growing at Y TB per month, so we'll hit capacity in Z months. Same for QPS. We present this to engineering leadership quarterly with a request for hardware or cloud spend. The team should always have 30% headroom — enough to survive losing a node plus handle a traffic spike.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_planning", "monitoring", "headroom"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the case where the feature flags team wants strong consistency but the session team is fine with eventual consistency? Do they share the same cluster?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "multi_tenancy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good question. I'd use a single cluster with namespace isolation — each team gets their own keyspace prefix. The consistency level is per-request, not per-cluster, so the feature flags team can do quorum reads while the session team does single-replica reads. However, I'd separate them if workload interference becomes an issue. Feature flags are small and low volume — you don't want a bulk session cleanup job to cause latency spikes for flag reads. In that case, I'd either use separate clusters or implement resource isolation within the cluster — rate limiting per namespace, separate connection pools.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_tenancy", "namespace_isolation", "noisy_neighbor", "resource_isolation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's come back to build vs buy. Given everything we've discussed, what's your recommendation?",
+      "annotation": { "action": "redirect", "phase": "wrap_up", "target_concept": "build_vs_buy" }
+    },
+    {
+      "role": "candidate",
+      "content": "My honest recommendation: buy, not build. Here's my reasoning. Building this requires 4+ engineers for 6+ months, then ongoing maintenance — probably 2-3 full-time engineers perpetually. At $300K fully loaded cost per engineer, that's $1.2M in year one and $700K annually after. DynamoDB for our scale would cost maybe $50-80K per month, so $600K-$960K per year, but that includes zero operational burden, automatic scaling, and multi-region replication that would take us years to build. The only reason to build is if we have very specific performance or data sovereignty requirements that managed services can't meet. For session data, feature flags, and user preferences? DynamoDB or Redis Enterprise handles this trivially.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["build_vs_buy", "total_cost_of_ownership", "team_economics"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong cost analysis. Even with the buy decision, the migration strategy you outlined still applies — you'd migrate from MySQL to DynamoDB using the same phased approach?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "migration_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Exactly. The migration strategy is independent of build vs buy. Dual-write, shadow reads, traffic shifting, MySQL decommission — same playbook. The only difference is that with a managed service, Phase 0 is just provisioning a DynamoDB table instead of 3 months of building a cluster. That's actually the strongest argument for buying — we can focus all our engineering effort on the migration itself, which is where the real risk is.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["migration_strategy", "risk_management"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final thoughts on what could go wrong with this whole initiative?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few risks I'd flag. First, underestimating the data model differences — MySQL supports ad-hoc queries that teams might be relying on without realizing it. We need a thorough audit of all MySQL queries against these tables. Second, political risk — if one team has a bad experience during migration, they'll block the other teams from migrating. So we start with the lowest-risk use case (probably user preferences) and build confidence. Third, DynamoDB vendor lock-in — if we ever need to leave AWS, this becomes a big project. I'd mitigate by abstracting the KV store behind an internal API, so the client teams don't directly use the DynamoDB SDK.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["risk_management", "vendor_lock_in", "abstraction_layer", "change_management"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. You brought a very well-rounded perspective — technical depth, operational thinking, org awareness, and pragmatic cost analysis. Great interview, thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 75,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 5,
+      "scalability": 8,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Excellent organizational and operational framing — runbooks, team structure, capacity planning",
+      "Pragmatic build vs buy analysis with real cost numbers",
+      "Thorough migration strategy with phased rollout and risk mitigation"
+    ],
+    "weaknesses": [
+      "Didn't go deep on caching layer design or read path optimization",
+      "API design was glossed over — no discussion of client library or protocol",
+      "Could have discussed conflict resolution in more depth for the build scenario"
+    ]
+  }
+}

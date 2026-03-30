@@ -1,0 +1,171 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "sde2",
+    "candidate_profile": "good",
+    "total_exchanges": 20,
+    "generation_id": "seed_025"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a chat system — something like WhatsApp or Slack. What questions do you have to start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Do we need 1:1 chat, group chat, or both? How many users are we targeting? What's the expected message volume? And do we need features like file sharing or just text?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["requirements_gathering"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Both 1:1 and group chat, groups up to 100 members. 10 million DAU, 1 billion messages per day. Text and image sharing. Walk me through your design.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay so 1 billion messages per day is about 11,500 messages per second. For real-time delivery, I'd use WebSocket connections between clients and servers. The client opens a persistent WebSocket connection when the app starts. When User A sends a message, it goes through the WebSocket to our chat server. The server stores the message in the database, then looks up User B's active connection and pushes the message to them in real-time.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["websocket", "qps_calculation", "real_time_delivery"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good start. How does the chat server know which server User B is connected to? With millions of users, you'll have multiple servers.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "connection_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, we'd have many chat servers. I'd keep a mapping of user_id to server_id in Redis. When a user connects via WebSocket, the chat server registers them in Redis: SET user:123:server → server-5. When we need to deliver a message to User B, we look up which server they're on and route the message there. If User B is offline — no entry in Redis — we store the message and deliver it when they come back online.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["redis_caching", "connection_management", "offline_delivery"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How do you route the message from User A's server to User B's server?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "message_routing" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a message queue between the servers. When User A's server receives a message, it publishes it to a message queue — something like RabbitMQ or Redis Pub/Sub. User B's server subscribes to messages for its connected users and delivers them. Actually, Redis Pub/Sub might be simpler — User B's server subscribes to a channel for each connected user. When a message arrives for User B, it gets published to user_b's channel, and the subscribed server receives it.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["message_queue", "redis_pub_sub", "message_routing"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Redis Pub/Sub works for smaller scale, but it doesn't persist messages — if the subscriber is temporarily disconnected, messages are lost. Consider that for your design. Let's talk about the database. How do you store messages?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use MySQL or PostgreSQL. The messages table would have: message_id (auto-increment bigint), conversation_id (foreign key), sender_id, content (text), image_url (nullable), created_at (timestamp). I'd index on (conversation_id, created_at) for fetching message history in order. For conversations, a separate table: conversation_id, type (1:1 or group), created_at. And a conversation_members table: conversation_id, user_id — to track who's in each conversation.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["database_schema", "database_choice", "indexing"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "At 1 billion messages per day, that's 365 billion rows per year. How does a single MySQL instance handle that?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "It won't — we'd need to shard. I'd shard the messages table by conversation_id. That way, all messages for a conversation are on the same shard, and fetching message history is a single-shard query. With hash-based sharding on conversation_id, we can distribute evenly. Maybe start with 64 shards and add more as needed. Each shard is a MySQL instance with a read replica.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["sharding_strategy", "read_replicas"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now for group chat — when someone sends a message to a group of 100 people, how does that work?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "group_chat" }
+    },
+    {
+      "role": "candidate",
+      "content": "For a group message, we store the message once in the database under the group's conversation_id. Then we need to deliver it to all 100 members. We look up the group members from the conversation_members table, then for each online member, we push the message to their WebSocket connection — looking up their server from Redis and routing through the message queue. For offline members, we store a record so they get the message when they come online. It's basically a fan-out — one write to the database but 100 deliveries.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["group_chat", "fan_out", "offline_delivery"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you track which messages each user has received? If User C was offline when messages 5, 6, 7 were sent to the group, how do you know to deliver those three when they come online?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "delivery_tracking" }
+    },
+    {
+      "role": "candidate",
+      "content": "I could track a last_seen_message_id per user per conversation. When User C comes online, we query messages where conversation_id = group_id AND message_id > last_seen_message_id. The client fetches these and displays them as new messages. We update last_seen_message_id as the user receives messages. This is stored in a user_conversation_state table: user_id, conversation_id, last_seen_message_id, last_read_message_id.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["delivery_tracking", "cursor_based", "database_schema"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good approach. What about message ordering? If two users send messages at nearly the same time, how do you ensure everyone sees them in the same order?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "The message_id is auto-incrementing, so messages are ordered by insertion order. Since we shard by conversation_id, all messages for a group go to the same database shard, so the auto-increment is sequential for that conversation. Everyone fetching messages for the same conversation gets them in the same order. The ordering might not reflect exact real-world timing — if two people type simultaneously, whoever's message reaches the server first gets the lower ID — but that's close enough for a chat application.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["message_ordering", "auto_increment"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about end-to-end encryption? Is that something you've considered?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "encryption" }
+    },
+    {
+      "role": "candidate",
+      "content": "Honestly, I haven't thought deeply about encryption for this design. I know WhatsApp uses end-to-end encryption where the server can't read messages. I think it involves public-key cryptography — each user has a key pair, and messages are encrypted with the recipient's public key. But I'm not familiar with the specific protocol they use or how group encryption works. For our system, I'd probably start without E2E encryption and add it later if it's a requirement, since it adds a lot of complexity especially for group chat.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["encryption", "public_key_cryptography"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's fair — it's a complex topic. How about image sharing? Walk me through the flow.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "media_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "For images, the client uploads the image to an object store like S3 via a separate HTTP endpoint — not through the WebSocket, since large file transfers would block the message stream. The server returns the S3 URL. Then the client sends a chat message with the image_url field pointing to the S3 object. When the recipient receives the message, their client fetches the image from S3 and renders it inline. I'd generate thumbnails on upload using a background worker — Lambda or a dedicated service — so the recipient can show a low-res preview quickly before the full image loads.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["media_handling", "s3", "thumbnail_generation", "background_worker"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about push notifications for offline users.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "push_notifications" }
+    },
+    {
+      "role": "candidate",
+      "content": "When we detect a user is offline — no entry in the presence Redis, or the WebSocket is closed — and they have a pending message, we send a push notification via Firebase Cloud Messaging for Android or Apple Push Notification Service for iOS. The notification says something like 'New message from Alice'. We don't include the message content in the push to keep it private. The user taps the notification, opens the app, reconnects via WebSocket, and receives the pending messages. We should also batch notifications — if User B gets 10 messages while offline, send one notification, not ten.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["push_notifications", "fcm", "apns", "notification_batching"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Any final thoughts on what you'd improve?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add typing indicators — a lightweight WebSocket message that shows 'Alice is typing...' without storing it in the database. I'd add read receipts — when the client marks messages as read, send that status back. I'd also consider switching from MySQL to Cassandra if the scale grows, since Cassandra handles time-series writes better. And I'd add monitoring for message delivery latency, WebSocket connection counts, and notification delivery rates.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["typing_indicators", "read_receipts", "cassandra", "monitoring"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You showed a solid understanding of the core architecture. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 55,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 5,
+      "api_design": 5,
+      "database_design": 6,
+      "caching_strategy": 5,
+      "scalability": 6,
+      "failure_handling": 4,
+      "communication": 6
+    },
+    "strengths": [
+      "Solid understanding of WebSocket-based real-time delivery with presence tracking in Redis",
+      "Good database schema design with sharding by conversation_id for co-located message history",
+      "Practical approach to image sharing with S3 and thumbnail generation"
+    ],
+    "weaknesses": [
+      "No discussion of message ordering guarantees beyond auto-increment — no awareness of clock skew or causal ordering",
+      "Didn't discuss end-to-end encryption in any depth — a significant gap for a chat system",
+      "No discussion of failure handling — what happens when a chat server crashes, when Redis loses presence data",
+      "Limited capacity estimation — only calculated QPS, didn't estimate storage, memory, or connection counts"
+    ]
+  }
+}

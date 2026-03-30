@@ -1,0 +1,109 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "staff",
+    "candidate_profile": "deep-transcoding",
+    "total_exchanges": 18,
+    "generation_id": "seed_399"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We're designing a video streaming platform. You mentioned transcoding is one of the most complex and expensive components. Let's go deep. Walk me through what happens when a creator uploads a video — starting with input analysis.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "transcoding_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a video is uploaded, the first step is input analysis — we need to understand what we're working with before deciding how to transcode it. We run ffprobe (or a similar tool like MediaInfo) to extract: container format (MP4, MKV, AVI), video codec (H.264, H.265, VP9, AV1), resolution, frame rate, bitrate, color space (SDR vs HDR — BT.709 vs BT.2020), audio tracks (count, codec, language, channel layout), and subtitle tracks. This metadata drives every downstream decision. A 4K HDR ProRes file from a professional creator needs a completely different transcoding strategy than a 720p H.264 screen recording. We also do a corruption check — scan for truncated moov atoms, broken NAL units, or audio/video sync drift. If the input is corrupted, we reject it early with a meaningful error rather than burning compute on a transcode that produces garbage. The analysis output is stored as a JSON manifest alongside the original file in object storage, and it's the input to the encoding ladder generator.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["input_analysis", "ffprobe", "codec_detection", "hdr_detection", "corruption_check", "manifest_generation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What is an encoding ladder, and how do you generate one?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "encoding_ladder" }
+    },
+    {
+      "role": "candidate",
+      "content": "An encoding ladder is the set of resolution-bitrate pairs we'll encode the video at, to support adaptive bitrate streaming (ABR via HLS or DASH). A client automatically switches between rungs of the ladder based on available bandwidth. A traditional fixed ladder looks like: 240p at 300kbps, 360p at 700kbps, 480p at 1.2Mbps, 720p at 2.5Mbps, 1080p at 5Mbps, 4K at 15Mbps — all using H.264. The problem: this is wasteful. A talking-head lecture needs much less bitrate than an action movie at the same resolution. If we apply the same fixed ladder to both, the lecture is over-encoded (wasting storage and bandwidth) and the action movie is under-encoded (visible artifacts). The generation process: first, never encode above the source resolution — upscaling wastes bits. So a 720p upload only gets rungs at 720p and below. Second, we cap the top bitrate at a reasonable ceiling for the resolution. Third, I space the rungs so that each step up provides a noticeable quality improvement — typically a 1.5-2x bitrate increase between adjacent rungs. For codec selection: H.264 for broadest compatibility (every device supports it), H.265 for newer devices (30-40% bitrate savings at same quality), and VP9/AV1 for web clients where the codec is royalty-free. We generate the same content in multiple codecs and let the client negotiate the best one it supports.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["encoding_ladder", "adaptive_bitrate_streaming", "fixed_ladder_problems", "resolution_capping", "multi_codec_delivery"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You hinted at per-title optimization. How does that improve on the fixed ladder?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "per_title_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Per-title optimization, pioneered by Netflix, generates a custom encoding ladder for each individual video based on its content complexity. The idea: for a given quality target (say VMAF 93), different videos need wildly different bitrates. An animated show might achieve VMAF 93 at 1080p with 2Mbps, while a fast-paced sports broadcast needs 8Mbps for the same quality score. Per-title optimization finds the minimum bitrate for each resolution that achieves the target quality. The algorithm: for each resolution rung, we encode a representative sample of the video (every Nth frame, or the scene with the highest motion complexity) at multiple bitrates — say 500kbps, 1Mbps, 2Mbps, 4Mbps, 8Mbps. We compute the quality metric (VMAF) for each encoding. We plot the bitrate-vs-quality curve (the rate-distortion curve) and find the 'knee' — the point of diminishing returns where additional bitrate provides negligible quality improvement. That knee point becomes the bitrate for that resolution rung. We then prune rungs that are dominated — if 720p at 2Mbps gives the same quality as 1080p at 3Mbps, we might keep both (the 720p rung saves bandwidth for lower-capability clients) or drop 720p if the quality difference is negligible. The cost: per-title optimization requires encoding the video multiple times to generate the analysis data. This is the 'analysis pass.' It typically adds 2-3x the compute of a single encode. But the payoff is 20-30% bandwidth savings across the library, which at Netflix scale saves millions per year in CDN costs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["per_title_optimization", "content_complexity", "rate_distortion_curve", "knee_detection", "vmaf_target", "bandwidth_savings"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Once you have the encoding ladder, how do you parallelize the actual transcoding? A 2-hour movie at multiple resolutions is a lot of compute.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "parallel_transcoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Parallelization happens at two levels. Level 1: per-rung parallelism. Each rung of the encoding ladder (240p, 360p, 480p, ...) is an independent job. A 2-hour movie with 6 rungs × 3 codecs = 18 independent encoding jobs that can run simultaneously on separate machines. Level 2: segment-level parallelism within each rung. We split the source video at scene-change boundaries (detected during input analysis) or at fixed intervals (typically 2-4 seconds, aligned to GOP — Group of Pictures — boundaries). Each segment is encoded independently. A 2-hour movie split into 4-second segments yields 1800 segments. For a single rung, we can distribute these 1800 segments across a cluster of encoding machines. Each machine encodes a few segments, uploads the results to object storage, and a stitcher service concatenates them. The challenge with segment-parallel encoding: each segment must start with an IDR (Instantaneous Decoder Refresh) frame — a keyframe that doesn't reference previous frames. This resets the encoder state and costs bitrate (keyframes are 5-10x larger than predicted frames). Also, quality can vary at segment boundaries because the encoder's rate control algorithm starts fresh for each segment. To mitigate: use a two-pass approach. First pass analyzes the entire video to compute a global bitrate allocation map. Second pass uses the global map but encodes segments in parallel. This gives us the speed of parallel encoding with the quality of single-stream encoding. Netflix open-sourced a variant of this in their VMAF-based encoding pipeline.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["parallel_transcoding", "per_rung_parallelism", "segment_parallelism", "gop_alignment", "idr_frames", "two_pass_encoding", "rate_control"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned quality metrics — VMAF, SSIM. What are these, and which do you prefer?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "quality_metrics" }
+    },
+    {
+      "role": "candidate",
+      "content": "PSNR (Peak Signal-to-Noise Ratio) is the simplest — it's a pixel-level mathematical comparison between the source and encoded frames. Easy to compute, but poorly correlated with human perception. A slight shift in colors might have high PSNR error but be visually imperceptible. SSIM (Structural Similarity Index) is better — it compares images based on luminance, contrast, and structural patterns. It captures the fact that humans notice structural distortion (blurring, blocking) more than absolute pixel differences. Score ranges from 0 to 1, with 0.95+ being visually transparent. VMAF (Video Multimethod Assessment Fusion) is Netflix's metric, trained on human perception data. It combines multiple elementary metrics (including detail loss, motion artifacts, and contrast distortion) using a machine learning model trained on thousands of human quality ratings. Score ranges from 0 to 100, with 93+ being excellent quality for streaming. I strongly prefer VMAF because it best correlates with human perception across different content types. SSIM is my fallback for quick evaluations or when VMAF computation is too expensive (VMAF is about 5x slower than SSIM to compute). For HDR content, there's VMAF NEG (No Enhancement Gain) which handles the extended luminance range. One caveat: VMAF was trained primarily on TV-viewing conditions. For mobile viewing (smaller screens, more ambient light), the perceptual quality differs — a lower VMAF score might be visually acceptable on mobile. Netflix published per-device quality targets for this reason.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["quality_metrics", "psnr", "ssim", "vmaf", "human_perception_correlation", "vmaf_neg_hdr", "per_device_quality"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Transcoding is expensive. How do you optimize the cost of the transcoding infrastructure?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cost_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Transcoding is the single largest compute cost in a video platform — at scale, it can be millions per month. Several cost optimization strategies. First, spot instances (AWS) or preemptible VMs (GCP). Transcoding jobs are inherently interruptible — if a spot instance is reclaimed, we lose only the current segment being encoded. The segment-parallel architecture means we just retry that one segment on another instance. Spot pricing is typically 60-80% cheaper than on-demand. We maintain a small on-demand fleet for baseline capacity and burst onto spot for peak uploads. Second, hardware-accelerated encoding. For H.264 and H.265, NVIDIA GPU instances (like g4dn or g5) using NVENC are 4-8x faster than CPU encoding at slightly lower quality. For volume content where VMAF 90 (not 95) is acceptable — user-generated content, short-form video — GPU encoding is the sweet spot. For premium content where every quality point matters, we use CPU encoding (x265 with slow preset). Third, just-in-time transcoding. Not every video needs all rungs encoded upfront. A video uploaded by a user with 50 followers will likely only be watched a few times. We can encode just the most common rungs (480p, 720p) immediately and defer higher resolutions until demand signals (like the video going viral) trigger additional encodes. Fourth, encode once, transcode incrementally. If we have the 4K H.265 encoded version, we can use it as a mezzanine format and derive lower resolutions from it instead of re-encoding from the original source — this is faster, though there's a slight generational quality loss from the double encoding.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cost_optimization", "spot_instances", "gpu_encoding", "just_in_time_transcoding", "mezzanine_format", "cost_quality_tradeoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last topic: how do you prioritize which videos to transcode first when there's a queue?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "priority_queue" }
+    },
+    {
+      "role": "candidate",
+      "content": "The priority queue for transcoding jobs uses a weighted scoring model. Factor 1: Creator tier (weight 40%). Verified creators and partners with large audiences get higher priority because their content is time-sensitive and has the most immediate viewers. A creator with 10M subscribers uploading a scheduled premiere needs to be encoded before a new user's first upload. Factor 2: Content recency (weight 25%). Freshly uploaded content gets higher priority. Priority decays over time — a video uploaded 2 hours ago that still hasn't been transcoded is urgent. Factor 3: Expected viewership (weight 20%). Based on historical data — the creator's average view count in the first 24 hours predicts how many people are waiting for this video. Factor 4: Current viewer demand (weight 15%). If a low-priority video starts getting shared before transcoding completes, we bump its priority in real-time. The queue is implemented as a Redis sorted set where the score is the composite priority, recalculated every minute. Workers pull the highest-scoring job. For fairness, I'd add a starvation guard: any job waiting more than 2 hours gets a monotonically increasing priority boost, ensuring no video is stuck indefinitely. We also separate the queue into lanes: 'realtime' (live stream recordings needing immediate VOD availability), 'standard' (normal uploads), and 'backfill' (re-encoding existing library with new codecs like AV1). Realtime always drains first. Backfill only runs when the standard queue is empty.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["priority_queue", "weighted_scoring", "creator_tier", "demand_prediction", "starvation_guard", "queue_lanes", "fair_scheduling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Comprehensive deep dive on transcoding. You covered the full pipeline from upload to cost optimization. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 78,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 7,
+      "api_design": 5,
+      "database_design": 6,
+      "caching_strategy": 5,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Deep understanding of encoding theory — per-title optimization, rate-distortion curves, and VMAF-based quality targeting",
+      "Practical cost optimization strategies including spot instances, GPU encoding, and just-in-time transcoding",
+      "Well-designed priority queue with weighted scoring and starvation prevention"
+    ],
+    "weaknesses": [
+      "Did not discuss CDN delivery, DRM, or client-side player buffering strategy",
+      "Storage architecture for encoded assets and manifest management was only briefly touched"
+    ]
+  }
+}

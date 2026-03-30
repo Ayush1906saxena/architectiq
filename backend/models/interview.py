@@ -1,9 +1,9 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class InterviewStartRequest(BaseModel):
-    problem_id: str
-    career_level: str = "senior"  # sde2, senior, staff, principal, vp
+    problem_id: str = Field(max_length=50)
+    career_level: str = Field(default="senior", max_length=20)
 
 
 class InterviewStartResponse(BaseModel):
@@ -15,8 +15,8 @@ class InterviewStartResponse(BaseModel):
 
 
 class InterviewMessageRequest(BaseModel):
-    session_id: str
-    message: str
+    session_id: str = Field(max_length=64)
+    message: str = Field(max_length=5000)
 
 
 class InterviewMessageResponse(BaseModel):

@@ -1,0 +1,119 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "staff",
+    "candidate_profile": "deep-surge-pricing",
+    "total_exchanges": 18,
+    "generation_id": "seed_401"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We've been designing a ride-sharing platform. Let's go deep on surge pricing. Start with the demand prediction model — how do you estimate real-time demand?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "demand_prediction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Real-time demand prediction combines reactive signals with predictive models. The reactive component: count ride requests in a sliding window (last 5 minutes) per geographic zone. A zone with 200 requests in 5 minutes when the historical baseline for that zone/time is 50 requests is experiencing 4x demand. This is simple and fast but lagging — by the time we measure the surge, it's already happening. The predictive component: train a gradient-boosted tree model (XGBoost or LightGBM) on historical data with features including: time of day, day of week, weather (rain increases demand 30-40%), local events (concerts, sports games — pulled from event APIs like PredictHQ), holidays, and recent demand trajectory (is demand accelerating or decelerating). The model predicts demand for the next 15-30 minutes per zone. Training data: 6 months of historical requests aggregated to 5-minute intervals per zone. We retrain weekly and run A/B tests to verify the new model's predictions are more accurate than the previous version. The combined signal: predicted_demand = 0.4 * reactive_count + 0.6 * model_prediction. We weight the model higher because it catches surges before they fully materialize — when rain starts, the model knows demand will spike in 10 minutes, before the reactive count has risen. The model output feeds into the pricing formula.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["demand_prediction", "sliding_window", "gradient_boosted_trees", "feature_engineering", "reactive_vs_predictive", "model_retraining"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you estimate supply — the number of available drivers?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "supply_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Supply estimation has three components: current supply, committed supply, and predictive supply. Current supply: count drivers with the app open and status 'available' in each zone right now. This comes from the real-time driver location stream — drivers send GPS pings every 4 seconds, and we aggregate availability per zone. Committed supply: drivers who are currently on a trip but will become available soon. For each driver on a trip, we know the estimated trip completion time. A driver completing a trip in zone A in 8 minutes is 'future supply' for zone A. We discount this by a probability factor — about 80% of drivers remain available after completing a trip, while 20% go offline. Predictive supply: model how many drivers will come online or go offline in the next 15-30 minutes. This also uses a trained model with features like: time of day (drivers come online during rush hours), recent earnings trends (if surge has been active, more drivers come online seeking higher fares — this is the self-correcting mechanism of surge pricing), and shift patterns (many drivers follow regular schedules). The effective supply: available_supply = current_available + 0.8 * completing_in_15min + predicted_new_online - predicted_going_offline. The ratio demand/supply per zone is the core input to the pricing multiplier.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["supply_estimation", "current_available", "committed_supply", "predictive_supply", "trip_completion_estimation", "self_correcting_mechanism"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now the core algorithm: how do you translate the demand/supply ratio into an actual price multiplier?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "pricing_formula" }
+    },
+    {
+      "role": "candidate",
+      "content": "The simplest model: surge_multiplier = max(1.0, demand / supply). If demand is 200 and supply is 50, the multiplier is 4.0x — the fare is 4 times the base rate. But this is too volatile and aggressive. A better approach uses a piecewise function with a dampening curve. Below a threshold ratio (say D/S < 1.2), no surge: multiplier = 1.0. Between 1.2 and 2.0, gentle surge: multiplier = 1 + 0.5 * (D/S - 1.2). Above 2.0, steeper surge: multiplier = 1.4 + 0.8 * (D/S - 2.0). Cap at a maximum multiplier (say 5.0x or whatever the regulatory limit is). The coefficients are tuned empirically to maximize two objectives: rider conversion (riders actually accepting the surge price and completing trips) and driver incentive (the surge needs to be high enough to attract drivers from adjacent zones or bring offline drivers online). We A/B test different curves and measure: average rider wait time, rider cancellation rate after seeing the surge price, driver response rate to surge zones, and total completed trips. The curve that maximizes completed trips while keeping cancellation below 15% wins. I'd also add temporal smoothing: the multiplier changes by at most 0.2x per minute. This prevents jarring jumps where a user sees 1.5x, refreshes, and sees 3.0x. Smooth transitions feel fairer and reduce panic-cancellations.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pricing_formula", "piecewise_function", "dampening", "surge_cap", "ab_testing", "temporal_smoothing", "rider_conversion_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you define surge zones geographically? A surge at the airport shouldn't affect prices 5 miles away.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "surge_zones" }
+    },
+    {
+      "role": "candidate",
+      "content": "Zone definition uses a geohash-based grid with adaptive resolution. The base grid uses geohash precision 6 (cells roughly 1.2km x 600m). Each cell independently computes its demand/supply ratio and surge multiplier. But fixed grids create boundary problems: a user standing on the boundary between a 3.0x zone and a 1.0x zone takes one step and the price triples. To handle this: I'd use spatial smoothing. Each cell's surge multiplier is a weighted average of its own multiplier and its neighbors' multipliers: smoothed_surge(cell) = 0.6 * surge(cell) + 0.4 * average(surge(neighbors)). This creates gradual transitions. For high-density areas like airports, stadiums, and downtown cores, I'd use finer-grained zones (geohash precision 7, ~150m x 150m) to capture micro-surges. The airport pickup area is its own zone, separate from the airport dropoff area and the adjacent highway. For suburban areas, I'd use coarser zones (geohash precision 5, ~5km x 5km) because there aren't enough data points for fine-grained pricing. The resolution adapts to data density — we need at least 20 requests and 5 drivers in a zone within the measurement window for the surge calculation to be statistically meaningful. Below that threshold, we aggregate up to the parent geohash level. This adaptive resolution prevents noisy surge calculations in low-activity areas.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_zones", "geohash_grid", "adaptive_resolution", "spatial_smoothing", "boundary_problem", "statistical_significance_threshold"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Drivers can game surge pricing — circling a surge zone without accepting rides, or collectively going offline to trigger surge. How do you prevent this?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "anti_gaming" }
+    },
+    {
+      "role": "candidate",
+      "content": "Anti-gaming is a constant arms race. Several detection and prevention mechanisms. Driver circling: detect when a driver is within a surge zone with the app on but consistently ignoring or quickly cancelling ride requests. The signal: driver in zone for >10 minutes with >3 ignored requests. Response: temporarily remove them from the available supply count, effectively excluding them from surge calculation. If they're not actually providing rides, they're not supply. Collective offline (collusion): detect when multiple drivers in the same zone go offline within a short window (e.g., 5+ drivers offline within 2 minutes) and then come back online shortly after surge activates. This pattern is suspicious. Response: when drivers go offline and come back online within 15 minutes, they don't see the new surge for their first 2 rides — they get the pre-offline rate. This removes the incentive to go offline to trigger surge. Surge chasing: drivers driving toward surge zones from far away. By the time they arrive, the surge may be over and they've wasted time. This actually helps the system (it brings supply to high-demand areas), so we want to encourage this — it's the intended behavior of surge pricing. What we don't want is drivers idling in surge zones. I'd also implement a minimum acceptance rate requirement to qualify for surge bonuses. If a driver's acceptance rate drops below 70% during surge periods, they lose the surge premium on subsequent rides. Finally, all of this detection generates a driver behavior score that feeds into a fraud ML model. Patterns that individually look innocent (going offline, ignoring rides, circling) but correlate together across multiple drivers in the same zone trigger a fraud alert to the operations team.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["anti_gaming", "driver_circling_detection", "collusion_detection", "delayed_surge_access", "minimum_acceptance_rate", "fraud_ml_model"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you communicate surge pricing to riders without causing backlash? The UX is critical.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "price_communication_ux" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing communication is as much a psychology problem as a UX problem. Key principles: transparency, predictability, and agency. Transparency: show the fare estimate upfront before the rider confirms. Don't show just the multiplier ('3.0x') — show the actual dollar amount. '3.0x surge' feels abstract and unfair; '$45 estimated fare' is concrete and lets the rider make an informed decision. Uber learned this the hard way and switched to upfront pricing. Predictability: show a surge map in the app so riders can see that adjacent zones have lower prices. This gives them the option to walk a few blocks to escape the surge zone — they feel empowered rather than exploited. Also show 'prices are expected to drop in ~15 minutes' if the model predicts short-duration surge (event ending, rain passing). This reduces the anxiety of 'I have to book now at any price.' Agency: offer alternatives. Show the surge ride alongside non-surge options: shared rides (lower multiplier because demand is distributed), scheduled rides (book now for pickup in 20 minutes at a potentially lower price), or public transit options. Riders who feel they have choices accept surge pricing more readily than riders who feel trapped. Anti-backlash measures: during natural disasters or emergencies, automatically cap surge at 1.0x or 1.2x. This is both ethical and prevents PR disasters. Uber and Lyft both committed to this after backlash during Hurricane Sandy. We can still incentivize drivers to serve the area through direct bonuses from the company rather than passing the cost to riders.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["price_communication_ux", "upfront_pricing", "surge_map", "alternative_options", "disaster_cap", "rider_psychology"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned regulatory caps. How does regulation affect the surge pricing system?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "regulatory_caps" }
+    },
+    {
+      "role": "candidate",
+      "content": "Regulation varies dramatically by jurisdiction and is the most operationally complex aspect of surge pricing. Types of regulation: Hard caps on surge multiplier — some cities cap surge at 2.0x or 3.0x during declared emergencies. New York City requires surge pricing rules to be filed with the TLC. India's Motor Vehicle Aggregator Guidelines cap surge at 1.5x during peak and ban surge during rain/floods. Anti-price-gouging laws — in many US states, triggered during declared states of emergency. These may apply to ride-sharing even if not originally designed for it. The legal interpretation is evolving. System design implications: we need a configurable rules engine that applies per-jurisdiction caps. The architecture: a 'pricing policy service' that sits between the surge calculation engine and the rider-facing price. It receives the raw multiplier and applies the applicable rules: jurisdiction (determined by pickup GPS coordinates mapped to administrative boundaries via polygon lookup), current emergency declarations (fed from a regulatory data feed or manually updated by the ops team), time-based rules (some cities prohibit surge during certain hours), and ride-type rules (surge on luxury vehicles but not on shared rides). The rules engine must be hot-reloadable — when a new regulation takes effect, we can update the policy without redeploying the service. Every pricing decision must be logged with the applied rules for audit trails — regulators can and do audit these records. I'd store them for 7 years per financial record retention requirements.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["regulatory_caps", "per_jurisdiction_rules", "pricing_policy_service", "polygon_lookup", "hot_reloadable_rules", "audit_trail", "record_retention"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Finally, how does surge pricing data feed back into driver incentive programs?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "driver_incentives" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge data is the richest signal for optimizing driver incentives beyond real-time pricing. Three incentive programs that use surge data. First, predictive repositioning bonuses. If we predict a surge in zone A in 20 minutes (based on an event ending or a weather change), we send notifications to drivers in adjacent zones: 'Head to zone A for a $10 bonus + expected surge fares.' This proactively balances supply before the surge hits, reducing the surge magnitude and improving rider experience. We track whether the driver actually repositioned and completed rides in the target zone to validate the bonus. Second, guaranteed minimums during predicted high-demand periods. If our model predicts surge from 6-8pm on a Friday, we offer drivers a guaranteed minimum of $30/hour if they're online and accepting rides during that window. This brings supply online in advance — the guarantee is cheaper for us than the customer backlash from extreme surge. We compute the guaranteed amount from historical surge earnings for that time/zone. Third, weekly surge insights dashboards for drivers. Show them a heatmap of when and where surge was active in the past week, so they can plan their driving schedule. Drivers who align their hours with predicted surge zones earn 30-40% more. This is self-reinforcing: better-informed drivers → more supply during high-demand periods → lower surge → happier riders. The data pipeline: surge events are streamed to Kafka, aggregated by Flink into per-zone, per-hour summaries, stored in a data warehouse, and queried by the incentive optimization service to compute bonus amounts. Bonus ROI is measured by: did the bonus actually increase supply in the target zone, and did it reduce surge magnitude and rider wait times? If not, we reduce the bonus for that zone/time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["driver_incentives", "predictive_repositioning", "guaranteed_minimums", "surge_insights_dashboard", "incentive_roi_measurement", "supply_demand_balancing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent deep dive on surge pricing. You covered the full spectrum from ML to UX to regulation. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 77,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 6,
+      "caching_strategy": 5,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 10
+    },
+    "strengths": [
+      "Comprehensive demand/supply modeling combining reactive signals with predictive ML models",
+      "Strong anti-gaming mechanisms with practical detection heuristics and incentive alignment",
+      "Excellent coverage of non-technical aspects: UX communication, regulatory compliance, and driver incentive feedback loops"
+    ],
+    "weaknesses": [
+      "Did not discuss the real-time data pipeline architecture for computing surge at scale",
+      "Database and caching design for the pricing system were not explored"
+    ]
+  }
+}

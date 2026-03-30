@@ -1,0 +1,180 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "principal",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_187"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed key-value store. I know you've done database migrations before -- I'd like you to incorporate the full lifecycle, including how you'd migrate an existing system to this new KV store.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great. Let me start with requirements. What's the current system we're migrating from? What's the current scale -- data size, QPS? What are the access patterns -- read-heavy, write-heavy, or balanced? And what's the latency target that's driving this migration?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["migration_requirements", "access_patterns", "latency_targets"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're migrating from MySQL. Currently 2TB of data across 10 sharded MySQL instances. 200K reads/sec, 50K writes/sec. Access pattern is 95% point lookups by primary key. P99 read latency on MySQL is 15ms, and we need to get it under 5ms. The data is user session and profile data.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Perfect. So the motivation is latency -- MySQL at 15ms p99 is too slow for session lookups. A KV store with in-memory indexing should easily hit sub-5ms. A few more questions: what's the consistency requirement? Can we tolerate eventual consistency for session data? What's the average value size? And what's the growth rate -- how fast is the data growing?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistency_requirements", "latency_optimization", "data_growth"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Eventual consistency is fine for sessions -- maybe a 1-2 second staleness window. Average value size is 2KB. Data grows about 20% per year. Strong consistency needed for profile data.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "consistency_requirements" }
+    },
+    {
+      "role": "candidate",
+      "content": "Interesting -- two different consistency requirements for two data types within the same store. Let me first design the KV store, then detail the migration plan. For the KV store architecture: I'd use a Dynamo-style design with consistent hashing for data distribution. Each key maps to a virtual node on the hash ring, with a replication factor of 3. For session data (eventual consistency), we use quorum reads with R=1, W=2 -- fast reads, durable writes. For profile data (strong consistency), we use R=2, W=2 -- majority quorum on both sides.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing", "replication", "quorum", "dynamo_style"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Walk me through the storage engine for each node.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "storage_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each node uses an LSM-tree storage engine -- similar to LevelDB or RocksDB. Writes go to an in-memory memtable (a sorted structure like a skip list or red-black tree), backed by a write-ahead log for durability. When the memtable reaches a threshold (say 64MB), it's flushed to disk as an immutable SSTable. Background compaction merges SSTables to reclaim space and reduce read amplification. For reads, we check the memtable first (O(log n)), then a Bloom filter for each SSTable level to skip unnecessary disk reads. At 2KB average value size with 2TB total, that's about 1 billion keys. With a properly tuned Bloom filter (10 bits per key), false positive rate is about 1%, meaning 99% of point lookups touch at most one SSTable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lsm_tree", "memtable", "wal", "sstable", "bloom_filter", "compaction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "With 200K reads/sec, how many nodes do you need?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cluster_sizing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let's size this. Each node with SSD-backed storage and a hot dataset in the block cache can handle roughly 50K reads/sec for point lookups at sub-5ms latency. So 200K reads needs at least 4 nodes for read capacity. But we also need to account for data distribution: 2TB with replication factor 3 is 6TB total. If each node has 1TB usable SSD storage, we need 6 nodes minimum for storage. For headroom (handling spikes and node failures), I'd go with 9 nodes. That gives us 450K read capacity, plenty of headroom, and each node stores about 670GB. The in-memory block cache per node should be around 32GB to keep the hot working set in memory.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cluster_sizing", "capacity_planning", "replication_overhead"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's get to the migration. How do you move 2TB of data from MySQL to this new KV store without downtime?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "migration_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Zero-downtime migration in four phases. Phase 1: Dual-Write. We modify the application layer to write to both MySQL and the KV store on every write operation. MySQL remains the source of truth. The KV store writes are fire-and-forget with error logging -- if a KV write fails, it doesn't affect the user. This runs for a few days to validate the write path. Phase 2: Backfill. While dual-writes are running, we run a batch job that scans all MySQL data and writes it to the KV store. We use a cursor-based scan (not a full table lock) to avoid impacting MySQL performance. The dual-write ensures any data written during the backfill isn't missed. After backfill, we run a reconciliation job that compares row counts and samples random keys to verify data integrity.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dual_write", "backfill", "zero_downtime_migration", "reconciliation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Continue with phases 3 and 4.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "migration_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Phase 3: Shadow Reads. We start reading from the KV store alongside MySQL for a percentage of traffic. The application still uses MySQL's result as the source of truth, but we compare the KV store's response in the background. We log discrepancies -- different values, missing keys, latency differences. This phase catches bugs in the migration without any user impact. We start at 1%, ramp to 10%, then 50%, then 100% over two weeks. Success criteria: discrepancy rate below 0.001%, KV p99 latency under 5ms. Phase 4: Cutover. Once shadow reads validate data integrity, we flip the read path to the KV store as primary. MySQL becomes the backup. We keep dual-writes going for another 2 weeks as a safety net -- if anything goes wrong with the KV store, we can instantly fall back to MySQL reads. After 2 weeks of stable operation, we stop writing to MySQL and decommission the MySQL shards.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["shadow_reads", "gradual_cutover", "rollback_plan", "success_metrics"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the rollback plan if Phase 4 goes wrong? Say the KV store starts returning errors at 3 AM.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "rollback_plan" }
+    },
+    {
+      "role": "candidate",
+      "content": "Since we're still dual-writing to MySQL, rollback is a configuration change -- flip a feature flag to redirect reads back to MySQL. No data migration needed because MySQL has been receiving all writes. The flag should be toggleable via a control plane API, not a code deploy, so it takes seconds rather than minutes. I'd also have automated rollback triggers: if KV store error rate exceeds 1% or p99 latency exceeds 10ms for more than 2 minutes, the system auto-rolls back and pages the on-call engineer. The engineer investigates and determines whether to retry the cutover or stay on MySQL.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rollback_plan", "feature_flags", "automated_rollback", "monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "During Phase 2, the backfill, how do you handle the case where a key is updated in MySQL while the backfill is scanning?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "backfill_consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the classic 'write skew during backfill' problem. The dual-write (Phase 1) runs concurrently with the backfill (Phase 2). So there's a race: the backfill reads key K from MySQL at time T1 with value V1. At time T2, the application updates K to V2, which gets dual-written to both MySQL (V2) and KV store (V2). At time T3, the backfill writes K=V1 to the KV store, overwriting the newer V2. Solution: use a 'last write wins' policy with timestamps. Each KV store write includes a timestamp. The backfill uses the MySQL row's updated_at timestamp. The KV store only accepts a write if its timestamp is newer than the existing value. Since the dual-write at T2 has a newer timestamp than the backfill's T1 data, the backfill's stale write is rejected.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["write_skew", "last_write_wins", "timestamp_ordering", "concurrent_writes"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. What success metrics would you track for the overall migration project?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "success_metrics" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three categories. Data integrity: reconciliation pass rate (target: 99.999% key match), shadow read discrepancy rate (target: below 0.001%). Performance: read p99 latency (target: under 5ms, current MySQL is 15ms), write p99 latency (target: under 10ms), throughput headroom (target: 2x current load without performance degradation). Operational: migration duration (target: complete in 6 weeks), number of rollbacks triggered (target: 0 in production, acceptable in staging), zero data loss incidents. I'd have a migration dashboard showing all of these in real time, reviewed daily during the migration window.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["success_metrics", "data_integrity", "performance_metrics", "operational_metrics"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's go back to the KV store design. How do you handle node failures?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "node_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "With replication factor 3, losing one node means every key is still available on 2 other nodes. The gossip protocol detects the failure within seconds -- each node pings its neighbors, and if a node misses 3 consecutive heartbeats, it's marked as suspected down. After a configurable timeout (say 30 seconds), it's marked as dead. At that point, hinted handoff kicks in: writes that would go to the dead node are stored temporarily on a live neighbor with a 'hint' marker. When the node recovers, the hints are replayed. If the node doesn't recover within a longer window (say 24 hours), we trigger a repair process that re-replicates data from the surviving replicas to a new node.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gossip_protocol", "hinted_handoff", "failure_detection", "repair_process"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about conflict resolution when two replicas have different values for the same key?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "conflict_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "For session data where we allow eventual consistency, I'd use vector clocks to detect conflicts and last-write-wins with wall-clock timestamps for automatic resolution. Vector clocks tell us whether two versions are causally related or concurrent. If they're concurrent (a true conflict), we resolve using the higher timestamp. For profile data where we need strong consistency, quorum writes (W=2 out of 3) ensure that any two quorum reads (R=2) will always see the latest write -- the Pigeonhole principle guarantees overlap. So conflicts don't arise for profile data under normal operation. During network partitions, we reject writes to the minority partition to maintain consistency -- availability is sacrificed per the CAP theorem.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["vector_clocks", "last_write_wins", "cap_theorem", "quorum_consistency", "network_partitions"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about compaction. With 50K writes/sec, how do you keep compaction from impacting read latency?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Compaction is the LSM-tree's Achilles heel for latency-sensitive workloads. I'd use a leveled compaction strategy (like RocksDB's) rather than size-tiered, because it caps space amplification and keeps read amplification bounded. To prevent compaction from stealing I/O bandwidth from reads: first, rate-limit compaction I/O to 50% of disk bandwidth using cgroups or OS-level I/O scheduling. Second, run compaction on dedicated threads at lower priority. Third, use direct I/O for compaction to avoid polluting the OS page cache with compaction reads. Fourth, monitor compaction debt -- if pending compaction exceeds a threshold, temporarily throttle writes to let compaction catch up. This is the nuclear option but prevents read latency from blowing up.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leveled_compaction", "io_scheduling", "write_throttling", "direct_io"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great depth. Wrapping up -- what's the biggest risk in this entire project?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The biggest risk isn't technical -- it's organizational confidence. If the KV store has a single incident during migration that causes user-facing impact, leadership may lose confidence and mandate a rollback to MySQL permanently. So the migration must be boring. Every phase should be over-validated. The shadow read phase should run for longer than feels necessary. And we need executive alignment upfront: 'This migration saves us $X in MySQL licensing and Y ms in latency, but there will be a 6-week period of elevated risk.' If a P1 happens during migration, the on-call runbook should include a communication template for stakeholders, not just technical steps.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["organizational_risk", "stakeholder_management", "migration_risk", "incident_communication"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Outstanding interview. You showed deep expertise in both distributed systems design and migration execution. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 83,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 9,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional migration plan with four clearly defined phases, success criteria, and rollback strategy",
+      "Deep storage engine knowledge -- LSM-tree internals, Bloom filter sizing, compaction strategies",
+      "Excellent handling of the write-skew-during-backfill edge case with timestamp-based resolution"
+    ],
+    "weaknesses": [
+      "API design was not discussed -- no mention of the client interface to the KV store",
+      "Could have discussed multi-datacenter replication for disaster recovery",
+      "Didn't mention encryption at rest or access control for the KV store"
+    ]
+  }
+}

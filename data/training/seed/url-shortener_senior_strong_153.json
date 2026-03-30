@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_153"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service like bit.ly. Before diving into the architecture, what questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. What's the expected scale in terms of URLs created per day? What's the read-to-write ratio? Do shortened URLs expire, and do we need analytics on click-through rates?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "read_write_ratio", "url_expiration", "analytics"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "100 million new URLs per day, 200:1 read-to-write ratio. URLs expire after a configurable TTL, default 3 years. Basic click analytics. Let's go.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me estimate capacity. 100M writes/day is roughly 1,160 writes/sec. At 200:1, that's 232K reads/sec. Over 3 years, we're looking at about 110 billion URLs total. If each record is 500 bytes, that's roughly 55TB of storage. For short code length, 110 billion entries need at least 7 characters in base62 — which gives us 3.5 trillion combinations, plenty of headroom.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation", "base62_encoding"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good numbers. Walk me through how you'd generate the short codes.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "code_generation" }
+    },
+    {
+      "role": "candidate",
+      "content": "I want to take a slightly different approach than the typical counter-based or hash-based method. I'd use a pre-generated short code pool. We have a background service that generates random 7-character base62 strings, checks them for uniqueness, and inserts them into a pool table with a status of 'available'. When a URL shortening request arrives, the app server claims a code from the pool by atomically updating its status to 'claimed'. This decouples code generation from the request path entirely.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["code_generation", "pre_generation", "atomic_operations"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting approach. How do you prevent two servers from claiming the same code simultaneously?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "concurrency_control" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each app server would fetch a batch of, say, 1,000 codes at a time using a SELECT ... FOR UPDATE SKIP LOCKED query. This atomically locks and claims a batch of available codes. The server keeps them in a local in-memory queue and assigns them to incoming requests without any database call. When the local queue runs low — say below 200 — it fetches another batch in the background. This means the hot path of URL creation has zero database reads for code generation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["batch_processing", "skip_locked", "local_queue", "hot_path_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if a server crashes with 800 unused codes in its local queue? Those codes are marked as claimed but never used.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "failure_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good catch. Two mitigations. First, the claim has a lease timestamp — if a code is claimed but not associated with a URL within, say, 5 minutes, a background sweeper reclaims it back to the 'available' pool. Second, since we have 3.5 trillion possible codes and only need 110 billion, wasting a few thousand codes per crash is negligible. We could also shrink the batch size to reduce waste, but that trades off against the benefit of fewer database round trips. I'd keep the batch at 1,000 since the waste is insignificant relative to the keyspace.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lease_mechanism", "background_sweeper", "keyspace_analysis", "batch_size_tradeoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does this compare to the more common approach of using an auto-incrementing counter with base62 encoding?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "design_comparison" }
+    },
+    {
+      "role": "candidate",
+      "content": "Counter-based has the advantage of simplicity and guaranteed uniqueness without collision checks. But it has drawbacks: sequential codes are predictable and enumerable, which is a security issue; you need a distributed ID generator like Snowflake or Zookeeper-based range allocation, adding operational complexity; and the counter itself becomes a coordination point. The pool approach gives us random-looking codes by default — no need for a Feistel cipher or hash to obscure sequentiality. The trade-off is that pool generation requires uniqueness checks, but those happen offline in a background process, not on the request path. We also need to monitor pool depth and ensure the generator keeps up with consumption.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["counter_based_generation", "snowflake_id", "security", "operational_complexity", "pool_monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid comparison. Let's talk about the read path. 232K reads per second — how do you serve redirects at that scale?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "read_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "The redirect path is a simple key-value lookup: short_code maps to long_url. I'd put a Redis cluster in front of the database with a cache-aside pattern. The hot URLs follow an 80/20 distribution — 20% of URLs get 80% of traffic. If we cache the top 20% of daily URLs, that's 20M entries at 500 bytes each, about 10GB of Redis — very manageable. On a cache miss, we hit the database, populate the cache with a TTL matching the URL's expiration. Cache hit ratio should be 95%+ given the power-law distribution, meaning only about 11K reads/sec actually reach the database.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "cache_aside", "hot_data", "cache_hit_ratio", "power_law_distribution"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned database for the read path. What database and how do you handle 110 billion rows over 3 years?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use PostgreSQL sharded by the short_code hash. With 128 shards, each holds about 860 million rows over 3 years — well within Postgres capabilities with proper indexing. The schema is simple: short_code as the primary key, long_url, created_at, expires_at, and user_id. The access pattern is exclusively point lookups by short_code, which is ideal for a B-tree index. For the pool table, I'd keep that on a separate smaller Postgres cluster since it has a very different access pattern — sequential scans for available codes versus point lookups for URL mappings.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_strategy", "database_schema", "access_patterns", "index_design"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about custom aliases? A user wants their URL to be short.ly/my-brand instead of a random code.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "custom_aliases" }
+    },
+    {
+      "role": "candidate",
+      "content": "Custom aliases bypass the pool entirely. On creation, we check if the alias already exists — a simple lookup against the same URL mapping table. If it's taken, we return a 409 Conflict. If available, we insert directly. The key consideration is that custom aliases must be excluded from the pool generation process. Since pool codes are random 7-character base62 strings and custom aliases can be any length and contain hyphens, they're naturally in different namespaces. But I'd add a validation rule: custom aliases must be at least 8 characters or contain non-alphanumeric characters, ensuring they never collide with the pool's 7-character base62 codes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["custom_aliases", "namespace_separation", "collision_prevention"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk failure scenarios. Your pool runs dry — the background generator can't keep up. What happens?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "pool_exhaustion" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the main operational risk of the pool approach. Mitigations: first, monitoring and alerting on pool depth. If the pool drops below, say, 10 million codes, we page on-call and scale up the generator. Second, I'd maintain a multi-level buffer: each app server has its local batch, and the database pool should hold at least 1 hour of buffer — 100M codes for our write rate. Third, as a fallback, if the pool is truly empty, the app server falls back to generating a random code and attempting an insert with a uniqueness constraint. If it collides, retry with a new random code. At 110 billion used codes out of 3.5 trillion possible, the collision probability is about 3%, so we'd rarely need more than one retry.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pool_monitoring", "multi_level_buffer", "fallback_mechanism", "collision_probability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about cache stampede? A very popular URL's cache entry expires and thousands of requests hit the database simultaneously.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_stampede" }
+    },
+    {
+      "role": "candidate",
+      "content": "Classic thundering herd problem. I'd use a few techniques. First, jittered TTLs — instead of all entries expiring at exactly the same time, add random jitter of plus or minus 10% to the TTL. Second, for very hot keys, use a lock-based cache refresh: when a cache miss occurs, only the first request acquires a distributed lock and fetches from the database; other requests either wait briefly or get served a slightly stale value. Redis supports this with SET NX for the lock. Third, proactive refresh — for URLs with high QPS, refresh the cache before expiration using a background process that monitors access frequency.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_stampede", "jittered_ttl", "distributed_lock", "proactive_refresh"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the analytics without impacting redirect latency?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "analytics_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "Analytics must be fully asynchronous. On every redirect, the app server fires a lightweight event to Kafka containing the short_code, timestamp, user agent, IP, and referrer. The redirect response returns immediately — we don't wait for Kafka acknowledgment (we use fire-and-forget producer mode). A separate consumer group reads from Kafka, aggregates clicks per minute into a time-series store like ClickHouse, and updates real-time counters in Redis for the dashboard. If Kafka is temporarily unavailable, we lose some analytics events, but redirects are unaffected. That's an acceptable trade-off since analytics doesn't need to be perfectly accurate.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["async_analytics", "kafka", "clickhouse", "fire_and_forget", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. We're wrapping up. Any final additions to the design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. I'd add a CDN layer — popular redirects can be served from edge locations using 302 redirects with short cache TTLs. Rate limiting on the creation API to prevent abuse. A URL expiration background job that sweeps expired URLs and returns their codes to the pool for reuse — this is another advantage of the pool approach. And I'd want end-to-end monitoring: pool depth, cache hit rate, redirect latency p50/p99, and Kafka consumer lag for analytics.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_redirect", "rate_limiting", "code_recycling", "monitoring", "observability"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great interview. The pool-based approach was a nice alternative, and you articulated the trade-offs against counter-based generation well. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 76,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Creative pool-based code generation approach with clear articulation of trade-offs vs counter-based",
+      "Thorough failure analysis — pool exhaustion, cache stampede, and graceful degradation all addressed",
+      "Strong capacity estimation done upfront with concrete numbers driving design decisions"
+    ],
+    "weaknesses": [
+      "Could have discussed multi-region deployment and geographic distribution",
+      "API design was implicit — didn't explicitly define endpoints and response schemas",
+      "Didn't discuss URL validation or malicious URL detection"
+    ]
+  }
+}

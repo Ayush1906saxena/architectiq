@@ -1,0 +1,163 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "senior",
+    "candidate_profile": "misunderstands-problem",
+    "total_exchanges": 22,
+    "generation_id": "seed_135"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Today let's design a chat system. Think WhatsApp or Facebook Messenger — users can send messages to each other in real time. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great, a chat system. So are we building something like ChatGPT where users interact with an AI, or more like a customer support chatbot for a website? And what's the domain — general knowledge or a specific vertical like healthcare or finance?",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["chatbot", "ai"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Not an AI chatbot — I mean a messaging platform where humans chat with each other. Person-to-person and group messaging. Like WhatsApp.",
+      "annotation": { "action": "correct", "phase": "requirements", "target_concept": "real_time_messaging" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh! Sorry, I completely misunderstood. A messaging platform. Okay, let me redirect. How many users are we designing for? Do we need both 1:1 and group chats? What about multimedia — images, videos, voice messages? And what are the delivery guarantees?",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["scale", "group_chat", "multimedia", "delivery_guarantees"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "100 million DAU. Both 1:1 and groups up to 200 members. Text and images for now. Messages must be delivered reliably — at-least-once. Let's go.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "real_time_messaging" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me estimate the load first. If each user sends 30 messages per day on average, that's 3 billion messages per day, about 35,000 messages per second. For images, if 10% of messages have images averaging 200 KB, that's 60 TB of image data per day. Significant.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good estimates. Now let's hear your high-level design. How does the system work?",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "High-level architecture: clients connect via WebSocket for real-time bidirectional communication. A connection service manages these persistent connections — mapping each user to their connected server. When User A sends a message to User B, it goes through A's WebSocket to the connection server, then to a message routing service that looks up B's connection server, and delivers it over B's WebSocket. Messages are persisted to a database for history and offline delivery.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websockets", "connection_management", "message_routing", "message_persistence"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How does the message routing service know which server User B is connected to?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "connection_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "We maintain a user-to-server mapping in a fast lookup store — Redis. When a user connects via WebSocket, the connection server registers the mapping: user_id -> server_id in Redis. When routing a message, we look up the recipient's server_id from Redis. If the user is offline (no entry in Redis), the message goes to a pending message queue for delivery when they reconnect. For users with multiple devices, we store multiple entries and fan out to all devices.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["connection_management", "redis_caching", "offline_messaging", "multi_device"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle group messages? Sending to 200 members.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "group_messaging" }
+    },
+    {
+      "role": "candidate",
+      "content": "For group messages, the message routing service looks up all group members from a group membership store. For each member, it checks their connection status in Redis and routes the message to their connection servers. With 200 members, that's up to 200 deliveries per group message. To avoid making this synchronous, I'd use a fan-out service: write the message to the group's message store once, then asynchronously deliver to each member. If some members are offline, they pick up missed messages when they reconnect by querying the group message store for messages after their last-seen offset.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["group_messaging", "fan_out", "async", "offset_tracking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What database do you use for message storage?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "For messages, the access pattern is: write a message (high throughput), read recent messages for a conversation (range query by time), and fetch a specific message by ID (for features like reply-to). I'd use Cassandra with a partition key of conversation_id and clustering key of message_timestamp. This gives efficient range scans within a conversation — 'give me the last 50 messages' is a single-partition query. At 35K writes per second, Cassandra handles this comfortably.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cassandra", "database_schema", "access_patterns"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about read/delivery receipts and typing indicators? How do those work architecturally?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "read_receipts" }
+    },
+    {
+      "role": "candidate",
+      "content": "Read receipts: when User B reads a message, their client sends an acknowledgment through the WebSocket. The server updates the message status (delivered -> read) and forwards the receipt to User A via A's WebSocket. These are lightweight — we don't need to persist every status update in real-time. We can batch-update read status in the database periodically. Typing indicators are even more ephemeral — they're purely real-time signals. When User A starts typing, send a 'typing' event to User B's WebSocket. No persistence at all. If the event is lost, nothing breaks — the typing indicator just doesn't show.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_receipts", "typing_indicators", "ephemeral_data"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle message ordering? Can messages arrive out of order?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Within a 1:1 conversation, messages from A to B are ordered by the server timestamp when received. But if A sends two messages in rapid succession and they route through different servers, clock skew could reorder them. To handle this, the client includes a local sequence number. The server uses the sequence number to detect and correct ordering — if message seq=5 arrives before seq=4 from the same sender, we know they're out of order. For display, the client orders by sender sequence number within each sender's messages.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_ordering", "clock_skew", "sequence_numbers"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the image upload and delivery? 60 TB per day is substantial.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "image_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Images go to S3 or equivalent object storage. The flow: client uploads the image to S3 via pre-signed URL, gets back the S3 key, then sends the message with the image reference. The message itself only stores the S3 key and a thumbnail reference. We generate thumbnails asynchronously — the recipient initially sees a blurred placeholder, then loads the full image on tap. For delivery, we put a CDN in front of S3 for popular images. For WhatsApp-style encryption, the client encrypts the image before upload and shares the decryption key in the message.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["blob_storage", "pre_signed_url", "cdn", "image_processing", "encryption"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a connection server crashes? It has thousands of active WebSocket connections.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "server_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a connection server crashes, all its WebSocket connections drop. The clients detect the disconnection and reconnect — they're routed to a different connection server by the load balancer. The new server registers the user's updated connection in Redis. During the brief disconnection, any messages routed to the dead server fail to deliver. The sending server detects the failure and falls back to the offline message queue. When the client reconnects, it requests all messages since its last-seen offset, catching up on anything missed during the outage. The user experience is a brief 'connecting...' state.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["server_failure", "reconnection", "offline_messaging", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good recovery design. We're running low on time. Anything else?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Push notifications via APNS/FCM for offline users, message search using Elasticsearch indexing conversation content, abuse prevention with rate limiting and content scanning, and monitoring on message delivery latency and WebSocket connection counts. I should also note — I wasted the first few minutes by misunderstanding the problem as an AI chatbot. Once I corrected course, I think the design was solid, but those lost minutes meant less time for scaling discussion.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["push_notifications", "search", "rate_limiting", "monitoring"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Agreed — the initial misunderstanding cost you time. Once you pivoted, your design was quite strong, especially the message routing, ordering, and failure handling. Listening carefully to the problem statement is important. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 42,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 4,
+      "capacity_estimation": 7,
+      "api_design": 5,
+      "database_design": 7,
+      "caching_strategy": 5,
+      "scalability": 5,
+      "failure_handling": 7,
+      "communication": 4
+    },
+    "strengths": [
+      "Strong recovery after the misunderstanding — design quality was high once on track",
+      "Excellent message routing architecture with Redis connection mapping",
+      "Good handling of message ordering with client sequence numbers",
+      "Solid failure recovery design for connection server crashes"
+    ],
+    "weaknesses": [
+      "Misunderstood the problem entirely — designed a chatbot instead of a messaging platform",
+      "Lost 8 minutes before being corrected, reducing time for scaling and depth",
+      "Never discussed multi-region deployment or geographic distribution",
+      "No discussion of end-to-end encryption architecture beyond a brief mention",
+      "Insufficient time spent on scaling — how to handle 100M concurrent connections"
+    ]
+  }
+}

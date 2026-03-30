@@ -1,0 +1,183 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "senior",
+    "candidate_profile": "struggling",
+    "total_exchanges": 22,
+    "generation_id": "seed_156"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Today we'll design a rate limiter for an API gateway. What questions do you have about the requirements?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A rate limiter... so this is to make sure our servers don't get overloaded, right? Like distributing traffic evenly?",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["load_balancing"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Not quite. A load balancer distributes traffic across servers. A rate limiter restricts how many requests a particular client can make in a given time window. For example, an API key gets 100 requests per minute — any requests beyond that are rejected. Does that distinction make sense?",
+      "annotation": { "action": "hint", "phase": "requirements", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh, right. So it's about preventing abuse. Like if someone is hammering our API too much, we stop them. Got it. What's the scale we're designing for?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["abuse_prevention", "scale"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "1 million unique API keys, 500K QPS across 10 gateway nodes. Each key is limited to 500 requests per minute. Let's start with the high-level design.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, so when a request comes into the gateway, we need to check if the user has exceeded their limit. We could keep a counter in the database for each API key. Every time a request comes in, we increment the counter and check if it's over 500. If it is, we reject the request.",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["counter", "database_choice"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "A database query for every single API request at 500K QPS? That's going to add significant latency to every request. What's a faster data store for this?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "data_store_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh... Redis? It's in-memory so it would be much faster.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["redis_caching"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes, Redis is the standard choice for rate limiting. Now, you mentioned a simple counter. When does the counter reset?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "window_type" }
+    },
+    {
+      "role": "candidate",
+      "content": "Every minute? Like at the start of each minute, we reset all the counters to zero.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["fixed_window"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's called a fixed window approach. What happens if a client sends 500 requests at 11:00:59 and another 500 at 11:01:01? They've sent 1,000 requests in 2 seconds, but your counter sees 500 in each minute window.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "fixed_window_boundary" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh wow, that's a problem. They'd get double the allowed rate by timing their requests at the boundary. How do you fix that?",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["boundary_problem"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "There are several approaches — sliding window log, sliding window counter, token bucket, leaky bucket. Have you heard of the token bucket algorithm?",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "I've heard the name but I'm not sure exactly how it works. Something with tokens filling up?",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["token_bucket"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Here's the idea: imagine a bucket that holds up to 500 tokens. Tokens are added at a rate of 500 per minute — about 8.3 per second. Each request consumes one token. If the bucket is empty, the request is rejected. Can you think about how to implement this in Redis?",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "So we'd store the number of tokens for each API key in Redis. When a request comes in, we check if tokens are greater than zero. If yes, decrement by one and allow. If no, reject. But how do we add tokens back? Do we need a background process that adds 8.3 tokens per second for every API key?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["token_bucket", "token_refill"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "A background process for a million API keys would be expensive. There's a smarter way — calculate the tokens lazily. What if you stored the last access timestamp along with the token count?",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "lazy_refill" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh, I see. When a request comes in, we check how much time has passed since the last request, calculate how many tokens should have been added in that time, add them to the bucket up to the max, and then try to consume one. So if the last request was 30 seconds ago, we'd add 30 times 8.3 equals 249 tokens. That way we don't need a background job.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["lazy_refill", "token_calculation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now the critical problem: two requests for the same API key arrive at two different gateway nodes at the exact same time. Both read the token count as 1. Both allow the request. You've now admitted 2 requests when only 1 should have been allowed. How do you fix this?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "race_condition" }
+    },
+    {
+      "role": "candidate",
+      "content": "A lock? We could lock the Redis key before reading and unlock after writing. But that would be slow if lots of requests are hitting the same key...",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["distributed_lock"], "depth": "shallow", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right, a distributed lock adds too much latency and contention. Redis has a feature that lets you run a script atomically — no other commands can interleave. What is it?",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "lua_script" }
+    },
+    {
+      "role": "candidate",
+      "content": "Lua scripts? I've heard Redis can run Lua scripts atomically. So we'd put the whole token check logic — read timestamp, calculate refill, check count, decrement — into a Lua script, and Redis guarantees it runs without interruption. That solves the race condition.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["lua_script", "atomic_operations"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when Redis goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "redis_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If Redis is down... we can't check rate limits. I guess we'd have to either reject all requests, which is bad, or allow all requests, which means no rate limiting. Allowing all seems better — it's worse to have the whole API go down just because rate limiting is broken.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["fail_open", "availability"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fail open is the right choice. Is there anything you could do locally on each gateway node as a backup?",
+      "annotation": { "action": "hint", "phase": "scaling_failures", "target_concept": "local_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Maybe each node could keep its own counter in memory? Like a local version of the rate limiter. It won't be as accurate since a user's requests hit different nodes, but at least we'd catch someone sending thousands of requests. We could set the local limit to the total limit divided by the number of nodes.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["local_rate_limiting", "per_node_limit"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good thinking. We're wrapping up. What are the key things you'd want to monitor in production?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd want to monitor the rejection rate — if it's too high maybe our limits are too strict. Also Redis latency and whether the local fallback is ever activating. And maybe the number of unique API keys hitting their limits.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["monitoring", "rejection_rate"], "depth": "shallow", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thanks for working through this. You arrived at a reasonable token bucket design. Appreciate the effort.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 38,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 3,
+      "capacity_estimation": 3,
+      "api_design": 4,
+      "database_design": 4,
+      "caching_strategy": 5,
+      "scalability": 4,
+      "failure_handling": 4,
+      "communication": 5
+    },
+    "strengths": [
+      "Eventually grasped the token bucket algorithm and lazy refill optimization after guidance",
+      "Correctly identified fail-open as the right strategy for Redis failure",
+      "Honest about knowledge gaps rather than bluffing"
+    ],
+    "weaknesses": [
+      "Confused rate limiting with load balancing at the start — fundamental concept confusion",
+      "Couldn't identify the fixed window boundary problem without it being explained",
+      "Needed heavy hints for every key decision — Lua scripts, lazy refill, local fallback",
+      "No capacity estimation performed at all",
+      "Didn't discuss alternative algorithms or when to choose which",
+      "No discussion of rate limit response headers or client communication"
+    ]
+  }
+}

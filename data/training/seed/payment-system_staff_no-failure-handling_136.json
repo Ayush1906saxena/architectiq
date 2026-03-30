@@ -1,0 +1,172 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "staff",
+    "candidate_profile": "no-failure-handling",
+    "total_exchanges": 24,
+    "generation_id": "seed_136"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a payment processing system — like Stripe's backend. Merchants integrate with our API to charge customers' credit cards. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several. What's the transaction volume? Do we handle both one-time charges and subscriptions? What currencies and geographies? Do we need to support refunds and payouts to merchants? And what's the latency requirement for processing a payment?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scale", "payment_types", "currencies", "refunds", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "50,000 transactions per second at peak. One-time charges only for now. Multi-currency, US and EU. Yes to refunds and merchant payouts. Payment processing should complete within 2 seconds. Let's design.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "payment_processing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the high-level architecture. The system has several core services. The API Gateway handles merchant authentication, request validation, and rate limiting. The Payment Orchestration Service manages the payment lifecycle. The Tokenization Service handles PCI-compliant card data storage. The Ledger Service maintains double-entry bookkeeping. The Payment Processor Adapter integrates with card networks like Visa and Mastercard. And the Payout Service handles merchant settlements.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_gateway", "payment_orchestration", "tokenization", "double_entry_ledger", "pci_compliance", "payout_service"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Clean service decomposition. Walk me through the payment flow — a customer buys something for $50.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "payment_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Step 1: Merchant's server calls POST /v1/charges with the payment token (previously obtained from our client-side SDK), amount ($50), currency (USD), and an idempotency key. Step 2: API gateway authenticates the merchant via API key, validates the request, and checks the idempotency cache. Step 3: Payment Orchestration Service creates a charge record in 'pending' state. Step 4: It calls the Tokenization Service to resolve the payment token to the actual card details — this happens in our PCI-compliant environment. Step 5: It calls the Payment Processor Adapter, which formats the request for the appropriate card network and sends the authorization request. Step 6: Card network routes to the issuing bank, which checks the cardholder's balance/credit and returns approved/declined. Step 7: On approval, we update the charge to 'authorized'. Step 8: We initiate capture — requesting the actual funds transfer. Step 9: On capture confirmation, we update to 'captured' and write ledger entries: debit customer, credit merchant balance (minus our fee). Step 10: Return success to the merchant with the charge ID.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payment_flow", "tokenization", "authorization", "capture", "double_entry_ledger", "idempotency", "state_machine"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent flow. Very thorough. Now — what if the payment gateway times out in step 5? You've sent the authorization request but you don't get a response.",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "gateway_timeout" }
+    },
+    {
+      "role": "candidate",
+      "content": "The gateway timeout? Well, that shouldn't happen if we have proper connectivity to the card networks. We'd have dedicated network connections, probably multiple redundant links. The card networks have very high availability — they're designed to never go down.",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["network_reliability"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Card network timeouts happen every single day in production. Network issues, card network maintenance windows, overloaded issuing banks. At 50,000 TPS, even a 0.1% timeout rate means 50 timeouts per second. How does your system handle this?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "gateway_timeout" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, you're right. So if we time out waiting for the authorization response, the problem is we don't know if the charge went through or not. The card network may have approved it and the response just didn't reach us. We can't just retry because we might double-charge the customer. I suppose we'd need to query the card network's status API to check whether the authorization was processed. If it was approved, continue with capture. If it wasn't processed, retry with the same idempotency key. If the status check also fails... then we're in a difficult state.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["gateway_timeout", "idempotency", "double_charge"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good, you identified the key issue — unknown state. What do you tell the merchant while you're figuring this out?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "timeout_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "We'd return a status of 'processing' rather than success or failure. The merchant's integration should handle this status — show the customer a 'payment is being processed' message. We set up a background reconciliation that resolves the unknown state within a few minutes. The merchant can either poll our API for the final status or we can send a webhook when it resolves. The charge stays in 'pending_confirmation' state until resolved.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["async_processing", "reconciliation", "webhooks", "state_machine"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now what if your own database goes down while processing a payment? The charge record can't be written.",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "database_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Well, our database would have replicas and automatic failover. We'd use PostgreSQL with streaming replication and a tool like Patroni for automatic leader election. If the primary fails, a replica promotes within seconds. During the failover window, we'd have a brief outage on writes but it would be under 30 seconds. For the payments in flight during that window, the application would retry the write after failover completes.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["database_failover", "replication", "high_availability"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "But during those 30 seconds, you've potentially authorized a charge on someone's credit card without recording it in your database. How do you reconcile that?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "reconciliation" }
+    },
+    {
+      "role": "candidate",
+      "content": "That is a real problem. If we authorized the charge but couldn't record it, the customer is charged but our system has no record. We'd need a reconciliation process that compares our database records with the card network's transaction log. Any authorizations on the network that don't exist in our database are 'orphaned' — we'd either capture them (and create the missing records) or void them (reverse the authorization). This reconciliation should run frequently — every few minutes — to minimize the window.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["reconciliation", "orphaned_transactions", "void_authorization"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now I want to explore another failure. A merchant sends a refund request. Your system processes the refund, credits the customer's card, but the webhook notifying the merchant fails. What happens?",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "webhook_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the webhook fails, the merchant doesn't know the refund was processed. They might think it failed and try again. Since we have the idempotency key, the retry would return the existing refund result — no double refund. For the webhook delivery, we'd use a retry mechanism with exponential backoff — retry at 1 minute, 5 minutes, 30 minutes, 2 hours, up to 24 hours. Store failed webhooks in a retry queue. Also provide a webhooks endpoint where merchants can list pending events they may have missed. After 24 hours of failures, alert our support team.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["webhook_failure", "idempotency", "retry_mechanism", "exponential_backoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about the ledger. How does double-entry bookkeeping work in your system?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "double_entry_ledger" }
+    },
+    {
+      "role": "candidate",
+      "content": "Every financial movement is recorded as two entries — a debit and a credit. For a $50 charge with a 2.9% fee: debit customer_liability $50, credit merchant_balance $48.55, credit our_revenue $1.45. The sum of all debits always equals the sum of all credits. For a refund, the entries reverse: debit merchant_balance $48.55, debit our_revenue $1.45, credit customer_liability $50. The ledger is append-only — we never update or delete entries, only add new ones. This creates a complete audit trail.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["double_entry_ledger", "audit_trail"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you scale the ledger at 50K TPS? That's 100K ledger entries per second minimum.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "ledger_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ledger is append-only, which is write-friendly. I'd shard by account_id — each shard handles entries for a subset of accounts. Since most queries are 'get all entries for this account,' sharding by account keeps queries single-shard. For the global balance check (all debits = all credits), that's a batch job that runs periodically across all shards, not a real-time query. With 50 shards, each handles about 2K ledger entries per second — very manageable for PostgreSQL.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ledger_scaling", "sharding_strategy", "batch_processing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "One more failure scenario. What happens during a network partition between your system and the card networks? You can't reach Visa or Mastercard.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "network_partition" }
+    },
+    {
+      "role": "candidate",
+      "content": "If we can't reach the card networks, we can't process any new charges. This is a hard failure — we can't authorize without the card network. Options: maintain connections to multiple card processors (Visa, Mastercard, and backup processors) and route around the failed one. If it's a total network partition, we need to be honest — return 503 to merchants and let them decide whether to retry or use an alternative payment method. We can queue the payment requests and process them when connectivity restores, but that risks the card being declined when we finally try. For subscriptions — if we were to support them — we'd have a grace period before canceling.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["network_partition", "multi_processor", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's wrap up. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Fraud detection as an async pipeline analyzing transaction patterns — velocity checks, geographic anomalies, unusual amounts. PCI DSS compliance for the tokenization service — separate network, restricted access, annual audits. Multi-region deployment for latency and disaster recovery. And I want to acknowledge — when you first asked about the gateway timeout, I dismissed it. That was wrong. In payment systems, every failure mode matters because you're dealing with real money. I should have proactively designed for these cases from the start.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fraud_detection", "pci_compliance", "multi_region", "monitoring"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That self-reflection is valuable. Your happy-path design was exceptional — one of the best I've seen. The gap was that you didn't proactively address failure scenarios. At staff level for a payment system, failure handling should be woven into every component, not an afterthought. When pushed, you produced strong failure analysis, which shows the knowledge is there — it's just not your default mode of thinking. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 50,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 5,
+      "api_design": 8,
+      "database_design": 7,
+      "caching_strategy": 3,
+      "scalability": 6,
+      "failure_handling": 4,
+      "communication": 7
+    },
+    "strengths": [
+      "Excellent happy-path payment flow — detailed 10-step process with authorization and capture",
+      "Strong double-entry ledger design with concrete fee calculation examples",
+      "Good recovery when pushed on failure modes — reconciliation and webhook retry were well-designed"
+    ],
+    "weaknesses": [
+      "Initially dismissed gateway timeout as 'shouldn't happen' — dangerous attitude for payment systems",
+      "No proactive failure handling — every failure scenario required interviewer prompting",
+      "Never discussed caching strategy for any component",
+      "At staff level for payments, failure handling should be the primary design concern, not secondary",
+      "No discussion of monitoring, alerting, or observability"
+    ]
+  }
+}

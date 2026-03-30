@@ -36,9 +36,74 @@ PHASE_TRANSITIONS = {
 
 
 class InterviewStrategist:
-    def decide_next_action(self, tracker: InterviewTracker) -> InterviewAction:
+    def decide_next_action(self, tracker: InterviewTracker, analysis: dict | None = None) -> InterviewAction:
         """Pick the highest-priority next action."""
         candidates: list[InterviewAction] = []
+
+        # PRIORITY 110: Handle stuck candidate — HIGHEST PRIORITY
+        is_stuck = analysis.get("is_stuck", False) if analysis else False
+        is_short = analysis.get("is_short_answer", False) if analysis else False
+        consecutive_stuck = getattr(tracker, '_consecutive_stuck', 0)
+
+        if is_stuck or (is_short and not analysis.get("concepts_mentioned")):
+            tracker._consecutive_stuck = consecutive_stuck + 1
+
+            # Pick the most important uncovered concept and give a hint
+            uncovered = tracker.get_uncovered_concepts()
+            graph_concepts = tracker.graph.get("concepts", {})
+
+            if tracker._consecutive_stuck >= 3:
+                # 3+ stuck answers — be very direct, almost teach
+                hint_concept = uncovered[0] if uncovered else ""
+                concept_name = graph_concepts.get(hint_concept, {}).get("name", "the next component")
+                return InterviewAction(
+                    priority=110,
+                    action_type="give_strong_hint",
+                    data={
+                        "concept": hint_concept,
+                        "hint": f"Let me help you. Think about {concept_name.lower()}. In a system like this, most engineers would start by figuring out the data storage — what database would you use, and why? Just pick one and we'll work from there.",
+                        "stuck_count": tracker._consecutive_stuck,
+                    },
+                )
+            elif tracker._consecutive_stuck >= 2:
+                # 2 stuck — give a guided hint
+                hint_concept = uncovered[0] if uncovered else ""
+                concept_name = graph_concepts.get(hint_concept, {}).get("name", "")
+                return InterviewAction(
+                    priority=110,
+                    action_type="give_hint",
+                    data={
+                        "concept": hint_concept,
+                        "hint": f"No worries — let me point you in a direction. For this system, a key question is: how would you handle {concept_name.lower() if concept_name else 'the data storage'}? What technology comes to mind?",
+                        "stuck_count": tracker._consecutive_stuck,
+                    },
+                )
+            else:
+                # First stuck — gentle nudge
+                if tracker.phase == Phase.REQUIREMENTS:
+                    return InterviewAction(
+                        priority=110,
+                        action_type="give_hint",
+                        data={
+                            "hint": "That's okay. Let me help — for requirements, think about: How many users? How many requests per second? What's more important, speed or consistency? These are the questions that shape the whole design.",
+                            "stuck_count": 1,
+                        },
+                    )
+                else:
+                    hint_concept = uncovered[0] if uncovered else ""
+                    concept_name = graph_concepts.get(hint_concept, {}).get("name", "the next piece")
+                    return InterviewAction(
+                        priority=110,
+                        action_type="give_hint",
+                        data={
+                            "concept": hint_concept,
+                            "hint": f"Let's try a different angle. What about {concept_name.lower()}? How would you approach that part?",
+                            "stuck_count": 1,
+                        },
+                    )
+        else:
+            # Reset stuck counter on a real answer
+            tracker._consecutive_stuck = 0
 
         # PRIORITY 100: Catch contradictions
         contradictions = tracker.get_unaddressed_contradictions()

@@ -1,0 +1,179 @@
+{
+  "metadata": {
+    "problem_id": "message-queue",
+    "level": "principal",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_245"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed message queue — think Kafka or RabbitMQ. This will be a platform service used by many teams across the organization. What would you like to clarify?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Key questions: Are we optimizing for throughput or latency? What delivery guarantee do we need — at-least-once, exactly-once, or at-most-once? What's the expected message size and throughput? How many producer and consumer teams are we supporting? And what's our retention requirement — do messages need to be replayable?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["delivery_guarantees", "throughput", "latency", "message_retention", "multi_tenancy"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Throughput-optimized with at-least-once delivery. Average message size 1KB, peak throughput 2 million messages per second. About 40 teams producing and consuming. 7-day retention with replay capability. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do a quick capacity estimate. 2M messages/sec at 1KB each is 2GB/sec of ingestion throughput. With 3x replication, that's 6GB/sec of disk writes. Over 7 days, raw storage is 2GB/sec times 604,800 seconds — about 1.2PB, or 3.6PB with replication. We'll need a substantial cluster. Now, as a principal-level consideration, the bigger challenge isn't the raw infrastructure — it's operating this as a multi-team platform with strong contracts between producers and consumers. Let me focus on that.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "replication", "storage_estimation", "platform_thinking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "I like that framing. Tell me about the contracts between producers and consumers.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "schema_registry" }
+    },
+    {
+      "role": "candidate",
+      "content": "The core contract is the message schema. Without schema enforcement, you get the 'distributed monolith' problem — producers change their payload format and consumers break silently. I'd implement a schema registry as a first-class component of the platform. Every topic has a registered schema — I'd use Avro for its compact binary format and built-in schema evolution support. The schema registry stores all versions of each schema and enforces compatibility rules: backward compatible by default, meaning new consumers can read old messages. Producers serialize with a schema ID header, consumers look up the schema to deserialize. The registry rejects schema changes that violate the compatibility contract.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["schema_registry", "schema_evolution", "avro", "backward_compatibility"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about forward compatibility? When would you want that versus backward?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "schema_evolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question. Backward compatibility means new schema can read old data — consumers upgrade first. Forward compatibility means old schema can read new data — producers upgrade first. In practice, you often want full compatibility — both backward and forward — so that producers and consumers can upgrade independently in any order. This is achieved by only allowing additive changes with defaults: new optional fields with defaults are both backward and forward compatible. Removing fields is trickier — you deprecate first, wait for all consumers to stop reading the field, then remove in a later version. Our schema registry would enforce this by maintaining a compatibility mode per topic — BACKWARD, FORWARD, FULL, or NONE — configurable by the topic owner.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["backward_compatibility", "forward_compatibility", "schema_evolution"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you verify that a consumer actually handles a new schema version correctly? Schema compatibility is necessary but not sufficient.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "consumer_contract_testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Exactly — schema compatibility tells you deserialization won't break, but it doesn't tell you the consumer's business logic handles new fields or changed semantics correctly. I'd introduce consumer contract testing as part of the platform. Each consumer team publishes a contract — a set of sample messages that exercise their processing logic, along with expected outcomes. When a producer wants to publish a new schema version, the platform runs the consumer contracts against sample messages generated from the new schema. If any consumer contract fails, the schema change is blocked until the affected consumer updates their contract. This is integrated into CI — schema changes go through a 'compatibility gate' that runs all downstream contracts. It shifts breakage detection left — from production incidents to PR reviews.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consumer_contract_testing", "ci_cd_integration", "shift_left_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a mature approach. Let's talk about the core queue architecture. How are messages stored and replicated?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "message_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd model this after Kafka's log-based architecture. Each topic is divided into partitions. Each partition is an append-only, ordered, immutable log of messages. Messages are written sequentially to disk — this is key for throughput because sequential I/O on modern SSDs can sustain 2-3 GB/sec per drive. Each partition is replicated across 3 brokers using a leader-follower model. Producers write to the leader, followers pull from the leader asynchronously. We use ISR — in-sync replicas — to track which followers are caught up. A message is considered committed when all ISR members have it. Consumers read from leaders by default, but we can enable follower reads for latency-sensitive consumers in remote regions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["log_based_storage", "partitioning", "replication", "isr", "sequential_io"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How do you handle consumer group coordination — assigning partitions to consumers and rebalancing when consumers join or leave?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "consumer_groups" }
+    },
+    {
+      "role": "candidate",
+      "content": "Consumer group coordination is a distributed consensus problem. I'd use a cooperative rebalancing protocol. Each consumer group has a coordinator — a designated broker. When a consumer joins or leaves, the coordinator triggers a rebalance. Rather than the traditional 'stop-the-world' rebalance where all partitions are revoked and reassigned, I'd use incremental cooperative rebalancing: only the partitions that need to move are revoked from the current owner and assigned to the new owner. Other consumers continue processing uninterrupted. This dramatically reduces rebalance impact. For partition assignment strategy, I'd default to sticky assignment — minimizing partition movement — with support for rack-aware assignment for cross-AZ deployments.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consumer_groups", "cooperative_rebalancing", "partition_assignment", "rack_awareness"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now, as a platform serving 40 teams, how do you define and enforce SLAs?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "platform_slas" }
+    },
+    {
+      "role": "candidate",
+      "content": "We define SLAs at three levels. Platform SLA — the overall service: 99.95% availability for produce and consume operations, maximum end-to-end latency of 100ms at p99 for in-region operations. Topic SLA — per topic guarantees: we tier topics into critical, standard, and best-effort. Critical topics get dedicated partitions on high-performance brokers, higher replication factor of 4, and priority during resource contention. Standard topics get the default 3x replication on shared brokers. Best-effort is for dev/test with relaxed guarantees. Consumer SLA — we track consumer lag per consumer group and alert if lag exceeds a configurable threshold. If a consumer group is consistently behind, we page the owning team. We publish an internal SLA dashboard showing real-time compliance: produce success rate, end-to-end latency percentiles, consumer lag, and ISR shrink events.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["platform_slas", "tiered_service", "consumer_lag", "monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "A broker goes down and takes several partition leaders with it. Walk me through what happens.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "broker_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The controller — a special broker elected via Raft consensus — detects the failure through missed heartbeats, typically within 10 seconds. It initiates leader election for all affected partitions: for each partition, the first ISR member becomes the new leader. This is fast — metadata update propagated to all brokers. Producers discover the new leaders via metadata refresh and retry failed writes — our client library handles this transparently with retries and idempotent producers. On the consumer side, consumers detect the leader change on their next fetch and redirect to the new leader. Data loss risk: if we require acks=all, no committed messages are lost because all ISR members had them. If the failed broker had uncommitted messages — received by the leader but not yet replicated — those are lost, which is acceptable for at-least-once semantics. Recovery: when the broker comes back, it rejoins as a follower, catches up from the current leaders, and re-enters the ISR.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leader_election", "controller", "raft_consensus", "idempotent_producer", "isr", "data_durability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if we lose an entire availability zone?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "az_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is why rack-awareness matters. With min.insync.replicas=2 and replication factor 3, we ensure replicas span at least 2 AZs. If we lose one AZ, the surviving 2 replicas in other AZs have all committed data. The controller elects new leaders from surviving ISR members. However, throughput temporarily drops because we've lost a third of our brokers. Auto-scaling kicks in to provision replacement brokers in the surviving AZs, but rebalancing takes time. For critical topics with replication factor 4, we can survive losing an entire AZ with no throughput degradation — 3 surviving replicas still exceed min.insync.replicas=2. The key trade-off is cost: 4x replication across 3 AZs is expensive. We reserve it for the most critical data pipelines.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rack_awareness", "min_insync_replicas", "az_failure", "auto_scaling", "replication_factor"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do teams self-serve on this platform? What's the workflow for creating a new topic and starting to produce?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "self_service" }
+    },
+    {
+      "role": "candidate",
+      "content": "Self-service through a platform portal and a Terraform provider. The workflow: a team creates a topic through the portal or Terraform, specifying schema, partition count, retention, tier level, and the owning team. The schema is registered in the schema registry. The platform provisions the topic and generates API credentials scoped to that topic. The producing team integrates using our client SDK, which handles serialization against the registered schema, automatic retries, and metrics emission. For access control, we use topic-level ACLs — producers need write permission, consumers need read permission, managed through the portal. Topic creation goes through an approval workflow only for critical-tier topics — standard topics are instant.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["self_service", "terraform", "access_control", "developer_experience"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "One thing I haven't heard much about — dead letter queues and poison message handling. How do you deal with messages that consumers can't process?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "dead_letter_queue" }
+    },
+    {
+      "role": "candidate",
+      "content": "Important topic. Our consumer SDK has built-in retry and DLQ support. When a consumer fails to process a message, the SDK retries with exponential backoff — 3 retries by default with configurable count and delay. After exhausting retries, the message is published to a dead letter topic — a companion topic automatically created alongside the primary topic. The DLQ preserves the original message, the error reason, the retry count, and the consumer group that failed. We have a DLQ dashboard where teams can inspect failed messages, fix their consumer logic, and replay messages from the DLQ back to the primary topic. For poison messages that crash the consumer — like a malformed message that causes an unhandled exception — the SDK catches the crash, publishes to DLQ, and continues from the next offset rather than blocking the entire partition.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dead_letter_queue", "retry_strategy", "exponential_backoff", "poison_message_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How do you handle monitoring and observability across 40 teams?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three layers of observability. Infrastructure layer: broker CPU, disk I/O, network, partition count, ISR shrink rate, under-replicated partitions — this is owned by the platform team. Topic layer: produce rate, consume rate, consumer lag per group, DLQ inflow rate, message size distribution — visible to both platform and owning teams. Application layer: end-to-end latency from produce to consume, processing success rate, business-level metrics — owned by the application teams. We publish all metrics to our internal Prometheus, with Grafana dashboards templated per team. Critical alerts: consumer lag exceeding threshold, ISR shrink, DLQ inflow spike, produce error rate. We have a weekly 'platform health review' where we review SLA compliance across all tenants and identify teams that need assistance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "observability", "prometheus", "alerting", "sla_compliance"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running low on time. Anything you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. First, I'd add a message tracing capability — the ability to trace a message from producer through the queue to consumer, integrated with distributed tracing. Second, I'd build a capacity planning model that projects storage and throughput needs 90 days out per topic, so we can proactively scale. Third, for cost attribution, each team's usage is metered — messages produced, bytes stored, consumer compute — so we can charge back or at least show cost of ownership. This makes teams thoughtful about retention and throughput needs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_tracing", "capacity_planning", "cost_attribution"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong interview. You showed good platform-level thinking with deep technical grounding. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 76,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 8,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 6,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent schema registry and contract testing design — mature approach to producer-consumer coupling",
+      "Strong failure handling across broker failure and AZ-level scenarios with clear trade-off analysis",
+      "Platform SLA tiering with concrete numbers and enforcement strategy"
+    ],
+    "weaknesses": [
+      "Did not discuss caching strategies for consumer offset management or metadata",
+      "Could have explored exactly-once semantics and idempotent consumer patterns more deeply"
+    ]
+  }
+}

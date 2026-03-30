@@ -1,0 +1,149 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "senior",
+    "candidate_profile": "good",
+    "total_exchanges": 20,
+    "generation_id": "seed_247"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a rate limiter for an API gateway. It should protect backend services from being overwhelmed. What do you want to know?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few questions. What are we rate limiting by — API key, user ID, IP address, or some combination? What's the scale — how many requests per second does the gateway handle? Do we need different rate limits for different API endpoints or a single global limit per client? And what's the tolerance for inaccuracy — is it okay if we occasionally let a few extra requests through?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_scope", "throughput", "granularity", "enforcement_strictness"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Per API key, with per-endpoint overrides. 200,000 requests per second at the gateway. Soft enforcement — a small margin of error is fine. Default limit is 1,000 requests per minute per key, but some endpoints like search are limited to 100 per minute. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. I'd use a token bucket algorithm for this. Each API key gets a bucket per rate limit rule. The bucket has two parameters: the refill rate — tokens added per second — and the burst capacity — maximum tokens the bucket can hold. For the default 1,000 per minute, that's approximately 16.7 tokens per second with a burst capacity of, say, 50 to allow short bursts. For each incoming request, we check the bucket: if there's at least one token, consume it and allow. Otherwise, reject with HTTP 429.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "burst_handling", "rate_limiting"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Why token bucket over other algorithms like sliding window or leaky bucket?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Token bucket has two advantages. First, it naturally handles bursts — a client that was idle accumulates tokens and can send a short burst, which is user-friendly. Leaky bucket enforces a strict constant rate, which feels rigid for interactive applications. Second, token bucket is memory-efficient — we only need to store two values per bucket: the token count and the last refill timestamp. Sliding window log is more accurate but requires storing individual request timestamps, which is expensive at scale. Sliding window counter is a good middle ground but slightly more complex to implement. For soft enforcement with burst tolerance, token bucket is the sweet spot.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "leaky_bucket", "sliding_window", "burst_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How do you implement this in a distributed setting? The gateway runs on many nodes.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "The state needs to be shared across gateway nodes. I'd use Redis as the centralized token store. Each rate limit check is a Redis operation: a Lua script that atomically calculates elapsed time since last refill, adds tokens proportionally up to the max, decrements one token if available, and returns allow or deny. The Lua script runs atomically in Redis, so no race conditions. At 200K requests per second, each requiring a Redis call, we'd need a Redis cluster — maybe 5-6 shards, partitioned by API key hash. Each shard handles roughly 35K operations per second, well within Redis capabilities.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "redis_lua_scripts", "atomic_operations", "sharding_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if Redis is down? Do you block all requests or allow all requests?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "redis_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a critical design decision. If Redis is down and we block everything, we've turned a rate limiter outage into a full API outage — the cure is worse than the disease. I'd fail open — allow requests through when Redis is unavailable. The reasoning: rate limiting is a protection mechanism, not a business logic component. Going without it for a few minutes is far less damaging than rejecting all traffic. However, I'd add a local fallback: each gateway node maintains an in-memory approximate counter using a local token bucket. It won't be globally accurate — a client hitting different nodes gets a higher effective limit — but it provides some protection against extreme abuse while Redis recovers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fail_open", "graceful_degradation", "local_rate_limiting", "single_point_of_failure"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good reasoning. Now let's talk about something often overlooked — monitoring the rate limiter itself. How do you know if it's working correctly?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is something I feel strongly about. The rate limiter needs its own observability stack. Key metrics I'd track: rate limit hit rate — what percentage of requests are being throttled, broken down by API key and endpoint. If overall throttle rate is above 5%, something is off — either our limits are too restrictive or a client is misbehaving. Throttle rate per client — if one client suddenly starts getting throttled when they weren't before, their usage pattern changed or we changed a limit. False positive rate — requests that were throttled but shouldn't have been. This is harder to measure directly, but we can approximate it by comparing the token bucket count against the actual request count in our access logs post-hoc. And Redis operation latency — if the rate limit check adds more than 5ms to the request, the cost of protection is too high.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "rate_limit_metrics", "false_positive_rate", "observability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned false positive rate. How would you detect that a rate limit is too restrictive?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "rate_limit_tuning" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several signals. First, support ticket volume — if clients are complaining about 429 errors, that's the most direct signal. Second, throttle rate trending — if a client's throttle rate increases steadily over weeks without any announced traffic pattern change, their legitimate usage is growing into the limit. Third, we can correlate throttle events with business metrics — if throttled requests during peak hours correlate with a drop in downstream conversion or user engagement, the limits are impacting business outcomes. I'd build an alerting rule: if any client's throttle rate exceeds 10% for more than 30 minutes, we alert the API team to review whether the limit should be raised. We also send weekly reports to client teams showing their usage against their limits, so they can proactively request increases before hitting them.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_tuning", "alerting", "business_impact_correlation", "proactive_communication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle per-endpoint rate limits? Your search endpoint has a different limit than the default.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "rate_limit_rules" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd implement a rule hierarchy. Each API key has a default rate limit — 1,000 per minute. Then endpoint-specific overrides — search at 100 per minute, write endpoints maybe at 50 per minute. The evaluation order: check the most specific rule first. If an endpoint-specific rule exists for this API key and endpoint combination, use it. Otherwise, fall back to the endpoint default, then the API key default. In Redis, each rule is a separate token bucket. So a request to the search endpoint checks two buckets: the per-key-per-endpoint bucket (100/min for search) and the global per-key bucket (1,000/min). The request is allowed only if both buckets have tokens. This prevents a client from exhausting their global limit entirely on search while still accessing other endpoints.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_rules", "rule_hierarchy", "multi_bucket"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What response headers do you return to help clients handle rate limiting gracefully?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Following RFC 6585 and draft-ietf-httpapi-ratelimit-headers. On every response — not just 429s — I'd include: X-RateLimit-Limit showing the maximum requests allowed in the window, X-RateLimit-Remaining showing how many requests are left, X-RateLimit-Reset with the Unix timestamp when the bucket refills to maximum. On 429 responses specifically, a Retry-After header with the number of seconds until at least one token is available. This lets well-behaved clients implement exponential backoff and even preemptively slow down when they see Remaining getting low. We'd document these headers prominently in our API docs with example client code showing proper handling.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "rate_limit_headers", "retry_after", "exponential_backoff"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle configuration changes — say we need to increase a client's rate limit?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "configuration_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rate limit configurations are stored in a configuration service — I'd use a database-backed config store, not hardcoded values. Changes take effect without redeployment. The flow: an admin updates the limit through an admin API or dashboard. The config service writes to the database and publishes a change event to a Redis pub/sub channel. All gateway nodes subscribe to this channel and update their local config cache within seconds. The token bucket in Redis doesn't need to be recreated — on the next request, the Lua script reads the new limit from the config and adjusts the bucket parameters. The key is that limit changes are non-disruptive — no restart, no connection drop, no brief window of no rate limiting.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["configuration_management", "dynamic_config", "pub_sub", "zero_downtime"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running short on time. Anything else you'd want to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Two things. First, I'd add a 'dry run' mode where the rate limiter evaluates rules and emits metrics but doesn't actually reject requests. This is invaluable when rolling out new limits — you can see who would be affected before flipping the switch. Second, abuse detection: beyond static rate limits, I'd add a pattern detector that identifies anomalous traffic — sudden spikes from a single key, geographic anomalies, or credential-stuffing patterns — and dynamically tightens limits or triggers CAPTCHA challenges. This is a future enhancement but important for a production API gateway.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dry_run_mode", "anomaly_detection", "abuse_prevention", "gradual_rollout"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You showed solid depth on the core algorithm and really shone on the monitoring and operational aspects. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 68,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 7,
+      "api_design": 8,
+      "database_design": 6,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Strong monitoring and observability design — rate limit hit rate, false positive tracking, business impact correlation",
+      "Excellent fail-open reasoning with local fallback strategy",
+      "Practical operational features like dry-run mode and dynamic configuration"
+    ],
+    "weaknesses": [
+      "Could have discussed database schema for rate limit configuration and audit logs more deeply",
+      "Did not explore geographic distribution or multi-region rate limiting challenges"
+    ]
+  }
+}

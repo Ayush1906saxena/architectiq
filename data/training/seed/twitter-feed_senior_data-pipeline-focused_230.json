@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "data-pipeline-focused",
+    "total_exchanges": 22,
+    "generation_id": "seed_230"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed system. Users post tweets, follow other users, and see a timeline of tweets from people they follow. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd like to understand the scale: how many users, DAU, average tweets per user per day? What's the latency target for loading the feed? And do we need to support real-time updates or is periodic refresh acceptable?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "dau", "latency", "real_time"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500 million total users, 200 million DAU. Average user posts 2 tweets per day and follows 200 people. Feed should load in under 200ms. Near-real-time — a tweet should appear in followers' feeds within 5 seconds.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "I want to think about this as an end-to-end data pipeline. A tweet is just a data event that flows through stages: ingestion, fan-out, materialization, caching, and serving. Each stage is a processing step with its own throughput and latency characteristics. Let me map out the pipeline.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_pipeline", "stream_processing", "pipeline_stages"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting framing. Walk me through each stage.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "data_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "Stage 1 — Tweet Ingestion: User posts a tweet. It hits the write API, gets validated, stored in the tweets table, and published as an event to Kafka. Topic: tweet_created, partitioned by user_id. With 500M users * 2 tweets/day, that's about 11,500 events per second into Kafka. Stage 2 — Fan-out: A Kafka consumer reads tweet_created events, looks up the author's followers, and writes the tweet ID into each follower's timeline. For a user with 200 followers, that's 200 writes per tweet, so 2.3 million fan-out writes per second. Stage 3 — Timeline Materialization: Each user's timeline is a sorted list of tweet IDs, stored in Redis as a sorted set with the tweet timestamp as the score. Stage 4 — Cache Warming: When a user becomes active, we pre-load their timeline into a serving cache. Stage 5 — Serving: Feed API reads the materialized timeline, hydrates tweet data, and returns it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka", "fan_out", "timeline_materialization", "redis_sorted_set", "cache_warming"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "2.3 million fan-out writes per second is a lot. How does that work in practice?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "It is, and this is the pipeline's bottleneck. I'd use a hybrid fan-out strategy. For regular users (followers < 10,000) — fan-out on write. The tweet gets pushed into each follower's timeline at write time. This is the 99% case and makes reads fast. For celebrity users (followers > 10,000) — fan-out on read. Their tweets aren't pushed; instead, when a follower loads their feed, we merge the materialized timeline with a real-time fetch of celebrity tweets. The threshold of 10,000 is tunable — I'd instrument the fan-out latency per tweet and adjust. The consumer group that handles fan-out would be scaled to about 100 partitions in Kafka, each consumed by a dedicated worker. Backpressure is critical: if the fan-out falls behind, we monitor consumer lag and auto-scale workers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hybrid_fan_out", "fan_out_on_write", "fan_out_on_read", "backpressure", "consumer_lag", "auto_scaling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me more about the Kafka topology. How do you design the topics and partitioning?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "kafka" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd have several Kafka topics in the pipeline. First, tweet_events (partitioned by author_id, 128 partitions) — raw tweet lifecycle events: created, deleted, edited. Second, fan_out_tasks (partitioned by follower_id, 256 partitions) — one message per (tweet_id, follower_id) pair. Partitioning by follower_id ensures all writes to a single user's timeline go to the same partition, maintaining ordering. Third, timeline_updates (partitioned by user_id, 64 partitions) — aggregated timeline changes for cache invalidation. And fourth, analytics_events (partitioned by tweet_id, 64 partitions) — impressions, engagements, for async processing. The key design choice is keeping fan_out_tasks as its own topic rather than inlining it. This gives us independent scaling — the fan-out producer and the timeline writer can scale separately.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka_topics", "partitioning_strategy", "event_ordering", "decoupled_scaling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What guarantees do you need from Kafka? Exactly-once? At-least-once?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "delivery_guarantees" }
+    },
+    {
+      "role": "candidate",
+      "content": "At-least-once delivery with idempotent consumers. Exactly-once in Kafka is possible with transactions but adds latency and complexity. For our use case, a duplicate fan-out write means a tweet appears twice momentarily in someone's timeline — not ideal but easily deduplicated. The timeline materialization step uses the tweet_id as a natural dedup key — Redis ZADD with the same member and score is idempotent. For the analytics pipeline, I'd use exactly-once via Kafka transactions because impression counts need to be accurate. Different parts of the pipeline can have different delivery guarantees based on their tolerance for duplicates versus their latency requirements.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["at_least_once", "exactly_once", "idempotency", "kafka_transactions", "deduplication"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the timeline materialization work in Redis? Walk me through the data structure.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "timeline_materialization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each user's timeline is a Redis sorted set: key is timeline:{user_id}, members are tweet IDs, scores are tweet timestamps as epoch milliseconds. ZADD is O(log N) for insertion. ZREVRANGEBYSCORE gives us the most recent tweets in O(log N + M) where M is the page size. I cap each timeline at 800 entries using ZREMRANGEBYRANK to trim old tweets — most users never scroll past a few hundred. Memory estimate: 800 tweet IDs at 8 bytes each plus overhead, roughly 20KB per user. For 200M active users, that's 4TB of Redis memory. I'd use a Redis cluster with 50 nodes, each holding about 80GB. The pipeline consumer does batch ZADD operations — it buffers fan-out writes for 50ms and issues them in a pipeline to Redis, reducing round trips.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_sorted_set", "memory_estimation", "redis_cluster", "batch_operations", "pipeline_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the cache warming stage you mentioned? Why is that separate?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cache_warming" }
+    },
+    {
+      "role": "candidate",
+      "content": "The timeline in Redis stores tweet IDs, not full tweet content. Cache warming hydrates those IDs into actual tweet objects. When a user opens the app, we fetch their top 50 tweet IDs from the timeline, batch-fetch the tweet content from a separate tweet cache (also Redis, keyed by tweet_id), and assemble the response. But we can be smarter: we predict when users are likely active based on historical patterns. If a user opens Twitter every morning at 8am, we pre-warm their hydrated feed at 7:55am. This is a separate pipeline stage — a scheduled job that reads user activity patterns from a Flink stream processor and triggers pre-fetches. The warming rate is throttled to avoid thundering herd at popular hours.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_warming", "predictive_prefetch", "flink", "thundering_herd"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does a tweet deletion propagate through this pipeline?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "data_consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Deletion is an event like any other. The user deletes a tweet, we publish tweet_deleted to Kafka. The fan-out consumer reverses the operation — issues ZREM to remove the tweet_id from all followers' timelines. But here's the challenge: if a follower loads their feed between the deletion request and the fan-out completion, they might still see the deleted tweet. So the serving layer also checks a bloom filter of recently deleted tweet IDs. This filter is small — only needs to cover tweets deleted in the last 5 minutes (after that, fan-out has completed). The bloom filter is updated via a separate fast-path: deletion events go to both the fan-out topic and a low-latency Redis pub/sub channel that all serving nodes subscribe to.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["event_propagation", "bloom_filter", "eventual_consistency", "redis_pubsub"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if a Kafka consumer falls behind? How do you handle backlog?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "backpressure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Consumer lag is the primary health metric for the pipeline. I monitor lag per partition and set alerts at two thresholds: warning at 10,000 messages (about 1 second of delay) and critical at 100,000 messages (about 10 seconds). Mitigation strategies: first, auto-scale consumers — add more instances to the consumer group. Kafka rebalances partitions automatically. Second, if lag continues growing despite scaling, prioritize: process tweets from users with more followers first since they affect more timelines. Third, if lag exceeds 5 minutes, switch to degraded mode — skip the fan-out entirely and fall back to fan-out-on-read for all users until we catch up. Users will see slightly slower feed loads but they'll get current data. Fourth, after catching up, replay the skipped segment to backfill the materialized timelines.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consumer_lag", "auto_scaling", "prioritization", "graceful_degradation", "backfill"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the analytics pipeline fit into this architecture?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "analytics_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "Analytics is a parallel pipeline branch. When the serving layer returns a feed, it publishes impression events — which tweet IDs were shown to which user. These go to the analytics_events topic. A Flink streaming job consumes these events and computes real-time aggregates: impressions per tweet, engagement rate (likes/retweets divided by impressions), trending topics based on velocity of mentions. The real-time aggregates feed into a feature store that the ranking algorithm uses — if a tweet has high engagement, rank it higher in other users' feeds. For long-term analytics, the same events are also written to a data lake (S3 + Parquet format) via a Kafka Connect sink. Data scientists query this with Spark or Presto for deeper analysis. The key principle: the analytics pipeline never blocks the serving pipeline. They share Kafka as the event bus but are otherwise independent.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["analytics_pipeline", "flink", "feature_store", "data_lake", "kafka_connect", "pipeline_isolation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you monitor the health of this entire pipeline end-to-end?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "End-to-end pipeline monitoring is a synthetic canary. Every 30 seconds, a test user posts a tweet. A monitoring job measures how long until that tweet appears in a test follower's materialized timeline. This gives us the true end-to-end latency: ingestion + fan-out + materialization. If this exceeds 5 seconds, we know the pipeline is falling behind. For stage-by-stage: Kafka consumer lag per topic, Flink checkpoint duration and backpressure metrics, Redis ZADD latency, and cache hit rates at the serving layer. I'd build a pipeline health dashboard that shows each stage as a node with throughput flowing between them — any stage turning red means a bottleneck.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["synthetic_monitoring", "e2e_latency", "pipeline_observability", "bottleneck_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running short on time. Anything you'd add to the pipeline?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Two additions. First, a content filtering stage between ingestion and fan-out — run tweets through a spam/abuse classifier before they enter the pipeline. This prevents harmful content from ever reaching timelines. It adds maybe 50ms to the pipeline latency but is worth it. Second, a dead letter queue for any stage. If a fan-out write fails for a specific user after 3 retries, don't block the pipeline — send it to DLQ for manual investigation. We can replay DLQ entries after the issue is fixed. The pipeline should be self-healing: each stage is independently deployable, independently scalable, and failures in one stage don't cascade to others.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["content_filtering", "dead_letter_queue", "pipeline_resilience", "independent_deployment"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. Strong pipeline thinking throughout. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 72,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 6,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent pipeline decomposition — every component has clear input, output, and throughput characteristics",
+      "Strong Kafka design with well-reasoned topic and partition strategy",
+      "Good understanding of backpressure and graceful degradation"
+    ],
+    "weaknesses": [
+      "API design was barely discussed — no endpoint definitions or response formats",
+      "Database schema for tweets and followers was not explored",
+      "Security and authentication aspects were not mentioned"
+    ]
+  }
+}

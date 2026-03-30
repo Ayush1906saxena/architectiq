@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "staff",
+    "candidate_profile": "ex-nlp-researcher",
+    "total_exchanges": 20,
+    "generation_id": "seed_385"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a web search engine — something like Google Search. It needs to index billions of web pages and return relevant results in milliseconds. What's your approach?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I come from NLP research, so I want to start with the query understanding layer — that's where most search engines win or lose. Before we talk about indexing billions of pages, can I clarify: what kind of queries are we handling? Navigational ('facebook login'), informational ('how to bake sourdough'), transactional ('buy running shoes')? The ranking approach differs significantly for each. Also, are we doing pure web search or do we include vertical results — images, news, local businesses?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["query_understanding", "query_classification", "search_verticals"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "All query types. Web search with basic vertical results. 10 billion indexed pages, 100,000 queries per second. Results in under 500ms.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me outline the query processing pipeline because this is where my expertise lies. When a user types 'best Italian restaurant near me', the search engine needs to do far more than keyword matching. The pipeline has four stages before we even touch the index. Stage 1 — Query Preprocessing: tokenization, lowercasing, spell correction. For spell correction, I'd use a transformer-based model fine-tuned on query logs — it handles context ('python lsit' -> 'python list', not 'python list') far better than edit-distance approaches. Stage 2 — Intent Classification: is this navigational, informational, or transactional? A BERT-based classifier with 3 labels, trained on human-judged query samples. This determines which ranking features to weight. Stage 3 — Entity Recognition: extract entities from the query. 'best Italian restaurant near me' has entity 'Italian restaurant' (business type) and implicit entity 'user location'. I'd use a NER model fine-tuned on search queries — different from standard NER because queries are short and ungrammatical. Stage 4 — Query Rewriting: expand or reformulate the query. 'NYC apartments' becomes 'NYC apartments OR New York City apartments OR Manhattan apartments'. This uses a seq2seq model trained on (query, clicked-document-title) pairs from search logs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["query_preprocessing", "intent_classification", "entity_recognition", "query_rewriting", "bert", "spell_correction"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's impressive query understanding depth. How do you handle semantic search — queries where keyword matching fails?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "semantic_search" }
+    },
+    {
+      "role": "candidate",
+      "content": "Semantic search is where NLP has transformed search in the last few years. The core idea: represent both queries and documents as dense vectors in the same embedding space. A query about 'how to fix a running toilet' should be close in vector space to a document about 'toilet flapper valve repair' even though they share few keywords. I'd use a bi-encoder architecture: one encoder for queries, one for documents. Both are BERT-based, trained on (query, relevant-document) pairs using contrastive loss. The document encoder runs offline during indexing — encode all 10 billion documents into 768-dimensional vectors. Store these in a vector index (FAISS or ScaNN). At query time, encode the query (takes about 10ms on GPU), then do approximate nearest neighbor search in the vector index to find the top 1000 semantically similar documents. But here's the key insight: semantic search alone isn't enough. It's great for recall but poor for precision. A hybrid approach works best: use the inverted index (BM25) for lexical matching and the vector index for semantic matching, then merge the two candidate sets and re-rank with a cross-encoder. The cross-encoder is far more accurate than the bi-encoder because it sees query and document together, but it's too slow to run on 10 billion documents — so we only run it on the merged top 1000.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["semantic_search", "embeddings", "bi_encoder", "cross_encoder", "faiss", "bm25", "hybrid_search"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you store and serve the vector index for 10 billion documents? That's a lot of vectors.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "vector_index" }
+    },
+    {
+      "role": "candidate",
+      "content": "10 billion 768-dimensional float32 vectors = 10B * 768 * 4 bytes = about 30TB. That doesn't fit in memory on any reasonable cluster. Two approaches to make this feasible. First, dimensionality reduction: use PCA or a learned projection to reduce from 768 to 128 dimensions. This loses some quality (maybe 5% recall drop) but reduces storage to about 5TB. Second, quantization: instead of float32, use product quantization (PQ). Split each 128-d vector into 16 sub-vectors of 8 dimensions each, quantize each sub-vector to one of 256 centroids (1 byte). Now each vector is 16 bytes instead of 512 bytes. Total storage: 10B * 16 bytes = 160GB. That fits in memory on a cluster of 20-30 machines. For the index structure: IVF (Inverted File) with PQ. Cluster the vectors into, say, 65,536 Voronoi cells. At query time, find the 32 nearest cells, then do PQ-based distance computation on all vectors in those cells. This gives approximate nearest neighbors in about 5-10ms. The accuracy trade-off: IVF-PQ gives about 90% recall@100 compared to exact search. For a search engine, that's acceptable because we have the re-ranking stage with the cross-encoder to correct mistakes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["vector_quantization", "product_quantization", "ivf", "dimensionality_reduction", "storage_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's talk about the traditional side — the inverted index. How does that work at 10 billion pages?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "inverted_index" }
+    },
+    {
+      "role": "candidate",
+      "content": "The inverted index maps each term to a posting list — the list of document IDs containing that term, with positions and term frequencies. At 10 billion pages with an average of 1000 unique terms per page, we have maybe 1 million unique terms (after stemming and stop word removal) with posting lists ranging from a few entries (rare terms) to billions (common terms like 'the'). Total index size: roughly 50-100TB depending on compression. The index must be sharded. I'd partition by document — each shard holds the complete inverted index for a subset of documents. With 1000 shards, each holds 10 million documents and maybe 50-100GB of index data — fits comfortably on one machine with SSDs. For a query, we scatter to all 1000 shards in parallel, each returns its top K results, and we gather and merge. The scatter-gather latency is bounded by the slowest shard. I know the theory here, but I'll be honest — I've never operated an inverted index at this scale. My expertise is more in what happens after we retrieve candidates.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["inverted_index", "posting_list", "index_sharding", "scatter_gather"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair enough. Tell me about the ranking stage after retrieval. How do you combine all the signals?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ranking stage is a learning-to-rank (LTR) problem. We have maybe 1000 candidate documents from the merged inverted index and vector retrieval. For each candidate, we compute features: Lexical features: BM25 score, exact phrase match, term proximity. Semantic features: bi-encoder similarity score, query-document cross-encoder score. Quality features: PageRank, domain authority, page freshness, content length. User features: language preference, location, search history (personalization). Engagement features: historical click-through rate for this URL on similar queries. The cross-encoder feature is the most powerful but also most expensive — running BERT on 1000 query-document pairs takes about 200ms on a GPU. To stay within our 500ms budget, I'd run the cross-encoder on only the top 100 candidates after an initial fast ranking using the other features. The LTR model itself: I'd use a LambdaMART gradient-boosted tree. It's fast at inference (sub-millisecond for 1000 candidates), interpretable for debugging, and well-understood. Some teams use neural LTR models, but the marginal quality gain rarely justifies the latency and complexity cost.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["learning_to_rank", "cross_encoder", "bm25", "pagerank", "feature_engineering", "lambdamart"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle freshness? Breaking news should appear in results quickly.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "freshness" }
+    },
+    {
+      "role": "candidate",
+      "content": "Freshness requires a dual indexing strategy. The main index is rebuilt periodically — maybe weekly for the full 10 billion pages. That's too slow for breaking news. So we maintain a real-time index alongside the main index. New and recently updated pages go into a smaller, frequently refreshed index (maybe millions of pages, rebuilt hourly or even in near-real-time from a crawl stream). At query time, we search both indexes and merge results. The ranking model includes a freshness feature — time since page was published or last modified. For queries classified as 'news-seeking' (by the intent classifier), the freshness feature gets a much higher weight. 'Election results 2024' should heavily boost recent pages; 'how to tie a tie' shouldn't. The real-time index also helps with query-dependent freshness. If the query intent classifier detects a trending topic (detected from query volume spikes), it boosts freshness weight even for queries not explicitly asking for news.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["real_time_index", "freshness", "dual_indexing", "trending_detection", "query_dependent_ranking"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about search quality evaluation? How do you know your search results are good?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "search_quality" }
+    },
+    {
+      "role": "candidate",
+      "content": "Search quality evaluation is my favorite topic. Three approaches, each measuring something different. Offline evaluation: human judges rate query-result pairs on a relevance scale (Perfect, Excellent, Good, Fair, Bad). We compute NDCG@10 (Normalized Discounted Cumulative Gain) on a test set of 50,000 judged queries. This measures ranking quality directly. The key: judges must be diverse — different demographics, expertise levels, and regions. Biased judges produce biased evaluation. Online evaluation: A/B test ranking changes on live traffic. Primary metric: session success rate — did the user find what they wanted? Measured by: click on a result with no return to search within 30 seconds (satisfied click), or query abandonment without clicks (failed session). Secondary metrics: queries per session (fewer is better — it means users found results faster), time to first click, and pogo-sticking rate (clicking a result, immediately returning, clicking another). Side-channel evaluation: monitor search quality complaints, customer support tickets about bad results, and social media mentions. This catches tail-query quality issues that A/B tests miss due to low traffic.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["search_quality", "ndcg", "ab_testing", "click_metrics", "human_evaluation", "pogo_sticking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when the vector search service is down? The whole system can't return results?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "service_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The system should degrade, not fail. If vector search is down, we fall back to BM25-only retrieval from the inverted index. The results will be less semantically rich — keyword mismatches won't be caught — but they'll still be relevant for most queries. The ranking model can handle missing features: if the bi-encoder similarity feature is absent, the LambdaMART model still scores using the remaining features. We'd train the model to handle feature dropouts during training — randomly zero out the semantic features for 10% of training examples so the model learns to rank without them. From a monitoring perspective: I'd track the 'semantic retrieval contribution' — what fraction of the final top 10 results came exclusively from vector search (not in the BM25 candidate set). If this drops to zero, we know semantic search is down. Alert threshold: if semantic contribution drops below 5% for 5 minutes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["graceful_degradation", "feature_dropout", "fallback_strategy", "monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle adversarial content — SEO spam trying to manipulate rankings?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "spam_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Web spam is an adversarial ML problem. The spammers are constantly adapting to our detection. Multiple signals: link farm detection (graph-based algorithms that identify unnatural link patterns — mutual linking clusters, bought links from low-quality domains), content quality scoring (thin content, keyword stuffing, AI-generated gibberish), cloaking detection (serve different content to crawlers than to users — we verify by fetching pages from random IPs), and user behavior signals (if users consistently pogo-stick from a result, it's probably low quality regardless of its SEO optimization). I'd build a spam classifier that combines all these signals. The classifier runs during indexing, not at query time — flagged pages get demoted or removed from the index. Critical: the classifier must be retrained frequently (weekly) on fresh human-labeled spam samples because spammers adapt quickly. We also need a manual review queue for borderline cases and an appeal process for legitimate sites incorrectly flagged.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["spam_detection", "link_farm", "cloaking", "adversarial_ml", "content_quality"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Anything you'd want to cover that we haven't touched on?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Two things I want to acknowledge as gaps. First, the crawling infrastructure — how we discover and fetch 10 billion pages, handle politeness policies, detect content changes, and schedule re-crawls. This is a massive distributed system in itself that I'd need to design separately. Second, the serving infrastructure — how we handle 100K QPS with sub-500ms latency. I'd need to detail the load balancing, caching of frequent queries (about 30% of queries are repeated), result snippet generation, and geographic distribution of serving clusters. My design was heavily weighted toward the query understanding and ranking intelligence, which reflects my background. A production search engine needs equally strong infrastructure investment.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["web_crawling", "serving_infrastructure", "query_caching", "self_awareness"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Your NLP and ranking expertise is genuinely world-class. The infrastructure gaps are understandable given your background. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 70,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 4,
+      "database_design": 5,
+      "caching_strategy": 5,
+      "scalability": 6,
+      "failure_handling": 7,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional query understanding pipeline — intent classification, entity recognition, query rewriting with concrete model choices",
+      "Deep semantic search knowledge — bi-encoder, cross-encoder, vector quantization, hybrid retrieval",
+      "Strong search quality evaluation methodology with offline, online, and side-channel approaches"
+    ],
+    "weaknesses": [
+      "Crawling infrastructure was acknowledged as a gap — no discussion of how to discover and fetch pages",
+      "API design was absent — no search API specification or response format",
+      "Serving infrastructure and scalability were under-specified — 100K QPS handling was not addressed"
+    ]
+  }
+}

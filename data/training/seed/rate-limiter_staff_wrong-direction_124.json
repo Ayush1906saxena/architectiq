@@ -1,0 +1,171 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "staff",
+    "candidate_profile": "wrong-direction",
+    "total_exchanges": 22,
+    "generation_id": "seed_124"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Today I'd like you to design a distributed rate limiter. This is a component that limits how many requests a user or client can make within a given time window. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question. So first, what's the context? Is this for a public API? What kinds of clients are we rate limiting — individual users, API keys, IP addresses? And what scale — how many unique clients and total requests per second?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_scope", "qps"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "It's for a public API platform. Rate limit by API key. Assume 10 million unique API keys and 500,000 requests per second total. Each key gets a configurable limit, default 100 requests per minute.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "rate_limit_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. And when a client exceeds the limit, do we hard reject with 429, or do we queue the excess requests? Also, do we need different rate limits per endpoint, or is it a global per-key limit?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_scope", "api_design"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Hard reject with 429 and appropriate headers. Global per-key limit for now, but the design should be extensible to per-endpoint limits. Let's start designing.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Alright, so for a system handling 500K RPS across a public API, we need a robust gateway layer. I'm thinking we start with the API gateway architecture. Incoming requests hit a DNS load balancer, which routes to one of several gateway clusters. Each gateway cluster handles authentication, request validation, SSL termination, request routing, logging, and of course rate limiting. Let me draw out the full gateway.",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["api_gateway", "load_balancing"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting. Can you tell me more about what you have in mind?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "api_gateway" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. The gateway needs several components. First, the connection handler manages TLS termination and keep-alive connections. Then we have an authentication module that validates API keys against a key store. Next, a request router that maps incoming paths to backend services using a routing table. We'd also need a response transformer for format normalization, a circuit breaker for backend protection, and a logging pipeline that ships request logs to our observability stack. I'd implement this in Go for performance.",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["api_gateway", "circuit_breaker"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You're describing a comprehensive API gateway, and that's valuable infrastructure. But I want to make sure we focus — I specifically need the rate limiting algorithm and its distributed implementation. How do you actually count requests and enforce limits across multiple gateway nodes?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "rate_limit_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh, right, I got carried away with the gateway. Let me focus on the rate limiting piece specifically. So the core question is: how do we track request counts per API key across distributed nodes? The main algorithms I know are token bucket, leaky bucket, fixed window counter, and sliding window log. For this use case, I'd go with token bucket because it allows bursts while maintaining an average rate.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "leaky_bucket", "sliding_window", "rate_limit_algorithm"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good pivot. Walk me through how token bucket works and how you'd implement it in a distributed setting.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Token bucket works like this: each API key has a bucket that holds tokens. Tokens are added at a fixed rate — for our 100-per-minute limit, that's roughly 1.67 tokens per second. The bucket has a max capacity, say 100 tokens, which allows bursts up to 100 requests. Each request consumes one token. If the bucket is empty, the request is rejected. For the distributed implementation, we store the bucket state in Redis. Each bucket is a key with two fields: the current token count and the last refill timestamp. When a request comes in, we calculate how many tokens should have been added since the last refill, add them (capped at max), then try to consume one.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "redis_caching", "rate_limit_algorithm"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the race condition when two gateway nodes try to update the same bucket simultaneously?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "distributed_counting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good question. We need atomicity. I'd use a Redis Lua script that does the entire check-and-update in a single atomic operation. Redis executes Lua scripts atomically, so no race condition. The script would: calculate tokens to add based on elapsed time, update the count, attempt to consume a token, and return whether the request is allowed — all in one round trip. This also reduces network overhead since it's a single Redis call instead of multiple.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_counting", "atomic_operations"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "With 10 million unique API keys and 500K RPS, how does Redis hold up? What if Redis becomes a bottleneck?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "redis_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "A single Redis instance can handle around 100K-200K operations per second for simple commands. Lua scripts are heavier, so maybe 80K-100K per second. We'd need a Redis cluster with at least 5-6 shards, partitioned by API key hash. Each shard handles a subset of keys. If Redis becomes a bottleneck, we could add a local counter layer — each gateway node maintains an approximate local count and syncs with Redis periodically, say every 500ms. This means our rate limits are slightly approximate but the latency is much better.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_scaling", "sharding_strategy", "distributed_counting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How inaccurate does that local counter approach get? If a client sends requests to different gateway nodes?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "distributed_counting" }
+    },
+    {
+      "role": "candidate",
+      "content": "In the worst case, if a client's requests spread evenly across N gateway nodes, each node independently allows up to the limit before syncing — so you could temporarily allow up to N times the actual limit. With 10 gateway nodes and 500ms sync intervals, a fast client could theoretically get 10x their rate for half a second. Mitigation: use sticky sessions so a client's requests mostly hit the same node, or reduce the sync interval for high-volume keys. Also, when the local counter approaches the limit, switch to synchronous Redis checks for that key.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_counting", "consistency_tradeoffs"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good analysis. What about sliding window versus your token bucket approach? Why not sliding window?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "sliding_window" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sliding window log is more precise — you store the timestamp of every request and count how many fall within the window. But at our scale, storing every timestamp for 500K RPS is expensive in memory. With 10M keys, that's a lot of sorted sets in Redis. Sliding window counter is a compromise — you keep counts for fixed sub-windows and interpolate. But token bucket is simpler, memory efficient — just two values per key — and the burst behavior is actually desirable for most API use cases. The trade-off is that token bucket can allow short bursts, which sliding window prevents.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sliding_window", "token_bucket", "rate_limit_algorithm"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when Redis goes down completely? How does the rate limiter behave?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "redis_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Critical question. We have a few options and this is a business decision. Option one: fail open — if Redis is down, allow all requests. The API stays available but there's no rate limiting, which could lead to backend overload. Option two: fail closed — reject all requests. Safe for backends but terrible for users. I'd recommend fail open with a local fallback — each gateway node maintains an in-memory approximate rate limiter using the same token bucket algorithm. It's not coordinated across nodes, so limits are per-node, but it provides basic protection. We'd also fire alerts immediately so on-call can respond.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_failure", "graceful_degradation", "circuit_breaker"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle rate limit configuration changes — say a customer upgrades their plan and their limit changes from 100 to 1000 per minute?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "configuration_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd store rate limit configurations in a separate config store — could be a database table or a dedicated config service. Gateway nodes cache the config locally and refresh it periodically, say every 30 seconds, or subscribe to change notifications via a pub/sub channel. When a config changes, the pub/sub broadcast invalidates local caches. For the token bucket in Redis, we'd update the max capacity and refill rate. The Lua script reads these config values on each request, so changes take effect immediately in Redis even if some gateway nodes have stale cache.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["configuration_management", "pub_sub"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's wrap up. How would you communicate rate limit status to clients?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Standard HTTP headers: X-RateLimit-Limit for the max allowed, X-RateLimit-Remaining for tokens left, X-RateLimit-Reset for when the bucket refills. On 429 responses, include a Retry-After header. I'd also provide a dedicated endpoint like GET /rate-limit/status that clients can poll to check their current usage without consuming a token. And comprehensive documentation showing the rate limit tiers and best practices for handling 429s, like exponential backoff.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "rate_limit_headers"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good recovery after the initial detour. You showed strong depth on the rate limiting algorithm once you focused. Thank you for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 45,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 5,
+      "api_design": 7,
+      "database_design": 5,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 4
+    },
+    "strengths": [
+      "Strong recovery after interviewer redirect — deep knowledge of token bucket algorithm",
+      "Excellent analysis of distributed counting trade-offs with local vs centralized counters",
+      "Good failure mode thinking with fail-open vs fail-closed trade-off"
+    ],
+    "weaknesses": [
+      "Spent first 10 minutes designing an API gateway instead of the actual rate limiter",
+      "Poor time management — wasted significant interview time on irrelevant scope",
+      "At staff level, should have immediately focused on the core distributed algorithm",
+      "Never did a formal capacity estimation"
+    ]
+  }
+}

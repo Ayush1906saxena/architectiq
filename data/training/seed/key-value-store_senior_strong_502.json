@@ -1,0 +1,181 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_502"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Today we're going to design a distributed key-value store. Think along the lines of DynamoDB or Cassandra. It needs to be highly available, partition tolerant, and handle large-scale workloads. What do you want to clarify before we start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure, a few things I'd like to nail down. What's our expected data footprint -- total number of keys and their sizes? What's the read-to-write ratio and target throughput? Do we need to support range scans or only point lookups? And what consistency model should we default to -- strong or eventual?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_size", "access_patterns", "range_queries", "consistency_model"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "5 billion keys. Keys are 64 bytes on average, values are 2KB. Read-heavy, about 70/30. Target is 300K ops/sec total. Point lookups only. Default to eventual consistency but allow clients to request strong reads. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do the capacity math. 5 billion keys at roughly 2KB per value plus 64 bytes per key -- call it about 2.1KB per entry. That gives us roughly 10.5TB of raw data. With a replication factor of 3, we're at around 31.5TB. If each node holds about 1.5TB on SSDs, we need roughly 21 storage nodes. For throughput, 300K ops/sec across 21 nodes is about 14K ops/sec per node -- comfortably within SSD capabilities for random reads. On the write side, 30% of 300K is 90K writes/sec, so each node handles around 4.3K writes/sec, also very manageable with an LSM-tree storage engine.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "replication_factor", "cluster_sizing", "ssd_throughput", "lsm_tree"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good numbers. Walk me through the high-level architecture.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "At the top we have a stateless routing layer that accepts client requests and determines which node owns a given key. Underneath is a ring of storage nodes organized with consistent hashing. Each key hashes to a position on the ring, and the first node clockwise from that position is the primary owner. To avoid hotspots and handle heterogeneous hardware, each physical node maps to multiple virtual nodes on the ring -- maybe 256 virtual nodes per physical node. This smooths the distribution. For each key, we replicate it to the next N-1 nodes clockwise, giving us N=3 copies. Any node can serve as the coordinator for a request -- it forwards reads and writes to the appropriate replicas.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing", "virtual_nodes", "replication", "coordinator_node", "stateless_routing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Why 256 virtual nodes? What trade-offs are you considering?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "virtual_nodes" }
+    },
+    {
+      "role": "candidate",
+      "content": "It's a balance between distribution uniformity and metadata overhead. With too few virtual nodes -- say 10 -- the load distribution across physical nodes can be skewed by 20-30%. With 256, the standard deviation drops to under 5%, which is acceptable. But each virtual node requires routing metadata: the ring has 21 * 256 = about 5,400 entries. That's trivial to store and replicate to every node. If we went to 10,000 virtual nodes per physical node, the ring would have 210K entries -- still small, but rebalancing on node join/leave takes longer because more token ranges shift. So 256 is a practical sweet spot -- Cassandra uses 256 by default for similar reasons.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["virtual_nodes", "load_distribution", "metadata_overhead", "rebalancing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned configurable consistency. How do clients get strong reads on top of an eventually consistent system?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "quorum" }
+    },
+    {
+      "role": "candidate",
+      "content": "Through quorum-based reads and writes. With N=3 replicas, for eventual consistency we can do R=1, W=1 -- fast but no guarantees on freshness. For strong consistency, we require R=2, W=2, so R + W > N. That guarantees any read quorum overlaps with the write quorum, meaning at least one node in the read set has the latest write. The client sets this per request. For write-heavy workloads you might pick W=1, R=3 to speed up writes at the cost of slower reads. For read-heavy -- which is our case -- W=2, R=2 gives a good balance. Each replica responds with a version timestamp or vector clock, and the coordinator returns the most recent value.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["quorum", "configurable_consistency", "strong_consistency", "eventual_consistency", "vector_clocks"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's go deeper on the storage engine. You mentioned LSM trees. Walk me through how a write and read actually work at the node level.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "lsm_tree" }
+    },
+    {
+      "role": "candidate",
+      "content": "On a write, the node first appends the operation to a write-ahead log on disk for durability. Then it inserts the key-value pair into an in-memory sorted structure called the memtable -- typically a red-black tree or skip list. When the memtable reaches a size threshold, say 64MB, it's frozen and flushed to disk as an immutable SSTable -- a sorted file of key-value pairs with an index block at the end. A new empty memtable is created for incoming writes. For reads, the node checks the memtable first, then searches SSTables from newest to oldest. Each SSTable has a bloom filter at the top -- a probabilistic data structure that can tell you definitively if a key is NOT in the file, or probably is. With a 10-bit-per-key bloom filter, the false positive rate is about 1%, so we avoid unnecessary disk reads for 99% of SSTables that don't contain the key.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["write_ahead_log", "memtable", "sstable", "bloom_filter", "skip_list"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Over time you'll accumulate many SSTables. How do you manage that?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Compaction. There are two main strategies with different trade-offs. Size-tiered compaction groups SSTables of similar size and merges them into a larger one. It's write-optimized because you defer merging, but reads can be slow because a key might exist in many SSTables -- you have to check all of them. It also causes temporary space amplification during compaction since old and new files coexist. Leveled compaction, used by LevelDB and RocksDB, organizes SSTables into levels. Level 0 gets flushed memtables. When a level exceeds its size limit, SSTables are merged into the next level. The key property is that within each level (except L0), key ranges don't overlap, so a point lookup needs at most one SSTable per level. This gives much better read performance but higher write amplification -- each key might be rewritten 10-30 times as it moves through levels. For our read-heavy workload, I'd choose leveled compaction.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["compaction", "size_tiered", "leveled_compaction", "write_amplification", "space_amplification", "read_amplification"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a node dies? Say one of our 21 nodes goes down permanently.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "node_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "First, detection. The nodes use a gossip protocol -- each node periodically pings a random subset of peers and shares membership state. If a node hasn't responded for a configurable period, say 30 seconds, it's marked as suspected. After confirmation from multiple nodes, it's marked as down. While the node is down, its replicas handle all requests since we have N=3 -- the remaining two replicas serve reads, and writes use hinted handoff. The coordinator stores the writes destined for the dead node in a local hints file. When the node comes back, the hints are replayed to bring it up to date. If the node is permanently dead, we replace it: a new node takes ownership of the dead node's token ranges and streams data from the surviving replicas.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gossip_protocol", "failure_detection", "hinted_handoff", "node_replacement", "data_streaming"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Hinted handoff works for short outages. But what if hints expire or a node was down for hours? How do you detect and repair data inconsistencies?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "anti_entropy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two mechanisms. The first is read repair. On every read with R > 1, the coordinator compares the versions returned by each replica. If they disagree, it sends the latest version to the stale replicas in the background. This opportunistically fixes inconsistencies on the read path. The second is active anti-entropy using Merkle trees. Each node builds a Merkle tree over its key ranges -- a binary tree where leaf nodes are hashes of key-value pairs, and parent nodes are hashes of their children. To compare two replicas, you compare their Merkle tree roots. If they match, all data is consistent. If they differ, you walk down the tree to find exactly which key ranges diverged, and only stream those ranges. This is extremely efficient -- comparing two replicas with billions of keys requires only a few KB of Merkle tree exchange to pinpoint inconsistencies.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_repair", "merkle_tree", "anti_entropy", "hash_comparison", "efficient_repair"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "When do you rebuild the Merkle trees? They'd be expensive to maintain in real time.",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "merkle_tree_maintenance" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, you don't maintain them continuously. There are two approaches. Cassandra rebuilds Merkle trees on demand during a nodetool repair operation -- an operator triggers it, or it runs on a schedule, say weekly. The tree is built by scanning all SSTables, which is expensive but bounded since SSTable data is already sorted. The downside is that between repairs, drift accumulates. A more sophisticated approach, which Cassandra has been moving toward, is incremental repair. You track which SSTables have already been repaired and only build Merkle trees over unrepaired SSTables. This reduces the work significantly. For our system, I'd run incremental anti-entropy repairs on a rolling schedule -- one token range at a time, cycling through all ranges over a 24-hour period. This keeps the system consistent without massive periodic repair storms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["merkle_tree_rebuild", "incremental_repair", "scheduled_repair", "repair_storms"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about scaling. If traffic doubles, how does the cluster grow?",
+      "annotation": { "action": "scaling_probe", "phase": "scaling_failures", "target_concept": "horizontal_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "We add new physical nodes to the ring. Because of virtual nodes, the new node picks up token ranges spread across the ring, which automatically balances load away from existing nodes. The data for those token ranges is streamed from the current owners in the background. During streaming, reads for migrating ranges are still served by the old owners. Once streaming completes, the routing table is updated atomically, and the new node starts serving requests. To go from 21 to, say, 42 nodes, we'd add nodes in batches -- maybe 3-5 at a time -- to avoid overwhelming the cluster with too many concurrent data streams. Each node addition moves about 1/42 of the total data, which at 31.5TB / 42 is about 750GB per new node, taking maybe 30-60 minutes on a 10Gbps network.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["horizontal_scaling", "token_rebalancing", "data_streaming", "batched_expansion"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about hot keys? If one particular key gets 50K reads/sec?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "hot_keys" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hot keys are a real problem because consistent hashing pins a key to a fixed set of replicas. A few approaches. First, client-side caching with short TTLs -- if the data can tolerate a few seconds of staleness, this cuts load dramatically. Second, read replicas: the coordinator can fan out reads for known hot keys to additional nodes beyond the standard N=3, effectively spreading the read load. Third, key splitting: the application can shard a hot key by appending a random suffix (key_0 through key_9) and reading from a random partition, aggregating on the client side. This only works for certain access patterns though. For our system, I'd implement a hot key detection service that monitors per-key request rates and automatically promotes hot keys into an in-memory cache layer in front of the storage nodes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hot_keys", "client_caching", "read_replicas", "key_splitting", "hot_key_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've covered a lot. One thing we haven't discussed -- how do clients discover which node to talk to?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "service_discovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Clients can talk to any node -- that node becomes the coordinator. But they should prefer the node that owns the key to avoid an extra network hop. There are two models. In the thin client model, the client connects to any node, and that node proxies the request to the correct replicas. This is simpler but adds latency. In the smart client model, the client downloads the token ring map and computes which nodes own a key locally. It connects directly to the right coordinator. Cassandra drivers do this -- they maintain a local copy of the ring topology, refreshed via gossip or periodic polling. I'd go with smart clients for our read-heavy workload since it eliminates the extra hop and reduces coordinator load.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["service_discovery", "thin_client", "smart_client", "token_map", "coordinator_selection"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "If you had to choose between CP and AP for this system, which would you pick and why?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "cap_theorem" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd lean AP -- availability and partition tolerance -- which is the Dynamo model. Here's the reasoning: in a distributed KV store, network partitions will happen. If we choose CP, nodes on the minority side of a partition refuse to serve requests, even though they have valid data. That means a network blip takes down part of our service. With AP, every node continues serving requests during a partition, accepting that some reads might be stale. Since we already support configurable quorums, applications that need strong consistency can set R + W > N, and those reads will fail during a partition because they can't reach enough replicas -- effectively getting CP behavior on a per-request basis. Applications that can tolerate eventual consistency continue working. This gives us the best of both worlds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cap_theorem", "ap_system", "partition_tolerance", "per_request_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great discussion. Your depth on consistent hashing, the LSM storage engine, and failure repair was strong. Thank you for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 77,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 9,
+      "api_design": 4,
+      "database_design": 9,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent capacity math upfront -- computed raw storage, replication overhead, per-node throughput, and validated against SSD capabilities",
+      "Clear explanation of consistent hashing with virtual nodes including quantitative trade-off analysis on distribution uniformity",
+      "Deep LSM-tree walkthrough covering WAL, memtable, SSTables, bloom filters, and both compaction strategies with write amplification numbers",
+      "Strong failure handling coverage -- gossip detection, hinted handoff, read repair, and Merkle tree anti-entropy with incremental repair optimization"
+    ],
+    "weaknesses": [
+      "No API design discussion -- never defined GET/PUT/DELETE endpoints, error codes, or client SDK interface",
+      "Did not discuss multi-datacenter replication or cross-region consistency",
+      "Hot key mitigation was covered but caching strategy was mostly reactive rather than proactive"
+    ]
+  }
+}

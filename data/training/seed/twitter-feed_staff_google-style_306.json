@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "staff",
+    "candidate_profile": "google-style",
+    "total_exchanges": 22,
+    "generation_id": "seed_306"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed system. I'm especially interested in the algorithmic trade-offs. Let's start: what are the requirements?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Key questions: What's the scale — how many users and what's the DAU? What's the average number of followers per user, and what's the distribution — is it heavy-tailed with celebrities having millions of followers? Do we need a ranked feed or just reverse chronological? And what's the acceptable feed generation latency?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scale", "follower_distribution", "ranking", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500 million DAU, average user follows 200 accounts. Very heavy-tailed: most users have < 500 followers, but top 0.1% have millions. Ranked feed with a chronological option. Feed load latency under 500ms at p99. Now, the core algorithmic question: fan-out on write vs fan-out on read. Walk me through the time complexity of each.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "fan_out_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fan-out on write: when a user posts, we push the tweet to each follower's inbox. For a user with F followers, the write cost is O(F). For the average user with 500 followers, that's fine. But for a celebrity with 50 million followers, a single tweet triggers 50 million writes — O(50M). Feed read is O(K) where K is the page size, since you just read from a pre-built inbox. Fan-out on read: the tweet is stored once. When a user loads their feed, we fetch recent tweets from all N accounts they follow, then merge-sort and rank. Read cost is O(N * T * log(N)) where N is followee count and T is tweets per followee to consider. For 200 followees with 20 recent tweets each, that's merge-sorting 4,000 items — manageable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_strategy", "time_complexity", "write_amplification"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. So what's your approach? And prove to me that it works at 500M DAU scale.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "fan_out_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a hybrid approach. For regular users — say anyone with fewer than 100,000 followers — we do fan-out on write. When they tweet, we push to all followers' feed caches. The total write fan-out across the system: if 5% of DAU tweets daily, that's 25 million tweets. Average 200 followers means 5 billion fan-out writes per day, or about 58,000 per second. Each write is a Redis LPUSH to a sorted list — very fast. For celebrities, the top 0.1% with 100K+ followers, we skip fan-out on write. Instead, when a user loads their feed, we merge their pre-built inbox with real-time queries for tweets from the celebrities they follow. Since most users follow only 2-3 celebrities, this adds O(3 * T) lookups at read time — negligible.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_strategy", "hybrid_approach", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What data structure do you use for the feed inbox, and what's the memory requirement across all users?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "feed_cache" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each user's feed inbox is a Redis sorted set where the score is the tweet timestamp and the value is the tweet ID. We keep the last 800 tweet IDs per user. Each tweet ID is 8 bytes, and the score is 8 bytes, plus Redis overhead of about 40 bytes per entry — roughly 45 KB per user. With 500 million DAU, but not all need active inboxes. Let's say we cache inboxes for 300 million active users: 300M * 45 KB = 13.5 TB. That's a large Redis cluster — maybe 200 nodes with 128 GB each, using about 70 GB per node. Feasible but expensive. We could reduce by caching only 200 entries per user, bringing it to about 3.4 TB.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_cache", "redis_caching", "capacity_estimation", "data_structures"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now let's talk about feed ranking. What algorithm do you use, and what's the computational cost of ranking at serving time?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "feed_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ranking system has two stages: candidate generation and scoring. Candidate generation retrieves the top 500 tweets from the inbox and celebrity queries. Scoring applies a lightweight ML model — a logistic regression or small neural network — that predicts P(engagement) for each tweet given user features, tweet features, and author features. Features include: tweet recency, author-user interaction history, tweet popularity signals, content type. The model inference for 500 candidates with, say, 100 features takes about 1-2ms on a CPU. Then we sort by score — O(500 * log(500)), negligible. Total ranking overhead: under 5ms. We can also pre-compute some feature vectors offline to keep serving cost low.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_ranking", "ml_scoring", "candidate_generation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's switch to trending topics. How would you detect trending hashtags in real-time? I want the algorithmic details — not just 'use Kafka'.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "trending_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Trending detection needs to identify topics with anomalous velocity — not just high volume but accelerating volume. I'd use a count-min sketch data structure for space-efficient frequency counting. A count-min sketch with width W and depth D uses O(W*D) space and gives approximate counts with error bounded by total count / W, with probability 1 - delta where delta = (1/2)^D. Concretely: with W=100,000 and D=5, we use 500K counters. For each incoming tweet, we extract hashtags and update the sketch — O(D) per update, so O(5). To detect trending, I maintain two sketches: one for the current 5-minute window and one for the previous hour. A hashtag is trending if its current rate exceeds its hourly average by more than 3 standard deviations. We decay old windows with exponential moving averages.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["trending_detection", "count_min_sketch", "probabilistic_data_structure", "anomaly_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the false positive rate of that count-min sketch configuration? And how do you handle the heavy hitter problem where popular hashtags pollute the counts?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "count_min_sketch" }
+    },
+    {
+      "role": "candidate",
+      "content": "The count-min sketch only overestimates, never underestimates. With W=100K and 1 million unique hashtags in a window, the expected overcount per query is total_count / W. If total count is 50 million tweets, expected error is 500 per hashtag. For a hashtag with true count 10,000, the relative error is 5% — acceptable. False positive rate for trending: depends on our threshold. If we require 3 sigma above baseline, and the sketch error adds noise, we might see 1-2% false positives on the trending list. To handle heavy hitters, I'd use a separate Space-Saving algorithm that maintains an exact top-K. The count-min sketch handles the long tail, and Space-Saving tracks the top 10,000 hashtags exactly. The two systems cross-validate.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["count_min_sketch", "heavy_hitters", "space_saving_algorithm", "error_analysis"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the tweet storage layer. How do you store and retrieve tweets efficiently?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "Tweets are write-once, read-many. I'd use a two-tier storage approach. Hot tier: recent tweets from the last 7 days go into a distributed in-memory store or SSD-backed database like Manhattan (Twitter's internal KV store) or a Cassandra-like system. Partition key is the tweet ID, which embeds a timestamp via Snowflake ID format, so time-range queries map to contiguous partitions. Cold tier: tweets older than 7 days move to a columnar store like Parquet on S3 for analytics, with a MySQL or Postgres archive for point lookups. 500 million DAU with 5% tweeting, 20 tweets average, means 500 million tweets per day. At 1 KB per tweet, that's 500 GB per day for the hot tier, 3.5 TB per week. Cassandra on SSDs handles this easily.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "hot_cold_storage", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the case where a user deletes a tweet that's already been fanned out to millions of inboxes?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "tweet_deletion" }
+    },
+    {
+      "role": "candidate",
+      "content": "We don't remove it from every inbox — that would be O(followers) write amplification again. Instead, we use a soft-delete approach. Mark the tweet as deleted in the tweet store. When a user loads their feed, the feed service fetches tweet IDs from the inbox, then batch-loads the actual tweets. Deleted tweets return a tombstone, and we filter them out before rendering. This is a lazy cleanup — eventually, the deleted tweet ID falls off the bottom of the 800-entry inbox naturally. For immediate consistency from the poster's perspective, we also remove it from their own timeline view synchronously. The trade-off: a deleted tweet might briefly appear in some followers' feeds until they refresh.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tweet_deletion", "soft_delete", "eventual_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "A celebrity with 50 million followers goes on a tweeting spree — 100 tweets in a minute. What happens to the system?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "hot_partition" }
+    },
+    {
+      "role": "candidate",
+      "content": "Since celebrities use fan-out on read, their tweets are not fanned out to inboxes, so 100 tweets just means 100 writes to the tweet store — trivial. The pressure comes at read time. If 10 million followers load their feed simultaneously after seeing a push notification, the feed service makes 10 million requests for this celebrity's recent tweets. That's a hot-key problem on the tweet store. Solution: we replicate celebrity tweets to a dedicated hot-content cache with multiple replicas. Each read is load-balanced across replicas using random selection to avoid thundering herd on one node. We also debounce push notifications for rapid-fire tweets — aggregate them into 'X posted 5 new tweets' instead of firing 100 notifications.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hot_partition", "hot_key_detection", "thundering_herd", "notification_debouncing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle the feed for a brand new user who just signed up and followed 100 accounts? Their inbox is empty.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "cold_start" }
+    },
+    {
+      "role": "candidate",
+      "content": "Cold start problem. For a new user, their inbox has no pre-computed content. Two approaches working together: first, immediately trigger a fan-out on read — query the last 20 tweets from each of their 100 followees, merge-sort, cache the result as their new inbox. This is O(100 * 20) = 2,000 items to sort, well under our latency budget. Second, going forward, the fan-out on write pipeline starts populating their inbox. The initial feed load might take 200-300ms instead of the usual 50ms, but it's a one-time cost. We could also pre-populate with recommended/popular content while the personalized feed builds up.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cold_start", "fan_out_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's wrap up. What would you monitor to ensure this system is healthy at scale?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Key metrics I'd track: feed generation latency at p50/p95/p99 segmented by user type (new vs active, celebrity-follower vs not). Fan-out pipeline lag — the delay between a tweet being posted and appearing in followers' inboxes. Cache hit rates for feed inbox and tweet store. Ranking model inference latency and feature freshness. Trending detection precision — sampled manual review of top trending topics. And the business metric: session-level engagement rate, which is the ultimate measure of feed quality. Alerts on: fan-out lag exceeding 30 seconds, cache hit rate dropping below 90%, and feed error rate above 0.1%.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "alerting", "metrics"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong interview. Particularly impressed by the algorithmic depth on fan-out analysis and count-min sketch math. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 76,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 9,
+      "scalability": 9,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional algorithmic depth — time complexity analysis of fan-out strategies was precise",
+      "Count-min sketch analysis with concrete error bounds and false positive rates",
+      "Hybrid fan-out approach was well-justified with capacity math"
+    ],
+    "weaknesses": [
+      "API design and endpoint contracts were never discussed",
+      "Failure handling was limited — didn't discuss full region failure or data loss scenarios",
+      "Did not discuss content moderation or spam detection in the feed pipeline"
+    ]
+  }
+}

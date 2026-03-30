@@ -1,0 +1,373 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_483"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Thanks for joining. Let's design a URL shortener, something like bit.ly. I'd like you to drive the conversation. Start wherever you think makes sense.",
+      "annotations": {
+        "action": "opening",
+        "phase": "requirements",
+        "target_concept": "url_shortening_service"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Great, thanks. Before I jump into design, I want to nail down the requirements. The core use case is clear: users submit a long URL, we return a short one, and when someone visits the short URL we redirect them to the original. But I have a few clarifying questions. First, do we need custom aliases, or is system-generated only? Second, do short URLs expire? Third, do we need analytics like click counts? And finally, what kind of scale are we targeting -- are we talking hundreds of millions of URLs, billions?",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["requirements_gathering", "functional_requirements", "scale_estimation"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good questions. System-generated is the primary case, but support custom aliases too. URLs don't expire by default but users can set a TTL. Analytics are nice-to-have, not core. For scale, assume 100 million new URLs per month and a 10:1 read-to-write ratio.",
+      "annotations": {
+        "action": "answer_requirements",
+        "phase": "requirements",
+        "target_concept": "functional_and_nonfunctional_requirements"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Perfect, let me do some quick capacity math. 100 million new URLs per month is roughly 40 writes per second on average, maybe 400 peak. With a 10:1 read ratio that's 400 reads per second average, 4000 peak. Over 5 years we'd store about 6 billion URLs. If each record is around 500 bytes -- the short code, the original URL averaging maybe 200 characters, timestamps, user ID -- that's roughly 3 terabytes of raw data. With replication and indexes, call it 10 TB total. That's very manageable. For the short URL length, 6 characters in base62 gives us 56.8 billion combinations, which is plenty for 6 billion URLs. 7 characters gives us 3.5 trillion, so 7 is very safe.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["capacity_estimation", "storage_calculation", "qps_estimation", "base62_encoding", "key_space_analysis"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Numbers check out. Walk me through your high-level architecture.",
+      "annotations": {
+        "action": "transition",
+        "phase": "high_level_design",
+        "target_concept": "system_architecture"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "At a high level, I'd have a write path and a read path, optimized separately. On the write side: the client sends a POST with the long URL to an API gateway, which routes to a URL creation service. That service generates a unique short code, persists the mapping to the database, and returns the short URL. On the read side: a GET request for the short URL hits the API gateway, which checks a multi-layer cache. On a cache miss, it queries the database, populates the cache, and returns a 301 or 302 redirect. I'd put a CDN in front for the read path since popular short URLs will be accessed globally. Behind the API gateway, the services are stateless and horizontally scalable behind a load balancer.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["read_write_separation", "api_gateway", "stateless_services", "cdn", "load_balancer", "caching", "horizontal_scaling"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good overview. Let's dig into the ID generation. How do you produce the short codes, and how do you avoid collisions at scale?",
+      "annotations": {
+        "action": "deepen",
+        "phase": "deep_dive",
+        "target_concept": "id_generation_collision_avoidance"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a range-based ID allocation scheme. A coordination service -- could be a lightweight Zookeeper or even a database sequence table -- hands out ranges of numeric IDs to each application server. For example, server A gets the range 1 to 1,000,000, server B gets 1,000,001 to 2,000,000, and so on. Each server then increments locally within its range with zero contention. When a range is exhausted, the server fetches a new one. The numeric ID is then converted to a base62 string using characters a-z, A-Z, 0-9. This guarantees uniqueness without any per-write coordination between servers. The tradeoff versus hashing the URL is that we get guaranteed uniqueness with no collision checking, at the cost of a coordination service for range allocation. But range allocation is infrequent -- once per million writes -- so it's not a bottleneck.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["range_based_id_allocation", "base62_encoding", "zookeeper", "collision_avoidance", "coordination_service", "contention_free_writes"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if a server crashes mid-range? You lose those IDs?",
+      "annotations": {
+        "action": "challenge",
+        "phase": "deep_dive",
+        "target_concept": "fault_tolerance_id_generation"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes, you'd lose the unused portion of that range, and I think that's totally acceptable. If a server crashes after using 300,000 out of 1,000,000 IDs, we lose 700,000 IDs. With a key space of 56 billion, losing a few million IDs here and there is negligible. The alternative -- persisting every individual ID assignment -- would add latency and complexity for no real benefit. We can tune the range size to balance between coordination frequency and waste: smaller ranges mean less waste but more trips to the coordinator.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["failure_recovery", "acceptable_waste", "key_space_utilization", "range_size_tuning"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair. Now tell me about the database layer. What store, and how do you shard it?",
+      "annotations": {
+        "action": "deepen",
+        "phase": "deep_dive",
+        "target_concept": "database_design_sharding"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "The data model is simple -- a key-value mapping from short code to long URL plus metadata. I'd start with a relational database like MySQL or PostgreSQL for transactional guarantees on writes and strong consistency on reads. For sharding, I'd shard by the short code using consistent hashing. Each shard owns a range of hash values. This distributes load evenly and makes lookups straightforward: hash the short code, find the shard, query directly. For the write path, since IDs are allocated in ranges, writes naturally distribute across shards as different servers write to different ID ranges. I'd have each shard replicated with one primary and two read replicas. Reads go to replicas, writes to the primary. With 6 billion records over 5 years and say 16 shards, each shard holds about 375 million records, around 180 GB. Very manageable per node.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["consistent_hashing", "database_sharding", "primary_replica_topology", "read_write_splitting", "shard_sizing"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Why consistent hashing over simple modular hashing?",
+      "annotations": {
+        "action": "probe",
+        "phase": "deep_dive",
+        "target_concept": "consistent_hashing_vs_modular"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "With modular hashing, if you add or remove a shard, almost every key remaps, which means a massive data migration. With consistent hashing, adding a shard only moves roughly 1/N of the keys, where N is the number of shards. Given that we expect to add shards over time as data grows, consistent hashing dramatically reduces the operational cost of rebalancing. We also use virtual nodes so that each physical shard maps to multiple points on the hash ring, which prevents hotspots from uneven distribution.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["consistent_hashing", "virtual_nodes", "rebalancing", "data_migration_cost"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk caching. Walk me through your caching strategy in detail.",
+      "annotations": {
+        "action": "transition",
+        "phase": "deep_dive",
+        "target_concept": "caching_strategy"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd do multi-layer caching. The first layer is the CDN -- Cloudflare or CloudFront -- which caches redirects at edge locations globally. For popular URLs this handles the vast majority of reads without ever hitting our infrastructure. TTL on the CDN would be maybe 1 hour for regular URLs, shorter for URLs with user-set expiration. The second layer is a distributed Redis cluster sitting in front of the database. This stores the short code to long URL mapping with an LRU eviction policy. Let me size this: if the top 20% of URLs account for 80% of traffic, we'd want to cache roughly 1.2 billion URLs. At around 300 bytes per entry, that's 360 GB. Across a Redis cluster with say 10 nodes, each node holds 36 GB, which fits comfortably in memory. The third layer is a small in-process LRU cache on each application server, maybe 10,000 entries, for the absolute hottest URLs. This avoids even the network hop to Redis for viral links. Lookup order is: local cache, Redis, database. On a database hit, we populate Redis and the local cache.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["multi_layer_caching", "cdn_caching", "redis_cluster", "lru_eviction", "cache_sizing", "in_process_cache", "cache_population_strategy"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a Redis node goes down? How do you prevent a cache stampede on the database?",
+      "annotations": {
+        "action": "failure_probe",
+        "phase": "scaling_failures",
+        "target_concept": "cache_failure_cascade"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Good question, this is the cache failure cascade problem. A few defenses. First, the Redis cluster itself uses replication, so if a primary fails, a replica promotes automatically. The client library handles failover transparently. But if an entire Redis node and its replicas are lost, we'd see a burst of cache misses for the keys on that node. To protect the database, I'd use a few strategies. First, request coalescing or single-flight: if multiple requests come in for the same key simultaneously, only one actually queries the database, and the others wait for that result. Second, circuit breakers: if the database error rate spikes, we trip the breaker and serve stale data from a backup cache or return a 503 rather than overwhelming the DB. Third, cache warming: when a new Redis node joins, we can proactively populate it by scanning the database for recently accessed keys rather than waiting for organic misses. And the in-process local caches on the app servers provide a buffer during the failover window.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["cache_stampede", "request_coalescing", "single_flight", "circuit_breaker", "cache_warming", "graceful_degradation", "redis_replication"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid. What about the API design? Walk me through the key endpoints.",
+      "annotations": {
+        "action": "deepen",
+        "phase": "deep_dive",
+        "target_concept": "api_design"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd keep it simple. POST /api/v1/urls with a JSON body containing the long_url, an optional custom_alias, and an optional expires_at. Returns 201 with the short URL and metadata. GET /{short_code} returns a 301 redirect for permanent URLs or 302 for URLs with expiration, since 301 tells browsers to cache the redirect permanently and we wouldn't want that for expiring URLs. DELETE /api/v1/urls/{short_code} for the owner to deactivate a URL, returns 204. For analytics, GET /api/v1/urls/{short_code}/stats returns click count, referrer breakdown, geographic distribution. Authentication via API keys for the write and delete endpoints. Rate limiting on the POST endpoint to prevent abuse -- maybe 100 URLs per minute per API key.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["rest_api_design", "http_status_codes", "301_vs_302_redirect", "api_versioning", "rate_limiting", "authentication"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good catch on 301 vs 302. Now let's think about failure modes more broadly. What are the biggest risks to this system?",
+      "annotations": {
+        "action": "failure_probe",
+        "phase": "scaling_failures",
+        "target_concept": "system_failure_modes"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "The biggest risks I see are: first, the ID range coordinator going down. If that's unavailable, servers can't get new ranges and eventually stop creating URLs. Mitigation is making the coordinator highly available -- a 3-node Zookeeper or etcd cluster, or even a simple database table with row-level locking. Servers should also request new ranges proactively when they're at 50% utilization, not when they're exhausted. Second, a hot-key problem: if a single short URL goes massively viral, even the Redis layer could struggle. The in-process cache helps here, and we can also replicate hot keys across multiple Redis nodes. Third, abuse: someone could generate millions of URLs pointing to malware. We need URL validation, spam detection, and the ability to bulk-disable URLs. Fourth, data corruption: if the mapping from short code to long URL gets corrupted, users get redirected to wrong sites. We need checksums and audit logging on writes.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["coordinator_availability", "hot_key_problem", "abuse_prevention", "data_integrity", "proactive_range_fetching", "high_availability"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle multi-region deployment? Say we want low latency for users in both the US and Europe.",
+      "annotations": {
+        "action": "scaling_probe",
+        "phase": "scaling_failures",
+        "target_concept": "multi_region_deployment"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "For reads, this is straightforward because the CDN already handles global distribution. Users in Europe hit a European edge node, get a cached redirect, and never touch our origin. For cache misses, I'd deploy Redis read replicas in each region. Reads in Europe go to the European Redis replica, which asynchronously replicates from the US primary. The data is eventually consistent, but for a URL shortener that's fine -- a new URL might take a second to be resolvable in Europe, which is acceptable. For writes, I'd keep a single write region to avoid conflict resolution complexity. Writes from Europe route to the US origin. The latency penalty on writes is maybe 100-150ms extra, which is acceptable for a create operation. If we absolutely needed multi-region writes, we could partition the ID ranges by region -- European servers get ranges from a different coordinator -- and each region writes to its local database, with cross-region async replication. But I'd start with single-region writes and move to multi-region only if write latency becomes a real user complaint.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["multi_region", "cdn_edge_caching", "async_replication", "eventual_consistency", "single_write_region", "cross_region_latency", "incremental_complexity"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if the European Redis replica falls significantly behind the US primary? How would you detect and handle that?",
+      "annotations": {
+        "action": "challenge",
+        "phase": "scaling_failures",
+        "target_concept": "replication_lag_detection"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd monitor replication lag as a first-class metric -- Redis exposes this natively. If lag exceeds a threshold, say 5 seconds, we have a few options. We can route European cache misses to the US Redis cluster temporarily, accepting higher latency over serving stale or missing data. Alternatively, for a URL shortener specifically, a cache miss on the European replica can fall through to the database read replica in Europe, which has its own replication lag metrics. If both are lagging, we fall back to the US primary database. I'd set up alerts on replication lag, and the system should automatically adjust its routing based on lag thresholds. The key insight is that for this use case, serving a 'URL not found' for a brand-new URL for a few seconds is a much worse user experience than adding 100ms of latency by routing to a farther region.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["replication_lag_monitoring", "adaptive_routing", "fallback_chain", "latency_vs_correctness_tradeoff"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's touch on the custom alias feature. Any additional concerns there?",
+      "annotations": {
+        "action": "probe",
+        "phase": "deep_dive",
+        "target_concept": "custom_alias_handling"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Custom aliases introduce a uniqueness check that the auto-generated path avoids. We need to check if the alias is already taken before allowing creation. This requires a lookup against the database, which could be slow. I'd handle it with a Bloom filter in front of the database -- it can quickly tell us if an alias is definitely not taken. If the Bloom filter says 'maybe taken,' we check the database. For the database, this is a conditional insert -- INSERT IF NOT EXISTS, or use a unique constraint and handle the conflict. We also need to validate the alias: length limits, character restrictions, and probably a blocklist of reserved words and offensive terms. Custom aliases also affect caching because they can't be predicted from numeric ranges, but the lookup path is the same once created.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["bloom_filter", "uniqueness_check", "conditional_insert", "input_validation", "blocklist"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. If you had to pick one thing in this design you'd want to prototype first, what would it be and why?",
+      "annotations": {
+        "action": "wrap_up",
+        "phase": "wrap_up",
+        "target_concept": "prioritization_and_risk"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "The range-based ID allocation and its interaction with the base62 encoding. It's the heart of the system and the piece with the most operational risk. I'd want to validate that the coordinator can handle range requests under load, that failover works cleanly, that the base62 encoding produces the right distribution of characters, and that the whole path from ID allocation through database write to cache population works end-to-end. Everything else -- the CDN, the Redis caching, the API layer -- uses well-understood patterns that I have high confidence in. The ID generation is the custom piece where bugs would be hardest to fix in production because every generated URL is a permanent commitment.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["risk_based_prioritization", "prototyping", "operational_risk", "permanent_data_commitment"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a solid answer. Thanks for walking through this -- I think we covered good ground. Any final thoughts?",
+      "annotations": {
+        "action": "wrap_up",
+        "phase": "wrap_up",
+        "target_concept": "closing"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Just that I'd approach the build incrementally. Start with the single-region setup: ID range allocation, base62 encoding, MySQL with a single shard, Redis cache, and a CDN. Get that solid, instrument everything, then add sharding when data grows, multi-region when latency demands it, and analytics as a separate async pipeline consuming from a click event stream. The URL shortener is deceptively simple in concept but the operational details around ID generation, cache consistency, and abuse prevention are where the real engineering lives.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["incremental_delivery", "observability", "event_streaming", "operational_excellence"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    }
+  ],
+  "scorecard": {
+    "overall": 80,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 8,
+      "database_design": 8,
+      "caching_strategy": 9,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Drove the conversation independently with minimal prompting",
+      "Thorough capacity estimation with concrete numbers for storage, QPS, cache sizing, and key space",
+      "Multi-layer caching strategy with CDN, Redis, and in-process cache, properly sized",
+      "Strong understanding of cache failure cascades with multiple mitigation strategies",
+      "Excellent tradeoff analysis throughout, especially on multi-region write strategy"
+    ],
+    "weaknesses": [
+      "Could have discussed monitoring and observability in more depth earlier in the design",
+      "Analytics pipeline was mentioned but not elaborated upon",
+      "Did not discuss URL validation or security concerns like open redirect attacks until prompted about abuse"
+    ]
+  }
+}

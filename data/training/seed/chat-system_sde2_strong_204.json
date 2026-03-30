@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "sde2",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_204"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a real-time chat system, like WhatsApp or Facebook Messenger. Users can send messages to each other and see them instantly. How would you approach this?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me clarify some things first. Are we designing one-on-one chat, group chat, or both? How many concurrent users? Do we need message history and search? And what does 'real-time' mean — sub-second delivery?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["requirements_gathering", "latency", "group_chat"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Start with one-on-one chat. 1 million concurrent users. Yes, message history needs to be stored. Real-time means messages should arrive within a second or two.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. Do we need read receipts, typing indicators, or online status? And what about media — images, files — or just text for now?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_receipts", "online_status", "media_handling"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Text only. Online status and read receipts are nice-to-have but not required for the core design. Focus on the messaging flow.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The key challenge in a chat system is real-time message delivery. The server needs to push messages to clients as soon as they arrive, not wait for the client to ask. This means we need persistent connections. I'd use WebSockets for this. The idea is: when a user opens the app, they establish a WebSocket connection with the server. The server keeps this connection open. When user A sends a message to user B, the server receives it over A's WebSocket and immediately pushes it to B over B's WebSocket.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket", "real_time", "push_model"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good mental model. How does the server know which WebSocket connection belongs to user B?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "connection_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "The server maintains a mapping of user_id to their WebSocket connection. When user B connects, they authenticate (say with a JWT token), and the server registers: user_id B -> this connection. When a message arrives for B, the server looks up B's connection in this map and sends the message. I'd store this mapping in memory on the server — a hash map of user_id to connection object.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["connection_management", "authentication", "in_memory_storage"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "With 1 million concurrent users, can a single server hold all those WebSocket connections?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "scalability" }
+    },
+    {
+      "role": "candidate",
+      "content": "A single server can hold a lot of WebSocket connections — maybe 50K to 100K depending on the hardware and how much memory each connection uses. For 1 million users, we'd need maybe 10-20 chat servers. Each server holds connections for a subset of users. The challenge is: if user A is on server 1 and user B is on server 3, how does server 1 push a message to server 3?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scalability", "connection_distribution", "cross_server_messaging"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly. How would you solve that?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_routing" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a pub/sub system like Redis Pub/Sub or a message broker. When a message comes in for user B, the server that received it publishes the message to a channel for user B. The server that holds user B's connection subscribes to that channel and delivers the message. Alternatively, we could have a centralized routing service that maps user_id to server_id — when server 1 needs to reach user B, it asks the routing service which server B is on, then sends the message directly.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pub_sub", "redis_pub_sub", "message_routing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's go with the routing service approach. Where would you store the user-to-server mapping?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "connection_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Redis is a good fit. When a user connects to a chat server, the server writes to Redis: SET user:B:server -> server_3. When user B disconnects, we remove the key. When server 1 needs to send to user B, it looks up user:B:server in Redis to get server_3, then sends the message to server_3 over an internal channel — maybe gRPC between servers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "connection_management", "grpc"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now, what about message persistence? We need to store messages so users can see their history.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "message_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a message is received by the server, before delivering it to the recipient, I'd persist it to a database. I'd use a table with message_id, sender_id, receiver_id, content, timestamp, and a delivered flag. For the database, I'd use MySQL. The access pattern is: given two user IDs, fetch their messages ordered by time. I'd have an index on (conversation_id, timestamp) where conversation_id is derived from the two user IDs — maybe the smaller ID first, then the larger one, concatenated.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_storage", "database_schema", "database_choice", "database_indexing"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if the recipient is offline when the message is sent?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "offline_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "If user B is offline, their user_id won't be in the Redis routing table, so we know they're not connected. The message is already persisted in the database. When user B comes back online and connects, we check the database for any undelivered messages — messages where receiver_id is B and delivered is false. We send those over the WebSocket and mark them as delivered. We could also send a push notification to user B's phone to let them know they have a new message.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["offline_delivery", "push_notification", "message_storage"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you guarantee that a message isn't lost? What if the server crashes after receiving the message but before saving it?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "message_durability" }
+    },
+    {
+      "role": "candidate",
+      "content": "The order of operations matters. When the server receives a message from user A: step 1, write it to the database. Step 2, acknowledge to user A that the message was received (so they know it's saved). Step 3, attempt to deliver to user B. If the server crashes before step 1, the message is lost — but user A never got an acknowledgment, so they know to retry. If it crashes after step 1 but before step 3, the message is safe in the database and user B will get it when they reconnect. The client should retry if they don't get an ack within a timeout.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_durability", "acknowledgment", "retry_logic"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "If the client retries, couldn't that cause duplicate messages?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "idempotency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes, good point. To prevent duplicates, the client should generate a unique message_id (like a UUID) before sending. The server uses this as a deduplication key. If the same message_id arrives twice, the server ignores the second one. I'd put a unique constraint on message_id in the database to enforce this.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency", "deduplication", "uuid"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the complete architecture one more time.",
+      "annotation": { "action": "redirect", "phase": "wrap_up", "target_concept": "high_level_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Users connect via WebSocket through a load balancer to one of our chat servers. On connect, the server registers the user in Redis (user_id -> server_id). To send a message: the chat server receives it, writes to MySQL, acks to the sender, looks up the recipient's server in Redis, and forwards the message to that server via gRPC, which then pushes it over the recipient's WebSocket. If the recipient is offline, the message waits in MySQL and is delivered on their next connect. Push notifications alert offline users. The load balancer uses sticky sessions or the client reconnects to any server since state is in Redis.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket", "load_balancing", "redis_caching", "message_routing", "grpc", "push_notification"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final thoughts on what you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "For production, I'd add heartbeat pings on the WebSocket to detect dead connections and clean up the Redis routing table. I'd add end-to-end encryption so the server can't read messages. And monitoring on message delivery latency — the time from send to deliver. If we want group chat later, the approach extends: a message to a group fans out to all members, similar to the Twitter feed problem.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["heartbeat", "encryption", "monitoring", "group_chat"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Well done. You had a clear mental model of how WebSockets work and built a solid design around it. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 60,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 5,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 6,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Clear understanding of WebSocket connections and the push model",
+      "Excellent failure handling — message durability, ack/retry, deduplication with UUIDs",
+      "Good cross-server routing design with Redis and gRPC"
+    ],
+    "weaknesses": [
+      "Minimal capacity estimation — didn't calculate storage or WebSocket memory needs",
+      "Didn't discuss message ordering guarantees in detail",
+      "No discussion of how to handle server failures and connection migration"
+    ]
+  }
+}

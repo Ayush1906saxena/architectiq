@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "staff",
+    "candidate_profile": "real-time-expert",
+    "total_exchanges": 24,
+    "generation_id": "seed_101"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing system like Uber or Lyft. Riders request rides, nearby drivers are matched, and the trip is tracked in real-time. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "What's our scale — number of concurrent active rides and driver locations we're tracking? What are the latency requirements for matching a rider to a driver? And what's the expected location update frequency from drivers?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "latency", "location_updates"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500,000 concurrent active rides, 2 million active drivers sending location updates. Matching should complete within 5 seconds. Drivers send GPS updates every 3 seconds.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me calculate the real-time data flow. 2 million drivers at 1 update every 3 seconds = 667,000 location updates per second. Each update is maybe 100 bytes (lat, lng, heading, speed, timestamp, driver_id). That's 67 MB/sec of incoming GPS data. This is a classic real-time event stream problem. I want to focus on how location data flows from driver phones to the matching engine and then to rider phones — that real-time pipeline is the heart of the system.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "real_time_streaming"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Go for it. Design the real-time location pipeline.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "location_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "Drivers maintain a persistent WebSocket connection to our edge servers. Each edge server handles about 50K connections — so roughly 40 edge servers. When a driver sends a GPS update, the edge server does two things: first, publishes the update to a Kafka topic partitioned by geographic cell (I'll use a geohash prefix — like the first 4 characters, giving us ~1M cells globally). Second, updates the driver's current location in a Redis geospatial index using GEOADD. The Kafka topic feeds into a stream processing layer — Flink or Kafka Streams — that maintains the real-time state: ETA calculations, trip progress tracking, and surge pricing computations.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket", "kafka", "geohash", "redis_geospatial", "stream_processing", "flink"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the WebSocket connection management work at scale? What happens when a driver switches networks?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "websocket_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "WebSocket connection lifecycle is critical. Each connection has a session ID stored in Redis with a TTL of 30 seconds, refreshed by heartbeats every 10 seconds. When a driver switches from WiFi to cellular — which happens constantly while driving — the TCP connection drops. The driver app detects this within 2-3 seconds via heartbeat failure and initiates a reconnect. The new connection might land on a different edge server, which is fine — the edge servers are stateless, and the session state (current trip, driver status) is in Redis. During the 2-3 second gap, we buffer any server-to-driver messages (like new ride requests) in a per-driver Redis queue. On reconnect, the driver app sends its session ID, the edge server replays buffered messages, and the location stream resumes. No data lost, no state confusion.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket_management", "session_management", "message_buffering", "reconnection", "network_switching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. Now walk me through how a ride request flows through the system.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ride_matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rider opens the app and requests a ride. The request hits our matching service. Step 1: find nearby available drivers. We query Redis GEORADIUS with the rider's coordinates and a 3km radius — this returns driver IDs within range in O(N+log(M)) where M is the total indexed set. Step 2: rank these drivers by estimated pickup time using a real-time ETA model that considers not just distance but traffic, road topology, and the driver's heading (a driver 1km away but heading in the opposite direction on a highway has a worse ETA than one 2km away heading toward you). Step 3: send a ride offer to the best match via their WebSocket connection. The driver has 15 seconds to accept. If declined or timed out, we offer to the next driver. This is modeled as a distributed state machine per ride request.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geospatial_query", "ride_matching", "eta_calculation", "state_machine"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you model the trip state? Multiple things happen — accepted, driver en route, arrived at pickup, trip started, trip ended.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "event_sourcing" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use event sourcing for the trip lifecycle. Instead of updating a trip record in place, we append events: RIDE_REQUESTED, DRIVER_MATCHED, DRIVER_EN_ROUTE, DRIVER_ARRIVED, TRIP_STARTED, LOCATION_UPDATE (many of these), TRIP_COMPLETED, PAYMENT_PROCESSED. Each event is immutable and timestamped. The current trip state is derived by replaying events — but we also maintain a materialized view in Redis for real-time access. This gives us: full audit trail of every trip, the ability to replay and debug issues, and natural support for the CQRS pattern — the write model (event store) is separate from the read model (materialized trip state). The event store is in Kafka with long retention (30 days), and events are also persisted to Cassandra for permanent storage.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["event_sourcing", "cqrs", "kafka", "cassandra", "state_machine", "audit_trail"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the rider see the driver's car moving on the map in real-time?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "real_time_tracking" }
+    },
+    {
+      "role": "candidate",
+      "content": "The rider also has a WebSocket connection. When a trip is active, the stream processing layer (Flink) consumes the driver's location events from Kafka, filters for drivers with active trips, and routes the updates to the rider's edge server. The edge server pushes the location over the rider's WebSocket. We don't forward raw GPS data — we do server-side smoothing. GPS on phones can jump erratically, so we apply a Kalman filter to smooth the trajectory, snapping to roads using a map-matching algorithm. We also interpolate positions between updates so the car icon moves smoothly on the client — the server sends updates every 3 seconds, but the client renders at 60fps by interpolating linearly between known positions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["real_time_tracking", "websocket", "kalman_filter", "map_matching", "client_interpolation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the CQRS read model work practically?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "cqrs" }
+    },
+    {
+      "role": "candidate",
+      "content": "We maintain several read models optimized for different query patterns. Read model 1: Trip Status — a Redis hash per trip_id with current state, driver location, ETA. Updated by a Flink consumer on every event. This serves the rider and driver apps. Read model 2: Driver Availability — the Redis geospatial index. Updated when driver status changes (available, on-trip, offline). Read model 3: Analytics — a ClickHouse table aggregating trip events for business metrics (average wait time by city, completion rate, revenue). This is rebuilt from the event stream with higher latency (minutes). The beauty is each read model is independently scalable and can be rebuilt from the event log if corrupted. If the trip status Redis goes down, we replay from Kafka and rebuild it in minutes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cqrs", "read_models", "redis_caching", "clickhouse", "event_replay"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about surge pricing? How does that work in real-time?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing is a real-time supply-demand computation. A Flink job continuously computes the ratio of open ride requests to available drivers in each geographic cell — say at the geohash-5 level (about 5km x 5km). When demand exceeds supply by a threshold, the surge multiplier increases. The calculation runs on a sliding window — last 5 minutes of data — and updates every 30 seconds. Results are published to a dedicated Kafka topic and cached in Redis, keyed by geohash. When a rider requests a ride, the pricing service reads the current multiplier for their cell. The multiplier is shown to the rider before they confirm — this is both a UX requirement and a legal one in many jurisdictions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_pricing", "real_time_computation", "sliding_window", "flink", "geohash"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if the Flink stream processing cluster goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "stream_processing_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Flink has built-in checkpointing — it snapshots the state of all operators to HDFS every 30 seconds. On failure, it restores from the last checkpoint and replays events from Kafka (since Kafka retains them). Recovery time is typically 30-60 seconds. During that window: location updates still flow into Kafka (they're not lost), the Redis read models go stale but still serve the last known state, and active trips continue operating based on cached state. The rider's map might freeze for 30 seconds but the trip isn't disrupted. For surge pricing, we default to no surge during the recovery window — better to undercharge for a minute than to have broken pricing. We also run a standby Flink cluster that can take over if the primary is unhealthy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["flink_checkpointing", "stream_processing_failure", "graceful_degradation", "standby_cluster"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the database layer for trip history and payments?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Trip events go to Cassandra partitioned by trip_id — excellent write throughput and we query by trip_id for trip detail pages. For payments, a separate PostgreSQL database with strict ACID guarantees — we can't have eventual consistency for money. The payment record references the trip event stream for auditability. For trip history queries like 'show me my last 50 rides,' we maintain a secondary index in Cassandra partitioned by user_id, clustered by timestamp. The separation of real-time data (Redis + Kafka) from historical data (Cassandra + PostgreSQL) is intentional — different consistency and latency requirements.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cassandra", "postgresql", "database_design", "acid", "data_separation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final additions to the design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few real-time operational concerns. Monitoring: we need real-time dashboards showing per-city metrics — average match time, driver utilization, trip completion rate, and WebSocket connection counts per edge server. Alerting on: event processing lag in Flink exceeding 10 seconds, Redis geospatial index size anomalies, and WebSocket reconnection rate spikes (which indicate network issues in a city). Also, for disaster recovery, we replicate the Kafka topics and Redis state to a secondary region. Failover is automated — if the primary region's health check fails for 60 seconds, DNS routes to the secondary.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "alerting", "disaster_recovery", "multi_region"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Outstanding real-time systems depth. The event sourcing and CQRS approach was particularly well-articulated. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 79,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional real-time systems expertise — WebSocket management, Flink streaming, event sourcing",
+      "CQRS pattern applied practically with clear explanation of multiple read models",
+      "Deep understanding of location data challenges — Kalman filtering, map matching, client interpolation"
+    ],
+    "weaknesses": [
+      "API design was implicit — no explicit discussion of REST endpoints or GraphQL schemas",
+      "Security considerations (rider safety, driver verification) not mentioned",
+      "Payment system treated briefly — could have discussed fare calculation and dispute handling"
+    ]
+  }
+}

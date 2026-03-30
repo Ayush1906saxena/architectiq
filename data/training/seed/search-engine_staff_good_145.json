@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "staff",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_145"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a web search engine. I want to hear about crawling, indexing, and serving search results. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few clarifications. What's the scale of the web corpus we're indexing — how many pages? What's the expected query volume? Do we need to handle real-time indexing of new pages or is batch indexing sufficient? What about personalization — should results vary by user? And how fresh do results need to be — minutes, hours, days?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["corpus_size", "query_volume", "freshness", "personalization"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10 billion pages in the index. 100,000 queries per second. Batch indexing is fine with near-real-time updates for breaking news (within minutes). No personalization for now. Freshness within hours for most content, minutes for news. Walk me through the architecture.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The system has three major subsystems: the crawler that discovers and fetches web pages, the indexer that processes pages and builds the search index, and the query serving layer that handles user searches. Let me start with the indexer since it's the core data structure. The foundation is an inverted index — a mapping from every word (term) to the list of documents containing that word, along with position and frequency information.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["system_architecture", "inverted_index", "crawler", "indexer", "serving_layer"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the inverted index design in detail.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "inverted_index" }
+    },
+    {
+      "role": "candidate",
+      "content": "The inverted index has two components. The dictionary: a sorted list of all unique terms across the corpus. For 10 billion pages with an average of 500 unique terms each, the dictionary might have a few hundred million unique terms after stemming and normalization. The postings list: for each term, a sorted list of document IDs that contain it, along with: term frequency (how many times the term appears in this document), position list (character/word offsets for phrase queries), and field information (did the term appear in the title, body, or URL?). For storage: the postings list for common terms like 'the' could have billions of entries. We compress these using techniques like variable-byte encoding or PForDelta, which exploit the fact that document IDs in sorted order have small gaps. This compression typically achieves 4-8 bits per posting instead of 32 bits for raw doc IDs. The total index size for 10B documents is roughly 50-100TB, depending on how much position data we store.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["inverted_index", "postings_list", "compression", "term_frequency", "index_sizing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How does the scoring work? When a user searches for 'distributed systems', how do you rank the results?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "bm25_scoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "The core relevance scoring uses BM25, which improves on TF-IDF with two key normalizations. The BM25 formula for a query Q and document D:\n\nScore(Q, D) = sum over each query term t of: IDF(t) * (tf(t,D) * (k1 + 1)) / (tf(t,D) + k1 * (1 - b + b * |D|/avgdl))\n\nLet me break this down. IDF(t) is the inverse document frequency — rare terms get higher weight. If 'distributed' appears in 1 million documents out of 10 billion, its IDF is high. 'Systems' might appear in 100 million documents, so its IDF is lower. tf(t,D) is the term frequency in document D. BM25 has a saturation effect: going from 1 occurrence to 5 matters a lot, but going from 50 to 55 barely changes the score. This is controlled by k1 (typically 1.2-2.0). The term (1 - b + b * |D|/avgdl) is document length normalization, where b (typically 0.75) controls how much we penalize long documents. A 10,000-word page mentioning 'distributed' once is less relevant than a 500-word page mentioning it once. avgdl is the average document length across the corpus. Beyond BM25, we'd combine this with other signals: PageRank (link-based authority), freshness (newer pages get a boost for time-sensitive queries), URL quality, and spam scores. The final ranking is a weighted combination of all these features.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["bm25_scoring", "idf", "term_frequency", "document_length_normalization", "pagerank", "multi_signal_ranking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you serve queries at 100K QPS with a 50-100TB index?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "query_serving" }
+    },
+    {
+      "role": "candidate",
+      "content": "The index is sharded across many machines. Two dimensions of distribution: first, the index is partitioned by document — each shard holds the complete inverted index for a subset of documents. With 100TB and maybe 1TB per machine, that's 100 index shards. Second, for redundancy and throughput, each shard is replicated across multiple machines. A query hits all shards in parallel (scatter-gather pattern). Each shard computes local top-K results using BM25, returns them to a coordinator, and the coordinator merges and re-ranks the global top-K. For 100K QPS: if each shard can handle 5K QPS, and we have 100 shards each with 3 replicas, each replica handles about 33K/3 = 11K QPS from the scatter — well within capacity since index lookups are fast (postings lists are in memory or on SSD with OS page cache). The coordinator layer needs to handle 100K QPS of merge operations — this is stateless and horizontally scalable behind a load balancer. Latency target: BM25 computation per shard under 20ms, network and merge under 30ms, total under 50ms at p50.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["query_serving", "index_sharding", "scatter_gather", "replication", "latency_budget"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's talk about the crawler. How do you efficiently crawl 10 billion pages?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "distributed_crawling" }
+    },
+    {
+      "role": "candidate",
+      "content": "The crawler is a distributed system. Components: a URL frontier (the queue of URLs to crawl), fetcher workers, and a content processor. The URL frontier maintains a priority queue — high-value pages (popular sites, frequently updated pages) are crawled more often. New URLs discovered during crawling are added to the frontier after deduplication. Politeness is critical: we must respect robots.txt, rate-limit requests per domain (at most 1 request per second per domain), and avoid overloading any single site. This means the frontier is partitioned by domain — each worker handles a set of domains and maintains per-domain rate limits. For 10 billion pages with an average recrawl period of 2 weeks: 10B / (14 * 86400) = ~8300 pages per second sustained. With each fetch taking about 500ms on average, we need roughly 4000 concurrent fetchers. The content processor extracts text, links, and metadata from the fetched HTML, deduplicates near-duplicate pages (using SimHash or MinHash), and feeds the content into the indexing pipeline.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_crawling", "url_frontier", "politeness", "rate_limiting", "deduplication", "simhash"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you prioritize which pages to recrawl? Not all pages change at the same rate.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "crawl_scheduling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Adaptive crawl scheduling based on historical change frequency. For each URL, we track: last crawled time, number of times the content changed vs stayed the same, and the estimated change rate. Pages that change frequently (news sites' front pages — multiple times per day) get a high recrawl priority and short intervals. Pages that rarely change (a personal blog post from 2015) might be recrawled monthly or less. The algorithm is essentially a Poisson process model: estimate the change rate lambda from historical observations, and schedule the next crawl at the optimal time that minimizes staleness while respecting our crawl budget. We also boost priority based on page importance — PageRank or the number of incoming links. A page on nytimes.com changing is more impactful than a random blog post changing. For breaking news: we have a special fast-path. An event detection system monitors social media and news feeds for breaking events and triggers immediate focused crawling of relevant news domains, bypassing the normal scheduling.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["crawl_scheduling", "adaptive_scheduling", "change_detection", "crawl_prioritization"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the indexing pipeline work? From crawled content to searchable index?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "indexing_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The indexing pipeline is a batch + real-time hybrid. The batch path: crawled documents are collected in batches, processed through MapReduce-style jobs. The map phase tokenizes and normalizes text (lowercasing, stemming, stop word removal), assigns document IDs, and emits (term, doc_id, positions) tuples. The reduce phase groups by term, sorts posting lists, compresses them, and writes the final inverted index segments. A full re-index of 10 billion documents takes several hours across a large Spark cluster. For near-real-time updates: new or updated documents are processed through a streaming pipeline (Kafka + Flink) and written to a small real-time index shard. Queries are served from both the main batch index and the real-time index, with results merged. Periodically, the real-time index is merged into the main index during the next batch rebuild. This gives us minutes of latency for new content while keeping the main index optimized for read performance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["indexing_pipeline", "batch_processing", "real_time_indexing", "mapreduce", "lambda_architecture"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle spam in search results? Bad actors trying to game their ranking.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "spam_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Spam detection operates at multiple levels. At crawl time: detect link farms (clusters of pages that link to each other to inflate PageRank) using graph analysis. Detect cloaking — pages that serve different content to crawlers vs users — by periodically fetching as a regular user and comparing. At index time: ML classifiers trained on labeled spam/not-spam data evaluate content quality. Features include keyword stuffing density, hidden text, redirect chains, and domain reputation. At query time: if a page has a high spam score, it's demoted or excluded from results. We also use click-through data as a quality signal — if users consistently click on a result and immediately bounce back, it's likely low quality. The key challenge is adversarial: spammers adapt to our detection. We need to continuously retrain models and have a manual review queue for borderline cases. We also maintain a domain-level reputation system — if a domain consistently produces spam, all its pages are penalized.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["spam_detection", "link_farm_detection", "ml_classification", "click_signals", "domain_reputation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about query understanding? The user types 'apple' — how do you know if they mean the company or the fruit?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "query_understanding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Query understanding is the intelligence layer before ranking. For ambiguous queries like 'apple', we use intent classification. Most users searching 'apple' in 2024 mean the company — this is the dominant intent based on click-through data. But we hedge: show predominantly Apple Inc. results but include a few fruit-related results for diversity. For more specific signals: if the query is 'apple nutrition', the intent is clearly the fruit. 'Apple stock' is clearly the company. We use a combination of co-occurrence analysis (which words appear with 'apple' in queries) and entity recognition (linking 'apple' to known entities in a knowledge graph). We also do query expansion — 'distributed systems' might also match documents about 'distributed computing' or 'distributed architecture'. This uses word embeddings (Word2Vec or BERT) to find semantically similar terms. And spelling correction: 'distribued systems' should still work — we use edit-distance matching against our dictionary with frequency-weighted suggestions.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["query_understanding", "intent_classification", "entity_recognition", "query_expansion", "spelling_correction"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost out of time. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things I'd add: caching is huge for search — the top 10K queries probably account for 30% of traffic, so we cache their results in Redis with short TTLs. We'd need a snippet generation service that extracts relevant text around the query terms for display in results. Autocomplete/suggest based on popular queries using a trie or prefix index. And monitoring: track query latency distributions, index freshness (time between a page change and it appearing in results), relevance quality via manual evaluation and A/B testing of ranking changes. The biggest challenge in this system is the feedback loop: ranking quality affects user behavior, user behavior data trains the ranking model. Getting this virtuous cycle right is what separates good search engines from great ones.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["caching", "snippet_generation", "autocomplete", "monitoring", "feedback_loop"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong interview. You showed solid depth on inverted index design and BM25 scoring, and good breadth across the full search stack. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 71,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 6,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent inverted index design with compression techniques and sizing estimates",
+      "Strong BM25 scoring explanation with clear breakdown of each component and parameter tuning",
+      "Good distributed crawling design with politeness constraints and adaptive scheduling"
+    ],
+    "weaknesses": [
+      "Failure handling was barely discussed — what happens if an index shard goes down mid-query?",
+      "API design was not covered — no discussion of the search API, pagination, or response format",
+      "Query understanding was surface-level — could have discussed learning-to-rank models in more depth"
+    ]
+  }
+}

@@ -1,0 +1,140 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "staff",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_150"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design the Twitter news feed. How a user sees tweets from people they follow and other recommended content. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. What's the scale — DAUs, average follows per user, tweets per day? Is this a ranked feed or chronological? Do we need to support real-time updates — seeing new tweets without refreshing? What about media — just text or images/videos too? And are we including ads in the feed?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scale", "feed_ranking", "real_time_updates", "media_support", "ads"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "300M DAUs, average user follows 200 accounts, 500M tweets per day. Ranked feed with chronological fallback option. Yes to real-time updates. Media support needed but focus on the feed infrastructure, not media storage. Ads are part of the feed. Let's start.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Quick capacity math. 500M tweets/day = ~5,800 tweets/sec. Feed reads are much higher — if each of the 300M DAUs opens the feed 5 times per day, that's 1.5B feed requests/day = ~17,400 feed requests/sec. The core challenge is fan-out: when a user tweets, how do we deliver it to potentially millions of followers' feeds? This is where the hybrid fan-out approach is critical.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "fan_out"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the hybrid fan-out approach.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hybrid fan-out splits users into two categories based on a follower threshold. I'd set the threshold at 10,000 followers — we A/B tested this at my previous company and found it was the right balance. Below threshold — fan-out on write: when a regular user tweets, a fan-out service asynchronously writes the tweet ID to every follower's pre-computed timeline in Redis. With average 200 followers, that's 200 Redis writes per tweet. For 5,800 tweets/sec, most from regular users, that's manageable — maybe 1M Redis writes/sec. Above threshold — fan-out on read: celebrity accounts (>10K followers) don't fan out on write. Instead, when a follower loads their feed, we fetch recent tweets from each celebrity they follow at read time. If a user follows 5 celebrities, that's 5 additional lookups merged with their pre-computed timeline. The pre-computed timeline in Redis is a sorted set of (tweet_id, score) pairs, where score is the tweet timestamp. We keep the most recent 800 tweet IDs per user — beyond that, we paginate from the database.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "hybrid_approach", "celebrity_threshold", "pre_computed_timeline", "redis"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle cache warming for celebrities? When a celebrity tweets, millions of users will request it.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "cache_warming" }
+    },
+    {
+      "role": "candidate",
+      "content": "Cache warming is essential to avoid a thundering herd on the database. When a celebrity tweets, we proactively cache their recent tweets rather than waiting for the first read. The flow: celebrity posts a tweet -> tweet is written to the database -> we immediately cache the tweet content in a distributed Redis cluster dedicated to tweet objects (separate from the timeline Redis). For the most popular celebrities (top 1000 accounts by follower count), we also pre-warm a 'celebrity timeline' cache — a separate Redis key per celebrity containing their last 100 tweet IDs, updated on every new tweet. When a user loads their feed, the fan-out-on-read for their followed celebrities hits this warm cache instead of the database. For newly trending accounts that cross the celebrity threshold: we have a threshold monitor that watches follower counts. When an account crosses 10K followers, we transition it from fan-out-on-write to fan-out-on-read and build its celebrity cache. We also back-fill — remove its recent tweets from followers' pre-computed timelines since they'll now be fetched at read time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_warming", "thundering_herd", "celebrity_cache", "threshold_transition"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How do you handle real-time push — notifying users of new tweets without them refreshing?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "real_time_push" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd implement a layered real-time push system. Primary: WebSocket connections for users with the app open. Each client maintains a persistent WebSocket to a push gateway server. When the fan-out service writes a tweet ID to a user's timeline, it also publishes a notification event to a pub-sub system (Redis pub-sub or a lightweight message broker). The push gateway subscribes to events for its connected users and sends a lightweight push through the WebSocket — just 'new tweets available', not the full tweet payload. The client then shows a 'New tweets' banner and fetches the actual content when the user taps it. Fallback for WebSocket failures: Server-Sent Events (SSE). SSE is unidirectional (server to client) which is all we need for notifications. It works through HTTP/1.1 which has better compatibility with proxies and corporate firewalls than WebSocket. Last resort: client-side polling every 30 seconds for users where neither WebSocket nor SSE works. At 300M DAUs, maybe 100M have the app open at any time. That's 100M WebSocket connections across maybe 2000 push gateway servers (50K connections each). The pub-sub fan-out for push notifications adds significant load — for regular users, the fan-out on write already notifies followers. For celebrity tweets, we batch the push notifications — send them in waves over 30 seconds rather than all at once.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket", "sse", "pub_sub", "real_time_push", "batched_notifications", "connection_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the ranking work? The user loads the feed — walk me through from timeline fetch to ranked results.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "feed_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step 1 — Candidate collection: fetch ~500 tweet IDs from the user's pre-computed timeline (Redis ZREVRANGEBYSCORE). Also fetch the last 20 tweets from each followed celebrity (fan-out on read). Also fetch ~50 out-of-network recommendations from a recommendation service. Total candidates: ~600-700 tweets. Step 2 — Tweet hydration: batch-fetch tweet content, author info, and engagement counts for all candidate IDs from the tweet cache and user cache. Step 3 — Feature computation: for each candidate, compute ranking features. User-tweet features: has the user interacted with this author before, is the tweet in the user's interest areas, social proximity (friends of friends). Tweet features: engagement rate (likes/impressions), media type, freshness. Step 4 — ML scoring: a lightweight ranking model scores each candidate. The model predicts P(like), P(retweet), P(reply), P(hide) and combines them into a single score. Step 5 — Post-processing: diversify results (no more than 2 consecutive tweets from the same author), insert ads at positions 3, 8, 15, etc., apply content policy filters (muted words, blocked users). Return top 30 ranked tweets for the initial page load. Total latency budget: 200ms. The ranking model itself should take <50ms; the rest is data fetching.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_ranking", "candidate_generation", "feature_computation", "ml_scoring", "post_processing", "latency_budget"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good detail. Let's talk about the data layer. What databases are you using for what?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multiple databases for different access patterns. Tweets table (PostgreSQL, sharded by tweet_id): tweet_id, author_id, content, media_urls, created_at, reply_to. Write-heavy but simple inserts. Follow graph (a graph database or sharded MySQL): follower_id, following_id, created_at. Needs efficient queries in both directions — 'who does user X follow' and 'who follows user X'. Pre-computed timelines (Redis sorted sets): one key per user, values are tweet_ids scored by timestamp. This is the hot read path. Tweet engagement counts (Redis): like_count, retweet_count, reply_count per tweet. Updated in real-time via atomic increments. User profiles (PostgreSQL, read replicas): username, display_name, avatar_url, bio, follower_count. Cached aggressively in Redis. The ML feature store: a combination of batch features (computed daily, stored in a key-value store) and real-time features (streamed via Flink, stored in Redis). Separation of concerns: the feed serving path only reads from caches and Redis. Database reads are reserved for cache misses and background jobs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_design", "polyglot_persistence", "redis", "postgresql", "feature_store"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about ad insertion? How do ads get into the feed?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "ad_insertion" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ad system runs a parallel pipeline. When the feed is being assembled, the ad service receives a request with the user's context (demographics, interests, recent behavior) and the feed context (what organic content is being shown). The ad service runs its own auction: eligible ads are scored by predicted engagement * bid price. The top ads are returned with their assigned positions in the feed. The feed assembler interleaves organic results and ads at the designated positions. Important constraints: ads must be clearly labeled, the ad density must stay below a threshold (no more than 1 ad per 5 organic tweets), and we need frequency caps (don't show the same ad to the same user more than 3 times per day). The ad ranking model is separate from the organic ranking model — different optimization objectives. The organic model optimizes for user satisfaction; the ad model optimizes for advertiser ROI while maintaining user experience thresholds.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["ad_insertion", "ad_auction", "frequency_capping", "ad_density", "dual_optimization"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens during a traffic spike — say a major world event causes 5x normal tweet volume?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "spike_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several strategies. First, the fan-out on write path is the most stressed component. At 5x volume, we'd have 5M Redis writes/sec instead of 1M. Redis can handle this if we have enough shards, but the fan-out workers might bottleneck. I'd use auto-scaling on the fan-out worker fleet with a queue-depth-based trigger. Second, temporarily increase the celebrity threshold from 10K to 5K followers — more accounts become fan-out-on-read, reducing write amplification. This is a config change, no code deployment needed. Third, degrade gracefully: if the fan-out queue grows beyond a threshold, start dropping fan-out for users who haven't been active in the last 24 hours — they'll get their feed via fan-out-on-read when they next open the app. Fourth, the feed serving path is mostly reads from Redis, which scales well. But the ML ranking model might be too expensive at 5x load — fall back to a simpler scoring function (recency + engagement, no ML) to reduce compute. Push notifications: batch more aggressively — send updates every 30 seconds instead of immediately.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["spike_handling", "auto_scaling", "dynamic_threshold", "graceful_degradation", "fallback_ranking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost out of time. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few additions: content moderation needs to be integrated into the feed — a moderation service provides content quality scores that the ranking model uses to down-rank problematic content. For the chronological fallback: users who opt into chronological mode bypass the ML ranker and get tweets sorted by timestamp from their pre-computed timeline — much simpler and cheaper to serve. Monitoring: track feed generation latency (p50/p99), fan-out lag (time from tweet creation to appearing in followers' timelines), ranking model inference latency, and user engagement metrics (likes per session, time spent) as the ultimate quality signal. Internationalization: the ranking model needs to handle multi-language content and different cultural engagement patterns across regions.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["content_moderation", "chronological_fallback", "monitoring", "internationalization"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong interview. Excellent hybrid fan-out design and good real-time push architecture. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 72,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 7
+    },
+    "strengths": [
+      "Excellent hybrid fan-out design with clear 10K follower threshold and justification from experience",
+      "Strong cache warming strategy for celebrities with threshold transition handling",
+      "Good layered real-time push system with WebSocket primary, SSE fallback, and polling last resort"
+    ],
+    "weaknesses": [
+      "API design was not discussed — no endpoint specifications for feed fetching or pagination",
+      "Failure handling for Redis timeline cache loss was not addressed — how to rebuild timelines?",
+      "Ad insertion discussion was surface-level — could have explored real-time bidding integration deeper"
+    ]
+  }
+}

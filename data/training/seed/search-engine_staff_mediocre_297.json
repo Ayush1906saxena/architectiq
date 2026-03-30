@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "staff",
+    "candidate_profile": "mediocre",
+    "total_exchanges": 22,
+    "generation_id": "seed_297"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a web search engine like Google. Users enter queries and get ranked results. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "What kind of content are we indexing — just web pages or also images, videos, news? How many queries per second? And do we need real-time results or is some staleness acceptable?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["content_types", "qps", "freshness"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Web pages only. 100 billion web pages in the corpus. 50,000 queries per second at peak. New pages should appear within hours. Let's start designing.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay. The core of a search engine is the inverted index. For each word that appears anywhere in our corpus, we maintain a list of all documents that contain that word. This is called a posting list. When a user searches for 'best restaurants NYC', we look up the posting lists for 'best', 'restaurants', and 'NYC', intersect them to find documents containing all three terms, and then rank those documents. For ranking, we use TF-IDF — terms that appear frequently in a document but rarely across the corpus get higher scores.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["inverted_index", "posting_list", "boolean_retrieval", "tf_idf"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good foundation. Now, you said 100 billion web pages. Let's think about the scale of this inverted index. How large is it and where does it live?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "index_sizing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me estimate. If there are roughly 1 million unique terms in English after stemming, and each term has an average posting list of 1 million document IDs at 8 bytes each, that's 8MB per term... so 8 terabytes total. But that underestimates — some terms like 'the' appear in nearly all 100 billion documents. The full index including positional data is probably 50-100 terabytes. That can fit on a single high-memory server with a large SSD array.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["index_sizing", "storage_estimation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "A single server for a 100TB index serving 50,000 queries per second? Let's think about this. Each query needs to read multiple posting lists, intersect them, and score documents. Can one machine handle 50K of those operations per second?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "distributed_index" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, probably not — each query might need a few hundred milliseconds of CPU for the intersection and scoring. At 50K QPS, we'd need many CPU cores. Maybe we use a powerful server with 128 cores? That gives us about 6,400 queries per second if each query takes 20ms of CPU time. So we'd need at least 8 of these servers.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["cpu_estimation", "horizontal_scaling"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You're thinking about horizontal scaling of compute, but you still have one copy of the index. How do 8 servers access the same 100TB index? And more importantly, the entire index needs to be in memory for sub-200ms query latency — you can't afford disk reads on the hot path.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "index_sharding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right — if it needs to be in memory, a single machine can't hold 100TB in RAM. So we'd need to split the index across multiple machines. But how? I guess we could split by term — machine A handles terms starting with A-M, machine B handles N-Z? But then a multi-term query would need to hit multiple machines and combine results, which seems complicated.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["index_partitioning"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Term-based partitioning has that problem — every query touches multiple machines. The more common approach is document-based partitioning. Each shard holds a complete inverted index for a subset of documents. Can you explain how that works?",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "document_partitioning" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh, so each shard has, say, 100 million documents and its own complete inverted index for those documents. When a query comes in, we send it to all shards. Each shard runs the full query locally — looks up its posting lists, intersects, scores, and returns the top 10 results. Then a coordinator merges the top-10 results from all shards and picks the global top 10. With 100 billion documents and 100 million per shard, that's 1,000 shards.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["document_partitioning", "scatter_gather", "result_merging"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good — that's the scatter-gather pattern. Now, each shard's index for 100 million documents is about 10 GB in memory — manageable. But you're fanning out to 1,000 shards for every query. At 50K QPS, that's 50 million shard queries per second. What concerns does that raise?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "fan_out_concerns" }
+    },
+    {
+      "role": "candidate",
+      "content": "The network load would be enormous — 50 million internal requests per second. And the tail latency problem: with 1,000 shards, even if each has a 99th percentile latency of 50ms, the probability of at least one being slow is very high. The overall query latency would be dominated by the slowest shard. I'm not sure how to solve the tail latency problem though. Maybe we don't need to query all 1,000 shards?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["network_load", "tail_latency"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good instinct. One approach is a tiered index: put the highest-quality billion pages in a 'first tier' of 10 shards. Try the first tier first — if the results are good enough, skip the other 990 shards. Another approach is hedged requests — send each shard request to 2 replicas and take whichever responds first. What other approaches might help?",
+      "annotation": { "action": "teach", "phase": "deep_dive", "target_concept": "latency_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "We could also set a timeout — if a shard doesn't respond within, say, 150ms, we proceed without its results. Since we have 1,000 shards, losing one or two shouldn't significantly affect result quality. And we should replicate each shard so we have backups if one goes down.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["timeout_strategy", "shard_replication", "graceful_degradation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about the crawling side briefly. How do you build this 100-billion-page index?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "web_crawling" }
+    },
+    {
+      "role": "candidate",
+      "content": "A web crawler starts with a seed set of URLs, fetches each page, extracts links, and adds new URLs to the crawl queue. It's a BFS over the web graph. We respect robots.txt and use politeness delays to not overwhelm any single site. The crawled HTML is parsed to extract text content, which is then tokenized, stemmed, and added to the inverted index. At 100 billion pages, with an average page size of 100KB, that's 10 petabytes of raw HTML. We'd store the raw pages in something like HDFS and build the index using a MapReduce job.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["web_crawler", "bfs_crawling", "robots_txt", "mapreduce", "hdfs"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle incremental index updates when pages are recrawled?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "index_updates" }
+    },
+    {
+      "role": "candidate",
+      "content": "I think we'd need to rebuild the index periodically with the updated pages. Maybe a daily full rebuild? Or we could maintain a small 'recent changes' index that only contains pages crawled in the last 24 hours, and merge results from both the main index and the recent-changes index at query time.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["index_rebuild", "incremental_index"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The dual-index approach is actually what most search engines use — they call it the 'realtime' or 'incremental' index. How would you handle ranking? You mentioned TF-IDF earlier — what else?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Beyond TF-IDF we'd want PageRank for link-based authority. A page that's linked to by many other important pages should rank higher. We'd compute PageRank offline via iterative computation over the link graph. The combined ranking would be something like: 0.5 * text_relevance + 0.3 * pagerank + 0.2 * freshness. But I know in practice modern search engines use much more sophisticated ML-based ranking with hundreds of features.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["pagerank", "link_analysis", "multi_signal_ranking", "ml_ranking"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add spell correction for queries, a caching layer for popular queries, and monitoring for query latency and result quality. We'd also need a spam detection system to prevent low-quality pages from gaming our rankings.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["spell_correction", "query_caching", "spam_detection", "monitoring"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thanks for the discussion. Your inverted index knowledge was solid, but distributing the system was a gap. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 50,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 5,
+      "api_design": 4,
+      "database_design": 7,
+      "caching_strategy": 4,
+      "scalability": 4,
+      "failure_handling": 5,
+      "communication": 6
+    },
+    "strengths": [
+      "Strong understanding of inverted index fundamentals — posting lists, boolean retrieval, TF-IDF",
+      "Good capacity estimation for index size with reasonable math"
+    ],
+    "weaknesses": [
+      "Initially designed a single-machine system for 100B web pages — major scaling blind spot",
+      "Could not independently arrive at document-based sharding without interviewer guidance",
+      "Tail latency problem was identified but not solved without hints",
+      "Ranking discussion was surface-level — mentioned ML ranking but couldn't elaborate"
+    ]
+  }
+}

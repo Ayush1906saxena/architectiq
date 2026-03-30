@@ -1,0 +1,181 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "staff",
+    "candidate_profile": "interviewer-silent-pressure",
+    "total_exchanges": 22,
+    "generation_id": "seed_080"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed system. Walk me through how you'd approach it.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Let me start with some clarifying questions. What's the expected user base — daily active users? What's the average number of follows per user? Do we need to support ranked feeds or just chronological? And what's our latency target for loading the feed?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "feed_ranking", "latency", "social_graph"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500 million DAU. Average user follows 200 people. Chronological feed for now. Feed should load in under 200 milliseconds.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. Let me do some capacity estimation. 500M DAU, if each user checks their feed 10 times per day, that's 5 billion feed requests per day, roughly 58,000 feed reads per second. For writes — if 10% of users post daily, averaging 2 tweets each, that's 100 million tweets per day, about 1,150 writes per second. The key design decision is fanout-on-write versus fanout-on-read.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "fanout_on_write", "fanout_on_read"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "...",
+      "annotation": { "action": "silence", "phase": "high_level_design", "target_concept": "fanout_on_write" }
+    },
+    {
+      "role": "candidate",
+      "content": "Um... so, yeah, the fanout approach. Let me think about this more carefully. With fanout-on-write, when a user posts a tweet, we pre-compute the feed by pushing the tweet to all followers' feed caches. With 200 average followers, that's 200 writes per tweet. 100M tweets times 200 followers... that's 20 billion fanout writes per day. That's... 230,000 writes per second just for fanout. That's a lot. Maybe I should reconsider.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fanout_on_write", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Go on.",
+      "annotation": { "action": "silence", "phase": "high_level_design", "target_concept": "fanout_on_write" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right. So 230K writes per second for fanout is manageable with Redis actually. Each feed entry is small — just a tweet ID, maybe 8 bytes. If we store the last 800 tweets per user in a Redis sorted set, that's 6.4KB per user. 500M users times 6.4KB is about 3.2TB of Redis memory. That's a large cluster but feasible — maybe 100 Redis nodes at 32GB each. The real problem is celebrity accounts — someone with 50 million followers generates 50M writes per tweet. That's the hot user problem.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fanout_on_write", "redis_caching", "capacity_estimation", "celebrity_problem"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Mm-hmm.",
+      "annotation": { "action": "silence", "phase": "high_level_design", "target_concept": "celebrity_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "...So to handle the celebrity problem — actually, let me reconsider the whole approach. Maybe I'm wrong about fanout-on-write being the right choice. No, wait. The hybrid approach is what Twitter actually uses. Regular users use fanout-on-write — their tweets are pushed to follower feeds. But celebrities — users with more than, say, 100,000 followers — use fanout-on-read. Their tweets are fetched at read time and merged with the pre-computed feed. This caps the write amplification while keeping feed reads fast for the common case.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fanout_on_write", "fanout_on_read", "celebrity_problem"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You second-guessed yourself there. Why?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I... honestly, the silence made me wonder if I was going down the wrong path. But stepping back, my reasoning was sound. Fanout-on-write is the right default for this scale because it makes reads O(1) — just fetch the pre-computed list. The hybrid approach for celebrities is well-established. I should have stuck with my initial instinct rather than waffling. Let me continue with the architecture.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fanout_on_write", "fanout_on_read"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Please do.",
+      "annotation": { "action": "silence", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The architecture: tweet creation goes through a write API, which stores the tweet in a tweets table — I'd use a sharded MySQL or PostgreSQL database, sharded by user_id. After the write, an async fanout service pulls the tweet from a message queue — Kafka — and pushes the tweet ID into each follower's feed cache in Redis. For feed reads, the read API fetches the user's pre-computed feed from Redis, then for any celebrity accounts they follow, does a parallel fetch of recent tweets and merges them into the timeline, sorted by timestamp. A social graph service manages follow relationships.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "sharding_strategy", "kafka", "redis_caching", "fanout_on_write", "social_graph"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What database for the social graph?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "social_graph" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the social graph — the follow relationships — I'd consider a graph database like Neo4j, but at this scale I think a sharded relational database is more practical. A simple table: follower_id, followee_id, created_at. Indexed both ways — by follower_id for 'who do I follow' queries and by followee_id for 'who follows me' queries. Sharded by follower_id since that's the primary access pattern for feed generation. For the fanout service that needs to look up a user's followers, it queries the followee_id index — which might require a scatter-gather across shards, but this is an async operation so latency is less critical.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["social_graph", "database_choice", "sharding_strategy", "database_schema"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "...",
+      "annotation": { "action": "silence", "phase": "deep_dive", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Actually — I want to add to that. The scatter-gather for the followee_id lookup is a problem at scale. For a celebrity with 50 million followers, that query touches potentially every shard. A better approach is to maintain a reverse index — a separate table or cache sharded by followee_id that stores the follower list. This doubles our storage for the graph but makes the fanout service's access pattern a simple single-shard lookup. Worth the tradeoff for operational simplicity.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["social_graph", "sharding_strategy", "database_schema"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Better. Tell me about the feed read path in detail. User opens the app — what happens?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "feed_generation" }
+    },
+    {
+      "role": "candidate",
+      "content": "User opens the app, client sends GET /feed?cursor=<last_seen_tweet_id>&count=20. The read API server: step one, fetch the pre-computed feed from Redis — the user's sorted set of tweet IDs. Step two, identify celebrity accounts the user follows from a cached list. Step three, parallel-fetch recent tweets from each celebrity (from a separate celebrity tweet cache). Step four, merge the pre-computed feed with celebrity tweets, sort by timestamp, apply cursor-based pagination, and take the top 20. Step five, hydrate the tweet IDs into full tweet objects — fetch from a tweet cache, backed by the tweet database. Step six, return the response. Most of this is cache lookups, so we should hit the 200ms target.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_generation", "api_design", "redis_caching", "pagination"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How many cache lookups total in that flow?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "redis_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me count. One: the pre-computed feed sorted set. Two: the user's celebrity follow list. Then one per celebrity — if a user follows 5 celebrities, that's 5 more. Then hydrating 20 tweet IDs — could be up to 20 individual cache lookups, but I'd batch these with Redis MGET, so it's one round trip. Total: about 3-8 Redis round trips depending on celebrity count. At 0.5ms per round trip within a data center, that's 1.5-4ms for cache operations. Well within budget. If we want to optimize further, we could pipeline the Redis calls.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "latency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "...",
+      "annotation": { "action": "silence", "phase": "deep_dive", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll keep going. Failure scenarios. If the Redis feed cache goes down for a user — maybe the data was evicted — we fall back to reconstructing the feed on the fly. We fetch the user's follow list, query the tweets table for recent tweets from those users, merge and sort. This is the fanout-on-read path. It's slower — maybe 500ms to 1 second — but it works as a fallback. We'd also repopulate the cache during this operation. For the fanout service, if Kafka has a backlog, feeds become temporarily stale. Users see slightly old content. Not ideal but not catastrophic — we show stale data and catch up when the backlog clears.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_failure", "fanout_on_read", "kafka", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's say we now want to add a ranked feed instead of chronological. What changes?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "feed_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Ranked feed is a significant change. Instead of sorting by timestamp, we need a relevance score. The fanout-on-write approach still works for generating candidates, but we add a ranking step at read time. After fetching the candidate tweets, a ranking service scores each tweet based on features: engagement signals (likes, retweets, replies), user affinity (how often you interact with this author), recency, and content type. This could be a lightweight ML model — even logistic regression works for v1. The ranking step adds latency — maybe 20-50ms for scoring 200 candidates. We'd generate more candidates than we display and truncate after ranking.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["feed_ranking", "ml_ranking"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Alright, we're out of time. Anything you want to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. I'd add a notification service for @mentions and interactions, separate from the feed path. A CDN layer for media — images and videos attached to tweets are served from edge caches. Rate limiting on tweet creation to prevent spam. And comprehensive monitoring: fanout latency, feed generation latency percentiles, cache hit rates, and Kafka consumer lag as a proxy for feed freshness.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cdn_redirect", "rate_limiting", "monitoring", "notifications"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thank you. Solid design work today.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 58,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 6,
+      "failure_handling": 6,
+      "communication": 4
+    },
+    "strengths": [
+      "Excellent capacity estimation — calculated fanout write volume and Redis memory requirements unprompted",
+      "Strong understanding of hybrid fanout approach and celebrity problem",
+      "Detailed analysis of cache lookup count and latency budget"
+    ],
+    "weaknesses": [
+      "Visibly rattled by interviewer silence — second-guessed correct answers multiple times",
+      "Communication became hesitant and fragmented under pressure",
+      "Feed ranking discussion was surface-level — didn't explore cold start, feedback loops, or A/B testing",
+      "Needed silence to prompt self-correction rather than presenting confidently from the start"
+    ]
+  }
+}

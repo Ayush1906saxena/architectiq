@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "sde2",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_201"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a rate limiter for an API. The goal is to control how many requests each client can make within a time window. How would you start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me clarify some requirements first. Are we rate limiting per user, per IP, or per API key? Is this for a single service or multiple microservices? And what's the scale — how many unique clients and what's the overall request rate?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "scalability"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Per API key. Single service for now. Assume 10,000 unique API keys and the service handles about 5,000 requests per second total.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. And what's the rate limit — same for everyone? And the time window — per second, per minute, per hour? Also, should the rate limiter be hard (reject immediately) or should there be any bursting allowed?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "rate_limiting_algorithms"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Different tiers: free gets 60 requests per minute, paid gets 600 per minute. Some bursting is okay. Design the system.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Since bursting is allowed, I'd use a token bucket algorithm. Here's how it works: each API key has a bucket that holds tokens. The bucket has a max capacity — that's the burst size — and tokens are added at a steady rate. For a free user with 60 per minute, that's 1 token per second, with a burst capacity of maybe 10. When a request comes in, we try to take a token. If the bucket has tokens, allow the request and decrement. If empty, reject with 429.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting_algorithms", "token_bucket"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Walk me through the algorithm step by step — how do you actually implement the token bucket without a background thread refilling tokens?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, we don't need a background thread. The trick is lazy evaluation. Each bucket stores: the current token count and the last refill timestamp. When a request arrives, we calculate how much time has passed since the last refill, multiply by the refill rate to get new tokens, add them to the count (capped at max capacity), update the timestamp, then try to consume one token. So: tokens = min(max_capacity, stored_tokens + (now - last_refill) * refill_rate). If tokens >= 1, allow and set tokens -= 1. Otherwise reject.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "rate_limiting_algorithms"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Clean explanation. Now, when we reject a request, what should the response look like?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "HTTP 429 Too Many Requests. The response should include a Retry-After header telling the client how many seconds to wait before trying again. I'd calculate that based on how long until at least one token is available — basically (1 - current_tokens) / refill_rate seconds. I'd also include X-RateLimit-Limit, X-RateLimit-Remaining, and X-RateLimit-Reset headers on every response, not just 429s, so clients can self-throttle proactively.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "retry_after_header"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned Retry-After — good detail. Where does this rate limiter sit in the architecture?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "system_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd implement it as middleware that runs before any API handler. The flow is: request comes in, middleware extracts the API key, checks the token bucket for that key, and either passes the request through or returns 429. It could also sit at an API gateway level like Kong or AWS API Gateway, but since we said single service, middleware is simplest.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["middleware", "system_architecture", "api_gateway"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "For a single server, where do you store the token buckets?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "in_memory_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "For a single server, an in-memory hash map works perfectly. Key is the API key, value is {tokens, last_refill_time}. With 10,000 API keys, each entry is maybe 50 bytes — that's 500KB total, negligible. Lookups are O(1). We'd need a mutex or use a concurrent map to handle concurrent requests safely.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["in_memory_storage", "concurrency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now scale it out. Two servers behind a load balancer. What breaks?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each server has its own token buckets, so a user could get double their rate limit by splitting requests across servers. We need a shared store. I'd use Redis. For the token bucket in Redis, I'd use a Lua script that runs atomically: it reads the tokens and timestamp, calculates new tokens, checks if there's enough, and decrements — all in one atomic operation. The key would be 'ratelimit:{api_key}' storing a hash of tokens and last_refill.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_rate_limiting", "redis_caching", "atomicity", "lua_script"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the latency impact of hitting Redis on every request?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "latency" }
+    },
+    {
+      "role": "candidate",
+      "content": "A Redis call is typically under 1ms on the same network. For 5,000 requests per second, that's manageable for a single Redis instance — Redis can handle 100K+ operations per second. The total added latency per request is about 1ms, which is acceptable for most APIs. If even that's too much, we could do a local check first — maintain an approximate local counter that's synced with Redis periodically — but that adds complexity and isn't needed at this scale.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["latency", "redis_caching", "scalability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if Redis goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd fail open — allow requests through. Rate limiting is a protection mechanism, not a core business function. Blocking all users because the rate limiter is down is worse than temporarily having no limits. I'd fall back to local in-memory counters on each server, which gives us approximate rate limiting. And I'd set up Redis with a replica so we can failover quickly, plus alerts on Redis health.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["failure_handling", "graceful_degradation", "redis_replication"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "One more scenario: a bad actor keeps sending requests even after getting 429s. How do you handle that?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "security" }
+    },
+    {
+      "role": "candidate",
+      "content": "If someone keeps hitting us despite 429s, they're likely malicious. I'd add a secondary check: if an API key has been rate-limited more than, say, 50 times in the last 5 minutes, temporarily block them entirely for 10 minutes. This is like a soft ban. For really persistent abuse, we could revoke the API key. At the infrastructure level, if someone is flooding us from many IPs, a WAF or DDoS protection service like Cloudflare would handle that better than our application-level rate limiter.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["security", "ddos_protection"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. We're about out of time. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add monitoring dashboards showing rate limit hits by tier, top rate-limited API keys, and Redis latency. This helps us tune the limits — if lots of legitimate users are hitting limits, maybe we need to adjust. I'd also log rate-limited requests for audit purposes. And if this grows to multiple services, I'd consider moving the rate limiter to a shared API gateway so all services benefit from a single consistent implementation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "api_gateway", "observability"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid interview. You demonstrated a clear understanding of rate limiting from algorithm to production. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 65,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 6,
+      "api_design": 8,
+      "database_design": 6,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Clear step-by-step explanation of token bucket algorithm with lazy evaluation",
+      "Excellent API response design with Retry-After and rate limit headers",
+      "Good Redis Lua script approach for atomic distributed rate limiting"
+    ],
+    "weaknesses": [
+      "Could have compared token bucket vs sliding window vs leaky bucket trade-offs",
+      "Didn't discuss how to handle rate limiting in a multi-region setup",
+      "Configuration management for rate limit tiers was not discussed"
+    ]
+  }
+}

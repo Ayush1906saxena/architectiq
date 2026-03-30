@@ -1,0 +1,141 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "staff",
+    "candidate_profile": "perfect",
+    "total_exchanges": 24,
+    "generation_id": "seed_324"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design the Twitter/X home feed — the timeline a user sees with tweets from people they follow, ranked by relevance. What questions would you like to ask?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several key questions. What's the scale — DAU, average follows per user, tweets per day? Is the feed purely chronological or relevance-ranked? Do we need to support ads interleaved in the feed? What about retweets and quote tweets — do they appear in the feed? What's the latency target for loading the feed? And is this a global system with users worldwide?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dau", "fan_out", "ranking", "ads", "latency", "global_distribution"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "300 million DAU, average user follows 200 accounts, 500 million tweets per day. Relevance-ranked with a chronological option. Yes to ads and retweets. Feed load latency under 300ms at p99. Global system. How would you approach this?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the core fan-out problem, which is the crux of timeline design. When a user tweets, their followers need to see it. There are two strategies: fan-out-on-write (push) and fan-out-on-read (pull). In fan-out-on-write, when a user tweets, we immediately write the tweet ID to every follower's timeline cache. In fan-out-on-read, when a user opens their feed, we query all accounts they follow and merge the results. The problem is neither works universally. A celebrity with 50 million followers would trigger 50 million writes on every tweet — that's fan-out-on-write's nightmare. But a normal user with 200 followers is fine. So I'd propose a hybrid approach: use fan-out-on-write for users with fewer than 10,000 followers (which is 99.9% of users), and fan-out-on-read for high-follower accounts. When loading a feed, we read the pre-computed timeline and merge in recent tweets from followed celebrities.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_on_write", "fan_out_on_read", "hybrid_fan_out", "celebrity_problem"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you implement the fan-out-on-write path reliably? A tweet from a user with 9,000 followers needs to be delivered to all 9,000 timelines.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "fan_out_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use Kafka as the backbone for reliable async fan-out. When a tweet is created, the Tweet Service writes the tweet to the Tweets datastore and publishes a TweetCreated event to a Kafka topic, partitioned by author_id. A Fan-out Service consumes these events. For each tweet, it looks up the author's follower list and writes the tweet ID to each follower's timeline in Redis (a sorted set with the tweet's timestamp as the score). Kafka gives us durability — if the fan-out service crashes mid-way through writing to 9,000 timelines, it restarts and reprocesses from its last committed offset. No tweets are lost. For throughput, I'd have multiple fan-out worker instances, each handling a partition. With 500M tweets/day, that's about 5,800 tweets/sec. Average fan-out of 200 followers means about 1.16M timeline writes per second — a moderate Redis Cluster handles this easily. The fan-out is asynchronous, so there's a slight delay (typically under 5 seconds) between tweeting and appearing in followers' feeds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka", "async_fan_out", "redis_sorted_set", "consumer_offsets", "throughput_calculation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the timeline cache itself? How do you structure it and prevent it from growing unbounded?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "timeline_cache" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each user's timeline is a Redis sorted set: timeline:{user_id}. Members are tweet IDs, scores are timestamps. We cap it at 800 entries using ZREMRANGEBYRANK to trim the oldest entries after each insert. Why 800? A user typically scrolls through 50-100 tweets per session. With 800, we cover several days of content for most users without excessive memory. Memory math: 300M DAU, each with 800 tweet IDs (8 bytes each) plus overhead ≈ 100 bytes per entry. That's 300M * 800 * 100 bytes ≈ 24TB. With Redis Cluster across, say, 200 nodes, that's 120GB per node — manageable. For inactive users who haven't opened the app in weeks, we don't maintain a timeline cache. When they return, we compute their timeline on-the-fly (fan-out-on-read) and then warm their cache. This is the timeline warming process — a background job that pre-computes timelines for users showing signs of returning (push notification opened, app launched).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["timeline_cache", "cache_sizing", "sorted_set_trimming", "cache_warming", "memory_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you generate unique tweet IDs? At 500M tweets per day, collisions would be catastrophic.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "id_generation" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a Snowflake ID generator — this is what Twitter actually invented for this exact problem. A Snowflake ID is a 64-bit integer composed of: 41 bits for timestamp (milliseconds since custom epoch, good for ~69 years), 10 bits for machine ID (supports 1,024 generator instances), and 12 bits for sequence number (4,096 IDs per millisecond per machine). This gives us time-sortable IDs without coordination between generators — each machine independently generates unique IDs. With 1,024 machines and 4,096 IDs per millisecond each, the theoretical max is ~4 billion IDs per second, far beyond our needs. The time-sortability is crucial — we can sort tweets by ID and get chronological order without a separate timestamp field, and the ID itself encodes when the tweet was created. We extract the timestamp component for display. No database sequence needed, no centralized counter — each service instance has its own machine ID assigned at startup from a ZooKeeper-managed registry.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["snowflake_id", "time_sortable_id", "distributed_id_generation", "zookeeper", "bit_allocation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now let's talk about the ranking algorithm. The feed shouldn't just be chronological — how do you rank tweets by relevance?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ml_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ranking system has two stages. Stage 1: candidate retrieval. We pull the user's timeline cache (800 tweet IDs) plus recent tweets from followed celebrities (the fan-out-on-read portion). This gives us, say, 1,000 candidate tweets. Stage 2: ML ranking. A neural ranking model scores each candidate based on a rich feature set. User features: historical engagement patterns, topic interests, recency bias preference. Tweet features: author engagement rate, media presence, tweet age, reply/retweet/like counts. Interaction features: how often this user engages with this author, how similar the tweet's content is to the user's interests. The model outputs a probability of engagement (like, retweet, reply, extended dwell time) and we rank by this score. For the feature store, I'd use a dual-layer setup: a real-time feature store (Redis) for fast-changing features like a tweet's current like count, and a batch feature store (Cassandra) for slowly changing features like user interest vectors, updated by offline Spark jobs running daily. The ranking service fetches features, runs inference (we keep the model small enough for <50ms inference), and returns the ranked list.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ml_ranking", "candidate_retrieval", "feature_store", "engagement_prediction", "two_stage_ranking", "real_time_features"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you detect trending topics in real time?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "trending" }
+    },
+    {
+      "role": "candidate",
+      "content": "Trending detection requires identifying topics with abnormal velocity — not just high volume, but volume significantly above their baseline. I'd use a count-min sketch data structure for space-efficient approximate counting. It's a probabilistic data structure that uses multiple hash functions to count item frequencies in a fixed amount of memory, with a one-sided error (it can overcount but never undercount). The pipeline: every tweet is tokenized into hashtags and n-grams. These flow through a Kafka stream processor (Flink or Kafka Streams). The processor maintains a count-min sketch per time window (say, 5-minute windows). For each hashtag, we compute the current count and compare it against the expected count from a historical baseline (computed offline, stored in Redis). If current_count / expected_count exceeds a threshold (say 3x), it's trending. We apply a minimum volume filter (at least 1,000 mentions) to avoid low-volume spikes. The results are written to a Trending Topics cache, refreshed every 30 seconds. We also filter out perma-trending topics (common words, persistent hashtags) by requiring the velocity ratio to be above baseline, not just the absolute count.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["count_min_sketch", "trending_detection", "velocity_detection", "stream_processing", "kafka_streams", "baseline_comparison"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a celebrity deletes a tweet that's already been fan-out to millions of timelines?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "tweet_deletion" }
+    },
+    {
+      "role": "candidate",
+      "content": "Deletion is inherently harder than creation because of the fan-out asymmetry. For non-celebrity users (fan-out-on-write), we publish a TweetDeleted event to Kafka. The fan-out service processes it by removing the tweet ID from every follower's timeline sorted set. This is the same fan-out cost as creation. For celebrities (fan-out-on-read), deletion is actually easier — since the tweet was never fan-out to timelines, we just mark it as deleted in the Tweets datastore. When the feed is assembled at read time, deleted tweets are filtered out. For the transition period before all timelines are cleaned up, the feed rendering layer always checks if a tweet still exists before displaying it. Deleted tweet IDs are added to a bloom filter of recently deleted tweets for fast O(1) checks. The bloom filter is small — even 10 million deleted tweets fit in about 12MB with a 1% false positive rate. False positives just mean an unnecessary database check, which is harmless.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tweet_deletion", "async_fan_out", "bloom_filter", "soft_delete", "fan_out_asymmetry"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you store the tweets themselves and the social graph (who follows whom)?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "data_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two different access patterns, two different stores. Tweets are write-heavy with point lookups by tweet ID and range queries by author (for profile pages). I'd use a sharded MySQL cluster (or Vitess) partitioned by tweet_id. The tweet table is compact: id, author_id, content, media_refs, created_at, is_deleted. At 500M tweets/day, that's about 50TB per year — we archive tweets older than 2 years to cold storage but keep them queryable via a separate service. The social graph (follows) has a different pattern: we need 'who does user X follow?' (for feed assembly) and 'who follows user X?' (for fan-out). I'd use a graph-optimized store, but pragmatically, a sharded MySQL table with two indexes works: follows(follower_id, followee_id) with indexes on both columns. The follower list for fan-out is the hot path — we cache it in Redis as a set: followers:{user_id}. Invalidation happens on follow/unfollow events via Kafka.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharded_mysql", "social_graph", "data_partitioning", "index_design", "cache_invalidation", "cold_storage"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running low on time. Anything else you'd add to this design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few important additions. First, ad injection — after ranking, we insert sponsored tweets at specific positions (e.g., positions 3, 8, 15). The ad selection runs a separate auction per user based on targeting criteria and bid prices. Second, content safety — a real-time pipeline that scores tweets for policy violations (hate speech, misinformation) and suppresses them from feeds before human review. Third, A/B testing infrastructure — we need to experiment with ranking models constantly. I'd use a feature flag system where different user cohorts see feeds ranked by different models, with engagement metrics tracked per variant. Fourth, rate limiting on the feed API itself — an infinite scroll generates many requests, and we need to prevent abuse. Fifth, a quality recirculation system — if the user has consumed all fresh content, intelligently surface high-quality older tweets they haven't seen rather than showing low-quality recent ones.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ad_injection", "content_safety", "ab_testing", "rate_limiting", "content_recirculation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exceptional interview. Your hybrid fan-out approach, Snowflake IDs, ML ranking pipeline, and count-min sketch for trending were all excellent. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 88,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 10,
+      "api_design": 8,
+      "database_design": 9,
+      "caching_strategy": 10,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Hybrid fan-out strategy with clear threshold reasoning and concrete numbers for the celebrity cutoff",
+      "Detailed Snowflake ID design with exact bit allocation and throughput calculation",
+      "Two-stage ML ranking with dual-layer feature store (real-time Redis + batch Cassandra)",
+      "Count-min sketch for trending detection with velocity-over-baseline approach to filter perma-trending topics",
+      "Bloom filter for deleted tweets — elegant space-efficient solution"
+    ],
+    "weaknesses": [
+      "Could have discussed feed pagination and cursor-based scrolling in more detail",
+      "Didn't elaborate on the cold start problem for new users with few follows"
+    ]
+  }
+}

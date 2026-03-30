@@ -1,18 +1,31 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings
 from api import health, lessons, tts, quiz, progress, curriculum, design_challenge, ask, interview
 from db.database import init_db
+from middleware.security import RateLimitMiddleware, RequestSizeLimitMiddleware
 
-app = FastAPI(title="ArchitectIQ API", version="0.1.0")
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    yield
+
+
+app = FastAPI(title="ArchitectIQ API", version="0.1.0", lifespan=lifespan)
+
+# Security middleware (order matters — outermost runs first)
+app.add_middleware(RequestSizeLimitMiddleware)
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 app.include_router(health.router, prefix="/api", tags=["health"])
@@ -24,8 +37,3 @@ app.include_router(curriculum.router, prefix="/api", tags=["curriculum"])
 app.include_router(design_challenge.router, prefix="/api", tags=["design-challenge"])
 app.include_router(ask.router, prefix="/api", tags=["ask"])
 app.include_router(interview.router, prefix="/api", tags=["interview"])
-
-
-@app.on_event("startup")
-async def startup():
-    await init_db()

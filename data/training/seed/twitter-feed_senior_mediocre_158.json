@@ -1,0 +1,183 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "mediocre",
+    "total_exchanges": 22,
+    "generation_id": "seed_158"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Today we'll design a Twitter-like feed system. Users post tweets, follow others, and see a personalized feed. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "How many users do we have? And do we need to support images and videos in tweets or just text?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["scale", "media_handling"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "200 million DAU, text only. Average user follows 300 people. Some users have millions of followers. Feeds should be near real-time. Let's start.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, so the main idea is fan-out. When a user posts a tweet, we push it to all their followers' feeds. I know about fan-out-on-write. So when someone tweets, we write the tweet to the database, then loop through their followers and add the tweet to each follower's feed.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fan_out_on_write", "feed_generation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through that in more detail. User A posts a tweet. What happens step by step?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "write_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "User A's request hits our API server. The server saves the tweet to the database. Then it queries the follower table to get all of User A's followers. For each follower, it inserts a record into a feed table — like (follower_id, tweet_id, timestamp). Then returns success to User A.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["api_design", "database_write", "follower_lookup", "feed_table"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let me make sure I understand. User A has 10 million followers. Your API server is sitting there, synchronously inserting 10 million rows into the feed table, while User A waits for their tweet to be confirmed? How long does that take?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "synchronous_fanout" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh, that would be really slow. Like... even at 10,000 inserts per second, that's 1,000 seconds. Almost 17 minutes. Yeah, that doesn't work.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["latency_calculation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right. Your write path is blocking for potentially minutes. How would you fix this?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "async_processing" }
+    },
+    {
+      "role": "candidate",
+      "content": "We could make it asynchronous. Save the tweet, return success to the user immediately, and then do the fan-out in the background. Maybe using a message queue?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["async_processing", "message_queue"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What message queue would you use and how would you structure the background processing?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "async_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "We could use RabbitMQ. Put a message on the queue with the tweet ID and author ID. A worker picks it up, gets the follower list, and does the fan-out inserts.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["rabbitmq", "worker_processing"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "One worker processing 10 million fan-out writes for a celebrity tweet — that's still going to take a very long time. How do you parallelize it?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "parallelism" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multiple workers? Like, the first worker could split the follower list into chunks and put each chunk back on the queue. Then different workers handle different chunks in parallel. So if we have 100 workers and split 10 million followers into 100 chunks of 100K each, they all process simultaneously.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["parallel_workers", "chunking", "work_splitting"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Better. But do you really want to fan out 10 million writes for every celebrity tweet? Some celebrities tweet 20 times a day.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "celebrity_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's 200 million writes per celebrity per day... yeah, that's too much. I guess for celebrities we could skip the fan-out and instead pull their tweets when a follower loads their feed? Like, the feed is a combination of pre-computed fan-out results plus a live query for celebrities you follow.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["celebrity_problem", "hybrid_fanout", "fan_out_on_read"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good — that's the hybrid approach. Where do you store the pre-computed feeds? The feed table in the database?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "storage_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, the database would work but at 200 million DAU each reading their feed multiple times a day, that's a lot of database queries. We should probably use Redis. Store each user's feed as a list or sorted set in Redis — sorted by timestamp.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["redis_caching", "sorted_set"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How much Redis memory do you need for 200 million users' feeds?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "memory_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "If each feed keeps... maybe 500 tweet IDs? Each ID is 8 bytes plus some overhead. Let's say 50 bytes per entry. 500 entries times 50 bytes is 25KB per user. 200 million times 25KB is... 5TB. That's a lot of Redis. We'd need a big cluster.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["memory_estimation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about users who haven't logged in for weeks? Do they need a pre-computed feed in Redis?",
+      "annotation": { "action": "hint", "phase": "scaling_failures", "target_concept": "cold_start" }
+    },
+    {
+      "role": "candidate",
+      "content": "No, we could only keep feeds for active users. If someone hasn't logged in for a while, we evict their feed from Redis and rebuild it when they come back. That would reduce the memory significantly — maybe only 30-40% of users are active in a given week.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["active_user_optimization", "lazy_loading", "cache_eviction"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you rebuild a feed for a returning user?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "feed_rebuild" }
+    },
+    {
+      "role": "candidate",
+      "content": "Query the database for recent tweets from everyone they follow. Sort by timestamp, take the top 500, and populate their Redis feed. It's a fan-out-on-read for that first load, then subsequent updates come via the normal fan-out-on-write pipeline.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["feed_rebuild", "fan_out_on_read"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "If they follow 300 people, that's a query across 300 users' tweets, merge-sorted. How do you make that fast?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "query_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm... we could have an index on (author_id, created_at) and query each author's recent tweets. Then merge in memory. 300 queries sounds like a lot though. Maybe we batch them? I'm not sure how to optimize this further.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["index_design", "batch_queries"], "depth": "shallow", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I think the key design decisions are using async fan-out for normal users, hybrid with on-read for celebrities, and Redis for the pre-computed feeds. I'd also want to add a CDN and some caching for popular tweets.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["design_summary", "cdn", "caching"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You got to the right architecture eventually. The initial synchronous approach was a miss, but you course-corrected. Thanks for the discussion.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 48,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 5,
+      "api_design": 4,
+      "database_design": 5,
+      "caching_strategy": 6,
+      "scalability": 5,
+      "failure_handling": 3,
+      "communication": 5
+    },
+    "strengths": [
+      "Knew the fan-out-on-write concept from the start",
+      "Arrived at the hybrid celebrity approach after prompting",
+      "Good active-user optimization to reduce Redis memory"
+    ],
+    "weaknesses": [
+      "Designed the entire write path synchronously — blocking for 10M writes during a celebrity tweet",
+      "Message queue architecture lacked depth — no mention of Kafka, partitioning, or ordering guarantees",
+      "Feed rebuild for returning users was hand-wavy — 300 parallel queries with no clear optimization",
+      "Zero discussion of failure scenarios — what if fanout workers crash, what if Redis goes down?",
+      "No capacity estimation until directly asked about Redis memory",
+      "Didn't discuss tweet deletion propagation or eventual consistency"
+    ]
+  }
+}

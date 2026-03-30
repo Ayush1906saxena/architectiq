@@ -1,0 +1,130 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "staff",
+    "candidate_profile": "cache-thundering-herd",
+    "total_exchanges": 22,
+    "generation_id": "seed_374"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's talk about Twitter's feed system. I want to focus specifically on cache thundering herd. Give me the caching architecture first.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "cache_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each user's timeline is a precomputed list of tweet IDs stored in Redis. When a user follows someone who tweets, we push that tweet ID into the follower's timeline list via fan-out-on-write. To render a timeline, we fetch the list from Redis, then hydrate the tweet objects — fetching full tweet data, author info, and engagement counts. The hydrated timeline might also be cached with a short TTL. For celebrity timelines — profiles that are viewed frequently — we cache the rendered result with a 30-60 second TTL to avoid redundant hydration.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "fan_out_on_write", "timeline_hydration", "cache_ttl"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now the scenario: a celebrity with 50 million followers has their timeline cache expire. In the next 100 milliseconds, 50,000 users try to view that celebrity's profile. All 50,000 requests miss the cache simultaneously and hit the database. Walk me through exactly what happens.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "thundering_herd" }
+    },
+    {
+      "role": "candidate",
+      "content": "At T+0, the cache entry expires. At T+1ms, the first request arrives, finds no cache entry, and initiates a database query to rebuild the timeline. This query is expensive — it needs to fetch the latest 200 tweet IDs, then hydrate each one with author data, engagement counts, and media URLs. It might take 50-100ms. During those 50-100ms, 49,999 more requests arrive. Each one also finds no cache entry and each one independently starts the same expensive database query. Now we have 50,000 identical queries running against the database. The database connection pool fills up. Query latency spikes. Other users' queries — completely unrelated — start queuing behind these 50,000 celebrity timeline queries. It's a localized DDoS from our own application.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["thundering_herd", "cache_miss_storm", "database_overload", "self_ddos"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly. 50,000 identical queries. What's the most direct way to prevent this?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "request_coalescing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Request coalescing, also called single-flight or request collapsing. When the first request misses the cache, it sets a 'loading' marker — a lock or semaphore for that cache key. All subsequent requests for the same key see the lock and wait for the first request to complete rather than issuing their own database query. Once the first request finishes and populates the cache, all 49,999 waiting requests are served from the freshly populated cache. Only one database query executes instead of 50,000. In Go, the singleflight package does this. In Java, you can use a ConcurrentHashMap of CompletableFutures. The key is: the coalescing must happen at the application layer, close to the cache lookup.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["request_coalescing", "singleflight", "cache_lock", "deduplication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. But you have multiple application servers. The singleflight pattern works on a single server. Requests for the celebrity's timeline are landing on 30 different servers. Each server independently discovers the cache miss.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "distributed_coalescing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, local coalescing reduces 50,000 queries to maybe 30 — one per server. That's much better but still 30 identical queries. For distributed coalescing, we can use a Redis-based lock. When a server gets a cache miss, before querying the database, it tries to SET a lock key with NX (set-if-not-exists) and a short TTL — say 5 seconds. If the SET succeeds, this server is the 'loader' and executes the query. If the SET fails, another server is already loading — this server polls the cache with a short sleep (10-20ms) until the data appears. This reduces 30 queries to exactly 1. The 5-second TTL ensures that if the loader crashes, the lock expires and another server can take over.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_lock", "redis_lock", "set_nx", "leader_loading"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if the loader server crashes mid-query? The lock TTL is 5 seconds. Other servers wait 5 seconds, then one of them tries again. That's a 5-second delay for users.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "lock_failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "True, the lock TTL is a trade-off: too short and you get spurious lock expiry during legitimate loading; too long and you wait too long if the loader crashes. I'd set the TTL to 2-3x the expected database query time — if queries normally take 100ms, set the lock to 300ms. If it expires, the loader likely failed. Additionally, serve stale data while waiting. Instead of deleting the cache entry when TTL expires, use a soft TTL: the entry stays in cache marked as 'stale.' Requesters check the soft TTL — if expired, one request triggers a refresh while all others are served the stale data immediately. Users get instant (slightly old) responses while the refresh happens in the background.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["stale_while_revalidate", "soft_ttl", "lock_ttl_tradeoff", "background_refresh"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That stale-while-revalidate approach is interesting. Walk me through the implementation in detail.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "stale_while_revalidate" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each cache entry has two TTLs: a soft TTL (e.g., 30 seconds) and a hard TTL (e.g., 60 seconds). Before the soft TTL, the entry is fresh — serve directly. Between soft and hard TTL, the entry is stale but servable. During this window, the first requester triggers an async background refresh and all requesters (including the first) are immediately served the stale data. After the hard TTL, the entry is evicted. Implementation in Redis: store the value with the hard TTL as the actual Redis EXPIRE. Store the soft TTL as a field in the value itself — a timestamp. On cache hit, compare the soft TTL timestamp to current time. If expired, trigger background refresh. This avoids any blocking on the hot path. The user always gets sub-millisecond response from cache, and the data refreshes silently.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["stale_while_revalidate", "dual_ttl", "background_refresh", "non_blocking_refresh"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now let's combine this with another problem. Multiple celebrity caches expire at similar times — maybe they were all populated during the same burst of activity. Now you have thundering herds for 100 celebrities simultaneously.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "cache_stampede_prevention" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the cache stampede problem at a broader level. The fix is TTL jitter: instead of all entries having a 30-second soft TTL, add random jitter — between 25 and 35 seconds. This desynchronizes the expiration times so celebrities' caches don't all expire in the same window. For the hard TTL: same approach, jitter between 50 and 70 seconds. Additionally, we can proactively refresh high-traffic caches. Track access frequency per cache key. For any key with more than 1,000 hits in the last TTL window, schedule a background refresh at 80% of the TTL — don't wait for expiration. The cache is refreshed before it expires, so no request ever misses. This is like the cache warming approach used by Facebook's Memcache layer.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ttl_jitter", "cache_stampede", "proactive_refresh", "access_frequency_tracking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about cache warming after a deployment? You deploy new app servers with empty local caches. They all start making cache requests to Redis. Redis has the data, but now your network is saturated with cache fills.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "deployment_cache_warming" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rolling deployments mitigate this — deploy one server at a time so only one server has a cold local cache at any moment. For Redis-level cache warming after a full restart: pre-warm from a snapshot. Before taking Redis down, dump the cache to a file. After restart, load the snapshot. For new Redis nodes added for scaling: use Redis Cluster's built-in data migration — when a new node joins, existing data is rebalanced to it. For the local in-process cache on app servers: implement gradual warming. On startup, the server starts with a reduced traffic weight in the load balancer — say 10% of normal. As the local cache warms up (measured by hit rate), gradually increase the weight. Once the hit rate reaches 80%+, go to full weight. This prevents a cold server from overwhelming Redis.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rolling_deployment", "cache_snapshot", "gradual_warming", "load_balancer_weight"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's go back to the original scenario. With all these protections in place, what's the worst case? Can thundering herd still happen?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "worst_case_analysis" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes, it can still happen in edge cases. The worst case: Redis itself has an outage, all caches are lost simultaneously (not just one key). When Redis comes back, every request misses. Stale-while-revalidate doesn't help because there's nothing stale to serve — the entries are gone. Proactive refresh doesn't help because the refresh job itself was depending on Redis being available. In this case, we need a circuit breaker at the database level: cap the number of concurrent cache-rebuild queries to the database at, say, 100. Queue additional requests. Prioritize rebuilding the hottest keys first based on traffic statistics stored separately. And enable local in-process caching as a stopgap — even a 1-second TTL local cache on each server prevents the same server from hitting the DB twice for the same key within a second.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_failure", "circuit_breaker", "concurrency_limit", "local_cache_fallback", "priority_rebuild"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. You demonstrated exceptional depth on caching failure modes and layered mitigation strategies. The stale-while-revalidate implementation detail was particularly strong. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 75,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 10,
+      "scalability": 8,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional depth on caching patterns: singleflight, distributed locks, stale-while-revalidate",
+      "Strong implementation detail on dual-TTL cache entries",
+      "Thorough layered approach with multiple mitigation strategies"
+    ],
+    "weaknesses": [
+      "Requirements gathering was skipped — jumped straight into architecture",
+      "Didn't discuss monitoring for cache hit rates or thundering herd detection",
+      "The cache warming strategy could have included more specific sizing numbers"
+    ]
+  }
+}

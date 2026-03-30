@@ -1,0 +1,172 @@
+{
+  "metadata": {
+    "problem_id": "message-queue",
+    "level": "senior",
+    "candidate_profile": "compares-alternatives",
+    "total_exchanges": 22,
+    "generation_id": "seed_057"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed message queue — something like Kafka or RabbitMQ. What do you want to clarify?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. What are the primary use cases? Are we optimizing for high throughput event streaming like Kafka, or for complex routing and task queuing like RabbitMQ? What's the expected message volume? And do we need exactly-once delivery, at-least-once, or at-most-once?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["delivery_semantics", "throughput"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "High-throughput event streaming. 1 million messages per second. At-least-once delivery with the option for exactly-once for specific consumers. How would you approach this?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Before I design from scratch, I want to discuss the existing solutions because understanding their trade-offs will inform our design decisions. The three major options in this space are Kafka, RabbitMQ, and SQS, and they make very different architectural choices.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["kafka", "message_queue"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Okay, give me a brief comparison.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "message_queue" }
+    },
+    {
+      "role": "candidate",
+      "content": "Kafka uses an append-only log partitioned across brokers. Consumers track their offset in the log. Messages are retained for a configurable period regardless of whether they've been consumed. This makes it great for replay, multiple consumer groups, and high throughput — 1M+ messages per second is routine. The trade-off: ordering is only per-partition, and consumers must pull messages. RabbitMQ uses a traditional broker model with queues, exchanges, and routing. It pushes messages to consumers and removes them after acknowledgment. Great for task distribution and complex routing (topic, fanout, header-based). But it struggles above 50-100K messages per second and doesn't support replay. SQS is AWS's managed queue — pull-based, at-least-once delivery, practically infinite scalability. But no ordering guarantees (except FIFO queues which cap at 3K messages per second) and no consumer groups.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka", "message_queue", "delivery_semantics"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a thorough comparison. Now, given our requirements — 1M messages per second, at-least-once, event streaming — which approach would you follow for our custom design?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "message_queue" }
+    },
+    {
+      "role": "candidate",
+      "content": "The Kafka architecture is clearly the right model for this use case. But there are some interesting alternatives within the log-based approach. Pulsar, for example, separates the storage layer (BookKeeper) from the serving layer, which gives better elasticity. And Redpanda reimplements Kafka's protocol in C++ with a thread-per-core architecture for better latency. Should I compare Kafka versus Pulsar's architecture before picking one?",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["kafka", "message_queue"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've compared options but haven't started designing. Let's pick one approach and go. We're designing from scratch, not selecting a product.",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "message_queue" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fair point. Let me design it. I'll follow the append-only log approach. The core abstraction is a topic, which is divided into partitions. Each partition is an ordered, immutable sequence of messages. Producers write to partitions, consumers read from partitions. A producer sends a message with a topic name and optionally a partition key. The key is hashed to determine the partition, ensuring messages with the same key always go to the same partition — this gives per-key ordering.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_queue", "partitioning"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good, now we're designing. How is each partition stored?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "storage_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each partition is a sequence of segment files on disk. A segment is, say, 1GB or covers 1 hour of data, whichever comes first. New messages are appended to the active segment. Older segments are immutable. Each segment has an index file mapping offsets to byte positions in the segment file for fast random access. Writes are sequential appends — which is why this is so fast. Modern SSDs can do 500MB/s sequential writes. At an average message size of 500 bytes, that's 1 million messages per second per disk. So a single partition on a single disk can handle our full throughput — though we'd want to distribute for fault tolerance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["storage_engine", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle replication for fault tolerance?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each partition is replicated across, say, 3 brokers. One is the leader, two are followers. Producers write to the leader. The leader appends the message and waits for at least one follower to acknowledge (this is configurable — wait for 0, 1, or all followers). Once acknowledged, the message is committed and visible to consumers. If the leader fails, one of the in-sync followers is elected as the new leader. The choice of how many acks to wait for is a trade-off: acks=0 is fastest but risks data loss, acks=all is safest but adds latency for every message.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["replication", "consistency", "leader_election"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does leader election work when a leader dies?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "leader_election" }
+    },
+    {
+      "role": "candidate",
+      "content": "We need a controller — a designated broker or an external coordination service. Kafka historically used ZooKeeper for this; newer versions use a built-in Raft-based controller (KRaft). When the controller detects a leader failure via heartbeat timeout, it selects a new leader from the in-sync replica set — specifically the replica that's most caught up with the old leader's log. The controller then notifies all brokers and clients of the new leader. The failure detection to new-leader-serving window should be a few seconds. During this window, producers for that partition get errors and should retry with backoff.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leader_election", "consensus", "single_point_of_failure"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about the consumer side. How do consumer groups work?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "consumer_groups" }
+    },
+    {
+      "role": "candidate",
+      "content": "A consumer group is a set of consumers that collaboratively process a topic. Each partition is assigned to exactly one consumer in the group — this is the key guarantee that enables parallelism without duplication. If a topic has 12 partitions and a consumer group has 4 consumers, each consumer gets 3 partitions. If a consumer dies, its partitions are rebalanced to the remaining consumers. Each consumer tracks its offset — the last message it successfully processed — and periodically commits it to a durable store (a special internal topic or an external store). On restart, the consumer resumes from its last committed offset.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consumer_groups", "partitioning", "offset_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you achieve exactly-once delivery?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "delivery_semantics" }
+    },
+    {
+      "role": "candidate",
+      "content": "Exactly-once is really two problems. Producer side: a producer could send a message, get a timeout, and retry — creating a duplicate. We solve this with a producer ID and sequence number. The broker deduplicates: if it sees producer_id=7, sequence=42, and it already has sequence 42 for that producer on that partition, it skips it. Consumer side: the consumer processes a message and commits its offset. If it crashes after processing but before committing, it'll reprocess. To get exactly-once here, the consumer needs to atomically commit the offset AND the side effect. For example, if the consumer writes to a database, we write the offset to the same database in the same transaction. On restart, we check the stored offset before resuming.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["delivery_semantics", "idempotency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about message retention and compaction?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "retention" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two retention modes. Time-based: delete segments older than the retention period — say 7 days. This is the default for event streaming where you want a replay window. Size-based: delete oldest segments when total partition size exceeds a limit. And then there's log compaction — instead of keeping all messages, keep only the latest value for each key. This is useful when the topic represents current state rather than events — like a user's latest profile, where you only care about the most recent update. Compaction runs as a background process that reads old segments and writes new compacted segments with duplicates removed.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["retention", "log_compaction"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about operational concerns. How do you add more brokers without downtime?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "rebalancing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Adding a broker requires partition reassignment. The new broker starts replicating some partitions from existing leaders. Once it's caught up (in the ISR), we can move leadership of some partitions to the new broker. The reassignment should be gradual — move a few partitions at a time to avoid overwhelming the network. During reassignment, the old leader continues serving reads and writes for those partitions until the new broker is in sync and leadership transfers. Clients automatically discover the new leader through metadata refreshes. The whole process is online — no downtime.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["rebalancing", "replication"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running low. Anything you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add monitoring — consumer lag (the difference between the latest offset and the consumer's committed offset) is the most important metric, because growing lag means the consumer can't keep up. Also, schema management — using a schema registry so producers and consumers agree on message format, with backward and forward compatibility. And quotas — per-producer and per-consumer bandwidth limits to prevent one tenant from monopolizing the cluster.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["monitoring", "schema_registry", "rate_limiting"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Overall, your knowledge of the space is evident — the comparisons showed real understanding. But it took too long to start actually designing. At a senior level, we want to see you recognize when analysis paralysis is setting in and start building. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 58,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 6,
+      "api_design": 4,
+      "database_design": 7,
+      "caching_strategy": 4,
+      "scalability": 6,
+      "failure_handling": 7,
+      "communication": 5
+    },
+    "strengths": [
+      "Excellent comparison of Kafka vs RabbitMQ vs SQS with concrete throughput numbers",
+      "Strong explanation of exactly-once semantics with both producer and consumer deduplication",
+      "Good understanding of storage engine internals — segment files, indexes, sequential writes"
+    ],
+    "weaknesses": [
+      "Spent too much time comparing alternatives before starting the actual design",
+      "No API design — never discussed producer/consumer API contracts",
+      "Didn't discuss batching, compression, or zero-copy optimizations that are key to high throughput",
+      "No capacity estimation for cluster sizing — how many brokers for 1M messages/sec?",
+      "Missing discussion of back-pressure handling when consumers fall behind"
+    ]
+  }
+}

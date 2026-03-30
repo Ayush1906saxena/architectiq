@@ -1,0 +1,140 @@
+{
+  "metadata": {
+    "problem_id": "message-queue",
+    "level": "senior",
+    "candidate_profile": "compares-everything",
+    "total_exchanges": 22,
+    "generation_id": "seed_102"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed message queue — something like Kafka or RabbitMQ. Producers publish messages to topics, consumers subscribe and process them. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "What's the target throughput and message size? Do we need ordering guarantees — global ordering, per-partition ordering, or none? And what delivery semantics — at-most-once, at-least-once, or exactly-once?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["throughput", "ordering", "delivery_semantics"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "1 million messages per second, messages up to 1MB but average 1KB. Per-partition ordering. At-least-once delivery with support for exactly-once if possible. Go ahead and design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the storage layer — this is the most critical decision. We could use: append-only log files on disk (what Kafka does), a B-tree based database like RocksDB (what Pulsar with BookKeeper does), or pure in-memory with WAL (what Redis Streams does). Kafka's approach — sequential writes to append-only segment files — is the fastest for our use case because sequential disk I/O on modern SSDs can do 2-3 GB/s. RocksDB adds overhead from LSM compaction. Redis Streams is limited by memory. For 1M messages/sec at 1KB, we need 1GB/sec sustained write throughput. Append-only log wins here.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["append_only_log", "rocksdb", "redis_streams", "sequential_io"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good comparison. How do you partition and replicate messages?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "partitioning" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each topic is divided into partitions. For partition assignment to brokers, we have options. Option A: static assignment with a metadata service (like Kafka with ZooKeeper or KRaft). Option B: consistent hashing ring (like some custom message queues). Option C: a centralized controller that optimally places partitions based on broker load. I'd go with Option A using a Raft-based metadata controller — similar to Kafka's KRaft. ZooKeeper is a dependency that adds operational burden, and Raft is simpler than external consensus. For replication: each partition has a leader and 2 followers. We could replicate synchronously (leader waits for all followers — stronger durability, higher latency) or semi-synchronously (leader waits for 1 of 2 followers — good balance). I'd choose semi-sync because it gives us ISR (in-sync replicas) semantics: a message is committed when the leader and at least one follower have it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["partitioning", "replication", "raft", "zookeeper", "isr", "synchronous_replication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's thorough. How do consumers track their progress?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "consumer_offsets" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three approaches for offset tracking. Approach 1: consumer stores offsets in the message queue itself — a special internal topic (Kafka's __consumer_offsets approach). Simple, self-contained, but creates a circular dependency. Approach 2: consumer stores offsets in an external store like Redis or PostgreSQL. Decoupled but adds a dependency and potential consistency issues between offset store and message consumption. Approach 3: consumer stores offsets in the same database where it writes processed results — transactional outbox pattern for exactly-once. For our system, I'd implement Approach 1 as the default because it's operationally simplest — no external dependency. But expose an API for consumers who want to manage their own offsets (Approach 2/3) for exactly-once processing.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consumer_offsets", "internal_topic", "transactional_outbox", "exactly_once"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned exactly-once. How would you actually implement it?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "exactly_once" }
+    },
+    {
+      "role": "candidate",
+      "content": "Exactly-once has two sides: producer to broker, and broker to consumer. For producer-to-broker: idempotent producers. Each producer gets a unique producer_id. Every message has a (producer_id, sequence_number) pair. The broker tracks the last sequence number per producer per partition. Duplicate messages (same producer_id + sequence) are silently discarded. For multi-partition atomicity, we need a transaction protocol — the producer sends BEGIN_TXN, publishes to multiple partitions, then COMMIT_TXN. The broker uses a two-phase commit internally. For broker-to-consumer: the consumer reads committed messages only (isolation level = read_committed) and commits its offset atomically with the processing output. This is where Approach 3 from before applies — the consumer writes its result and offset in a single transaction to its output database.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["exactly_once", "idempotent_producer", "two_phase_commit", "transaction_protocol"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle message retention and cleanup?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "retention" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two retention strategies, and the choice depends on use case. Time-based: delete segments older than N days. Simple, predictable storage costs. Works for event streams where old events lose value. Size-based: keep at most N GB per partition. Good when storage is the constraint. But there's a third option that's important: compacted topics. We could implement log compaction where for each key, we keep only the latest value. This is useful for changelog topics where consumers need the latest state, not the full history. Compaction runs as a background thread, similar to LSM compaction — it reads old segments, removes superseded entries, and writes a compacted segment. Trade-off: compaction uses CPU and disk I/O. I'd make all three configurable per topic.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["retention_policy", "log_compaction", "time_based_retention", "size_based_retention"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the network protocol between producers, consumers, and brokers?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "protocol_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Options: gRPC, custom TCP protocol, or HTTP/2. gRPC gives us efficient binary serialization (protobuf), bidirectional streaming for consumer push, and built-in flow control. It's well-supported across languages. Custom TCP protocol (like Kafka's binary protocol) gives maximum control and minimal overhead but requires maintaining client libraries for every language. HTTP/2 is accessible but less efficient for high-throughput streaming. I'd choose gRPC for the primary protocol — it's nearly as efficient as custom TCP but much easier to build client libraries for. For the batch produce path, we'd extend the gRPC API with client-side streaming so producers can send many messages in a single RPC. The serialization overhead of protobuf is about 2-3 microseconds per message — negligible at our scale.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["grpc", "protobuf", "protocol_design", "client_streaming"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a broker fails — it was the leader for 50 partitions?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "leader_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The metadata controller (our Raft-based coordinator) detects the broker failure via missed heartbeats — timeout of 10 seconds. For each of the 50 partitions, it promotes an in-sync replica to leader. Options for leader election: choose the ISR member with the most caught-up log (least data loss risk), choose based on broker load balancing (spread leaders evenly), or let the ISR members elect among themselves. I'd use the controller-based approach — the controller picks the most caught-up ISR member, updates the metadata, and broadcasts the new leader assignments. Producers and consumers get a metadata refresh and redirect to the new leader. Total failover time: 10-15 seconds. During that window, produces to affected partitions fail with a retryable error — the producer client retries automatically.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leader_election", "failover", "isr", "metadata_controller"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How many brokers do we need for 1 million messages per second?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me compare deployment sizes. A single broker with NVMe SSDs can handle about 200K-300K messages/sec for 1KB messages — that's limited by disk IOPS and network bandwidth. With replication factor 3, each produced message generates 3 writes, so effective throughput per broker is 70K-100K external messages/sec. For 1M messages/sec, we need about 10-15 brokers. Storage sizing: at 1M msg/sec * 1KB * 86,400 sec/day = 86TB per day raw. With replication factor 3 and 7-day retention, that's 86 * 3 * 7 = 1.8PB. At 4TB per disk, 15 disks per broker, that's about 30 brokers for storage alone. So storage is the bottleneck — 30 brokers, each with 60TB of disk capacity.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "broker_sizing", "storage_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final thoughts on the design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Monitoring is critical: per-broker metrics (disk utilization, network throughput, request latency), per-topic metrics (produce/consume rate, consumer lag), and cluster-wide metrics (under-replicated partitions, leader imbalance). For consumer lag specifically, I'd expose it as a first-class metric — it's the most important operational signal. Also, dead letter queues for messages that fail processing after N retries. And a schema registry — whether Avro, Protobuf, or JSON Schema — for message format evolution without breaking consumers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "consumer_lag", "dead_letter_queue", "schema_registry"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Very thorough — your comparison approach made trade-offs clear at every decision point. It did slow us down a bit, but the quality of decisions was high. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 70,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 5,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 6
+    },
+    "strengths": [
+      "Every design decision included clear comparison of alternatives with trade-offs",
+      "Strong understanding of exactly-once semantics — idempotent producers, transactions, consumer offsets",
+      "Thorough capacity estimation with concrete broker sizing"
+    ],
+    "weaknesses": [
+      "Comparison-heavy approach slowed the interview — less ground covered overall",
+      "Caching not discussed — could have covered producer batching buffer or consumer prefetch",
+      "Communication could be tighter — some comparisons felt exhaustive rather than focused"
+    ]
+  }
+}

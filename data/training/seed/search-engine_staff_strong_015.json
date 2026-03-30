@@ -1,0 +1,172 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_015"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a web search engine — the core search and indexing system like Google. At the staff level, I'm looking for deep technical reasoning and production-scale thinking. Where do you want to start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me scope this carefully because 'design Google Search' is enormous. I'd like to focus on three pillars: the crawling and indexing pipeline that builds the searchable corpus, the serving system that handles queries, and the ranking system that orders results. What scale are we targeting — number of indexed pages and queries per second?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["crawling", "indexing", "serving", "ranking", "scoping"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "50 billion indexed pages, 100,000 queries per second, results in under 200ms at p99. Focus wherever you have the most depth.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the indexing system because that's the foundation. The core data structure is the inverted index. For a normal index, you map documents to words. An inverted index flips this: for every word (or term) in the entire corpus, we store a list of documents that contain that word, along with metadata like the position in the document, the frequency, and the field (title, body, anchor text). When a query comes in for 'distributed systems,' we look up both terms in the inverted index, retrieve their posting lists, and intersect them to find documents containing both terms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["inverted_index", "posting_list", "term_metadata", "index_structure"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's get into the storage math. How big is this inverted index for 50 billion pages?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me estimate. An average web page has maybe 1000 unique terms. Each posting list entry — document ID, term frequency, position list — is roughly 20-30 bytes in a compressed format. So per page: 1000 terms * 25 bytes = 25KB of index data. For 50 billion pages: 50B * 25KB = 1.25 petabytes of index data. That's just the inverted index — the document store with page content adds more. We're clearly looking at a distributed index spread across thousands of machines.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "index_sizing", "compression"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "1.25 PB of index. How do you partition it across machines?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "index_sharding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two main approaches for sharding an inverted index. Document-based partitioning: each shard holds the complete index for a subset of documents. A query is sent to ALL shards, each returns its top results, and a coordinator merges them. This is simpler to build and update — new documents go to one shard. Term-based partitioning: each shard holds the complete posting list for a subset of terms. A query only goes to the shards holding the query terms. Fewer shards are touched per query, but updates are harder — a new document's terms are scattered across many shards. I'd use document-based partitioning. Here's why: with 50B documents and machines holding maybe 500GB of index each, we need about 2,500 shards. A query fans out to all 2,500 shards, which sounds expensive, but each shard's work is tiny — a posting list lookup and local ranking on its small subset. The total latency is bounded by the slowest shard. With replication, each shard group has multiple replicas, so we can load-balance and tolerate failures.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["document_partitioning", "term_partitioning", "shard_fanout", "replication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "With 2,500 shards and 100K QPS, that's 250 million shard-level queries per second. Each query fans out to all shards. How do you keep the tail latency under 200ms?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "tail_latency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Tail latency at this fan-out is the biggest challenge. Several techniques. First, redundant requests: each shard group has multiple replicas. The coordinator sends the request to the fastest replica — or sends to two replicas and takes whichever responds first ('hedged requests'). This cuts tail latency dramatically. Second, tiered indexing: not all 50B documents are in the hot tier. We partition into tiers — maybe 1 billion high-quality pages in tier 1 (kept in memory), 10 billion in tier 2 (SSD), rest in tier 3 (served only if needed). Most queries are answered from tier 1 alone, which has only 50 shards. Third, early termination: the shard doesn't scan the entire posting list. It uses a scoring upper bound (like BM25 with max possible values for unseen documents) and terminates once it's confident the remaining documents can't beat the current top K. Fourth, caching: we cache results for popular queries. A significant percentage of queries are repeats.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hedged_requests", "tiered_indexing", "early_termination", "query_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. Let's talk about ranking. How do you decide which documents are most relevant?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Ranking has two major components: relevance and authority. For relevance, the classic approach is BM25 — it scores based on term frequency, inverse document frequency, and document length normalization. A term that appears frequently in a short document scores higher than the same term in a long document. BM25 is fast and runs at the shard level during index lookup. For authority, the breakthrough is PageRank. The core insight: a page is important if important pages link to it. It's computed as a fixed-point iteration over the web graph. Initialize all pages with equal rank, then iteratively: each page distributes its rank equally to all pages it links to. After convergence (usually 50-100 iterations), each page has a score reflecting its authority. In practice, the full PageRank is precomputed offline and stored as a static score per document.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["bm25", "pagerank", "tf_idf", "authority_scoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the PageRank computation for 50 billion pages. That's a massive graph.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "pagerank" }
+    },
+    {
+      "role": "candidate",
+      "content": "The web link graph has 50B nodes and maybe 500B edges. Storing just the graph structure — each edge is two 5-byte document IDs — is about 5TB. The PageRank computation is iterative: in each iteration, every page reads the ranks of pages that link to it, sums them (divided by their out-degree), and updates its own rank. This is a perfect MapReduce workload. Map phase: for each page, emit (target_page, rank/out_degree) for each outgoing link. Reduce phase: for each page, sum all incoming contributions. In practice, you'd use something like Spark or a custom graph processing framework like Pregel. Each iteration processes the entire graph. With 50-100 iterations and the graph on a cluster of, say, 1000 machines with the graph partitioned across them, the computation might take a few hours. It runs offline — maybe once a week — and the resulting PageRank scores are incorporated into the index.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pagerank", "mapreduce", "graph_processing", "pregel", "offline_computation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "PageRank and BM25 are the classic signals. Modern search engines use hundreds of ranking signals and ML models. How does that work?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "ml_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Modern ranking is a multi-stage pipeline. Stage 1 — retrieval: use the inverted index with BM25 to find the top 10,000 candidate documents per shard. This is the fast, coarse filter. Stage 2 — lightweight scoring: a fast ML model (gradient boosted trees) re-ranks the top candidates using dozens of features: BM25 score, PageRank, freshness, user location, document quality signals, click-through rate history. This narrows to top 100-200 candidates. Stage 3 — deep ranking: a neural model (BERT-based) does semantic matching between the query and document text. This is computationally expensive so it only runs on the top candidates. It can understand that 'best restaurants nearby' and 'top dining spots in my area' are semantically similar even without exact term matches. The final results combine all three stages. The key is the cascade: each stage is more accurate but more expensive, so we progressively narrow the candidate set.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_stage_ranking", "ml_ranking", "bert", "feature_engineering", "cascade_ranking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the crawling side briefly. How do you decide what to crawl and how often?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "crawling" }
+    },
+    {
+      "role": "candidate",
+      "content": "The crawler maintains a URL frontier — a priority queue of URLs to crawl. Priority is based on: page importance (PageRank), freshness (when was it last crawled), and change frequency (how often does this page change). A news site homepage might be crawled every 15 minutes; a static blog post every few weeks. The crawler is distributed — thousands of crawler instances pulling from the frontier. We need to be polite: respect robots.txt, limit request rate per domain (typically 1 request per second per domain), and handle retries for transient failures. After crawling, the page goes through a processing pipeline: HTML parsing, text extraction, link extraction (feeds back to the frontier), language detection, and duplicate/near-duplicate detection (using SimHash or MinHash) to avoid indexing multiple copies of the same content.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["url_frontier", "crawl_priority", "politeness", "robots_txt", "deduplication", "simhash"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you update the index when new pages are crawled? The index is serving live queries — you can't take it down for reindexing.",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "index_updates" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two approaches that work together. For the base index: periodic full rebuilds. The crawling pipeline produces a new snapshot of the web, and we build a new complete index offline. Once ready, we swap it in atomically — each shard loads the new index while the old one continues serving. This happens maybe weekly. For freshness: a real-time supplemental index. Newly crawled or updated pages are added to a smaller, frequently-updated supplemental index. At query time, the serving layer queries both the base index and the supplemental index, merges results. The supplemental index is much smaller — maybe covering the last week of changes — so it's fast to update and query. When the base index is rebuilt, the supplemental index is reset. This is exactly how Google's Caffeine system works.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["index_rebuild", "supplemental_index", "atomic_swap", "real_time_indexing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "A shard goes down during a query. The coordinator has sent the query to 2,500 shards and one doesn't respond. What do you do?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "shard_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each shard group has replicas — say 3 replicas per shard. The coordinator's initial request goes to one replica per shard. If a replica times out (we set an aggressive timeout, maybe 50ms), the coordinator falls back to another replica in the same shard group. With hedged requests, we might have already sent to two replicas, so the backup is already in-flight. If the entire shard group is down (all replicas failed), we return results without that shard. Since each shard holds 1/2500th of the documents, missing one shard means missing 0.04% of the index. The results are still excellent — the user won't notice. We log the degradation for monitoring. This 'partial results' approach is essential: never let a single shard failure take down the entire search experience.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["replica_failover", "hedged_requests", "partial_results", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about spam and SEO manipulation? How do you prevent low-quality pages from gaming the ranking?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "spam_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multiple layers. Link spam: detect and discount link farms — clusters of pages that exist solely to boost PageRank of a target. The signals are: unnatural link patterns, domains created purely for linking, rapid accumulation of links. Content spam: keyword stuffing, hidden text, cloaking (showing different content to the crawler than to users). We detect cloaking by periodically comparing what the crawler sees versus what a browser renders. Quality signals: dwell time (how long users stay after clicking a result), pogo-sticking rate (users clicking back immediately), and core web vitals. These are hard to game because they come from real user behavior. There's also a manual review team — for high-stakes queries (medical, financial), human quality raters evaluate results and their assessments feed back into the training data for the ranking models.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["link_spam", "content_spam", "cloaking_detection", "user_behavior_signals", "quality_raters"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Anything else you'd want to cover?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Two things. Personalization and localization: the same query should return different results based on the user's location, language, and search history. This is a re-ranking signal that runs in the serving layer. The index itself is language-aware — separate indexes per language with language-specific tokenizers and stemmers. Second, monitoring: for a search engine, the key metric isn't just latency — it's result quality. We need online evaluation: A/B test ranking changes, track click-through rates on result positions, and have human evaluation sets that are scored regularly. A ranking regression that increases latency by 1ms is fine; one that drops click-through rate on the first result by 2% is a major incident.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["personalization", "localization", "language_processing", "online_evaluation", "ab_testing", "quality_metrics"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Outstanding interview. Your depth on inverted indexes, the tiered serving strategy, and the index update mechanism were particularly impressive. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 81,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 6,
+      "database_design": 9,
+      "caching_strategy": 7,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Deep inverted index knowledge with concrete storage math — 1.25 PB estimate with reasoning",
+      "Excellent multi-stage ranking explanation from BM25 through neural re-ranking",
+      "Strong PageRank explanation with concrete computation approach using MapReduce",
+      "Practical index update strategy with base + supplemental index architecture",
+      "Good tail latency mitigation: hedged requests, tiered indexing, early termination"
+    ],
+    "weaknesses": [
+      "API design for the search endpoint was not explicitly discussed",
+      "Could have discussed spell correction, query understanding, and query expansion",
+      "No discussion of snippet generation — how to extract the highlighted text below each result"
+    ]
+  }
+}

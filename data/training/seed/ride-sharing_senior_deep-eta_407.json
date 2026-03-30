@@ -1,0 +1,99 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "senior",
+    "candidate_profile": "deep-eta",
+    "total_exchanges": 14,
+    "generation_id": "seed_407"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We're designing a ride-sharing platform. Let's go deep on ETA estimation. Start with the foundation — how do you compute travel time between two points?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "eta_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "ETA estimation starts with historical travel time data. The road network is modeled as a weighted directed graph where intersections are nodes and road segments are edges. Each edge has a base travel time derived from historical GPS traces from actual rides. We aggregate millions of historical ride trajectories: for each road segment, we compute the median travel time at 15-minute intervals throughout the week. So edge A-to-B might have a travel time of 45 seconds at Tuesday 8:15am but 120 seconds at Tuesday 8:30am due to rush hour. This gives us a time-dependent weight for every edge in the graph. The historical data is stored in a compact format — a 2D matrix per edge: 7 days x 96 intervals (15 min each) = 672 weights per edge. For a city with 500K road segments, that's about 2.5GB of data — easily fits in memory on each routing server. The data is refreshed weekly from the data warehouse, with a sliding window of the last 4 weeks of rides weighted toward the most recent week. For road segments with insufficient historical data (new roads, low-traffic residential streets), we fall back to the speed limit and road type — a residential street defaults to 25mph, a highway to 60mph, adjusted by a time-of-day factor from nearby segments that do have data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["eta_estimation", "road_graph_model", "historical_travel_times", "time_dependent_weights", "data_aggregation", "sparse_data_fallback"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now how do you find the fastest route through this graph? Dijkstra's algorithm with time-dependent weights?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "routing_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "Standard Dijkstra's works but is too slow for real-time routing at scale — exploring the entire graph from source to destination in a city like NYC with 500K edges takes 50-200ms. For a system handling 10K routing requests per second, that's not feasible. I'd use a modified approach. The base algorithm: A* search with the haversine distance as the heuristic (distance to destination as the crow flies, divided by maximum possible speed on any road). This significantly prunes the search space by preferring edges that move toward the destination. For time-dependent weights: at each node expansion, we compute the arrival time at that node and use the edge weight corresponding to that arrival time. This is the key difference from static Dijkstra — the optimal path at 8am might be different from the optimal path at 8:30am because a highway becomes congested. This is known as the time-dependent shortest path problem, and A* still finds the optimal solution as long as the heuristic is admissible (our haversine-based heuristic is). For further speedup, I'd use Contraction Hierarchies (CH) or Customizable Route Planning (CRP). CH precomputes shortcut edges during an offline phase — it identifies which roads are 'important' (highways, arterials) and creates virtual edges that skip over less important roads. At query time, the search explores far fewer edges because it uses these shortcuts. The catch with time-dependent CH is that the precomputation is more complex — you need to handle the fact that shortcuts have time-varying weights. OSRM (Open Source Routing Machine) implements this with Multi-Level Dijkstra. Query times drop to 1-5ms, which is production-ready.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["routing_algorithm", "a_star_search", "time_dependent_weights", "contraction_hierarchies", "customizable_route_planning", "osrm", "query_time_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Historical data captures typical patterns, but real-time conditions can differ wildly. How do you incorporate real-time traffic?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "realtime_traffic" }
+    },
+    {
+      "role": "candidate",
+      "content": "Real-time traffic is layered on top of the historical baseline as an overlay. Data sources: our own fleet's GPS traces are the primary source — we have thousands of drivers on the road providing real-time speed data on major road segments. Each driver's GPS ping every 4 seconds is map-matched to a road segment, and we compute the segment's current travel time from the driver's traversal speed. For segments without recent driver data, we integrate third-party traffic feeds (HERE, TomTom, Google Traffic API) which aggregate data from phones and connected vehicles. The real-time adjustment: for each road segment, we compute a 'traffic factor' = current_observed_speed / historical_expected_speed_at_this_time. A factor of 0.5 means traffic is moving at half the expected speed (an accident or unexpected congestion). A factor of 1.2 means traffic is lighter than usual. The time-dependent edge weight is adjusted: adjusted_weight = historical_weight / traffic_factor. The challenge is data freshness vs coverage. Our fleet data is very fresh (updated every few seconds) but covers only roads where our drivers are currently driving — maybe 30% of the road network at any given time. Third-party data covers more roads but has a 2-5 minute lag. My blending strategy: for road segments with driver data less than 2 minutes old, use 80% real-time + 20% historical. For segments with third-party data, use 60% third-party + 40% historical. For segments with no recent data, use 100% historical. This ensures we never make the ETA worse by using stale or noisy real-time data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["realtime_traffic", "gps_trace_speed", "map_matching", "traffic_factor", "data_freshness_coverage_tradeoff", "blending_strategy", "third_party_integration"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Even with all this, the ETA can still be off. How do you use ML to correct systematic errors?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "ml_correction" }
+    },
+    {
+      "role": "candidate",
+      "content": "The graph-based routing ETA has systematic biases: it doesn't account for time spent at traffic lights, turning movements (left turns take longer than right turns), boarding/alighting time at pickup, or local conditions like school zones at school hours. An ML model learns these residual errors. I'd train a gradient-boosted model (LightGBM) that takes the route-based ETA as one feature among many and predicts the actual travel time. Features: route-based ETA (the most important single feature), total distance, number of turns, number of traffic signals along the route (from map data), time of day, day of week, weather (temperature, precipitation), origin and destination zone embeddings (a learned 32-dimensional vector per geohash-6 that captures area-specific behavior like 'downtown parking adds 3 minutes'), trip type (airport trips are slower due to terminal navigation), and the real-time traffic factor averaged along the route. Training data: millions of completed trips where we know the actual travel time. The label is actual_time, and the model learns to correct the route-based ETA. For example, if the route-based ETA says 15 minutes but the model consistently learns that trips in this area at this time take 18 minutes, it adjusts upward. Model performance: the route-based ETA alone has a Mean Absolute Percentage Error (MAPE) of about 25%. The ML correction reduces this to about 12-15%, which is competitive with Google Maps. The model is retrained weekly and A/B tested — we compare the new model's ETA accuracy against the production model on the same trips and only promote if it improves MAPE without increasing variance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ml_correction", "residual_learning", "feature_engineering", "zone_embeddings", "lightgbm", "mape_metric", "ab_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Users want to know not just the ETA but how confident you are. How do you provide confidence intervals?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "confidence_intervals" }
+    },
+    {
+      "role": "candidate",
+      "content": "Point estimates (ETA: 18 minutes) are misleading when there's high uncertainty. I'd provide confidence intervals using quantile regression. Instead of training one model to predict the mean travel time, I train three models (or one model with three output heads): one for the 10th percentile (optimistic ETA — you'll arrive by this time 90% of the time if conditions are favorable), one for the 50th percentile (median — the 'expected' ETA shown to the user), and one for the 90th percentile (pessimistic ETA — even with delays, you'll almost certainly arrive by this time). The width of the interval conveys uncertainty. A trip on a highway at 2am might have a narrow interval: 15-17 minutes. A trip through downtown during rush hour might have a wide interval: 18-32 minutes. The user-facing presentation depends on context. For the rider waiting for a driver to arrive, we show the median ETA with the optimistic bound: 'Your driver will arrive in 5-7 minutes.' For a rider heading to an airport, we show the pessimistic bound: 'To arrive by 3:00 PM, leave by 2:15 PM' (based on the 90th percentile). For drivers, we show the expected trip time to help them decide whether to accept a ride. The quantile regression model uses the same features as the point-estimate model but is trained with quantile loss (also called pinball loss): L_q(y, y_hat) = q * max(y - y_hat, 0) + (1-q) * max(y_hat - y, 0), where q is the target quantile. This naturally handles heteroscedastic uncertainty — areas with high variance in travel times get wider intervals. Calibration is critical: I'd verify that the 90th percentile prediction is actually exceeded only 10% of the time. If not, the quantile outputs are miscalibrated and need post-hoc adjustment using isotonic regression.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["confidence_intervals", "quantile_regression", "pinball_loss", "heteroscedastic_uncertainty", "context_dependent_presentation", "calibration", "isotonic_regression"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Once a trip starts, the ETA changes as conditions evolve. How do you update ETA during the trip?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "eta_updates" }
+    },
+    {
+      "role": "candidate",
+      "content": "During-trip ETA updates are essential because conditions change: the driver might deviate from the planned route, encounter unexpected congestion, or make a wrong turn. The update mechanism: every 30 seconds, we recompute the ETA from the driver's current GPS position to the destination. This uses the same routing + ML pipeline but with updated inputs: the remaining route (not the original full route), the current real-time traffic conditions (which may have changed), and an additional feature for the ML model: the elapsed time vs. the originally predicted time for the completed portion. If the driver is 3 minutes behind the original ETA at the midpoint, the model learns to adjust the remaining prediction upward. Route deviation handling: if the driver's current position is more than 200 meters from the planned route, we trigger a full re-route from the current position. The new route may be longer or shorter than the original. The ETA is recomputed from scratch. If the driver is on the planned route, we use the simpler remaining-route ETA (just trim the completed segments and recompute). Smoothing: raw ETA updates can be noisy — the ETA might jump from 14 minutes to 16 minutes and back to 14 minutes due to momentary GPS jitter or a traffic data fluctuation. I'd apply exponential smoothing: displayed_eta = 0.7 * new_computed_eta + 0.3 * previous_displayed_eta. This creates a smooth progression. Additionally, the displayed ETA should never increase by more than 2 minutes in a single update unless a major reroute occurs — sudden jumps feel broken to the user. If the raw ETA increases by more than 2 minutes, we gradually ramp it up over subsequent updates. For the rider, the app shows: a map with the driver's real-time position, the current route highlighted, and the ETA countdown. For the driver, the navigation shows turn-by-turn instructions with the updated ETA.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["eta_updates", "during_trip_recomputation", "route_deviation_detection", "exponential_smoothing", "display_jump_limiting", "elapsed_vs_predicted_feature"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good deep dive on ETA estimation. You covered the full stack from graph routing to ML correction to real-time updates. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 70,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 7,
+      "api_design": 5,
+      "database_design": 6,
+      "caching_strategy": 5,
+      "scalability": 7,
+      "failure_handling": 6,
+      "communication": 8
+    },
+    "strengths": [
+      "Strong foundation in graph-based routing with time-dependent weights and Contraction Hierarchies optimization",
+      "Practical ML correction approach with concrete MAPE improvement metrics",
+      "Thoughtful UX considerations for ETA display smoothing and context-dependent confidence intervals"
+    ],
+    "weaknesses": [
+      "Did not discuss the infrastructure for serving ETA at scale — caching route computations, geographic partitioning of routing servers",
+      "Failure modes were not explored — what happens when real-time traffic data is unavailable or GPS is unreliable"
+    ]
+  }
+}

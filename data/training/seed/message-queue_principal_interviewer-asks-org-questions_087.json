@@ -1,0 +1,161 @@
+{
+  "metadata": {
+    "problem_id": "message-queue",
+    "level": "principal",
+    "candidate_profile": "interviewer-asks-org-questions",
+    "total_exchanges": 24,
+    "generation_id": "seed_087"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We need to design a distributed message queue — something like Kafka or SQS — for a large organization. This will be a shared platform service. Before we get into the technical design, tell me: who owns this system?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "ownership" }
+    },
+    {
+      "role": "candidate",
+      "content": "A dedicated platform infrastructure team owns the queue service itself — the brokers, the control plane, the deployment, and the SLAs. But the topics and queues are owned by the producing teams. If the Payments team publishes payment events, they own the schema, the throughput requirements, and the data classification of that topic. Consumers are responsible for their own consumption — their consumer group offsets, their processing logic, and their failure handling. The platform team provides the primitives and guarantees; the product teams use them.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ownership_model", "platform_team", "producer_consumer_model"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How many engineers to build v1 of this platform? And what's the timeline?",
+      "annotation": { "action": "probe", "phase": "requirements", "target_concept": "team_sizing" }
+    },
+    {
+      "role": "candidate",
+      "content": "For a production-grade message queue platform: I'd say 6-8 engineers for v1. Two senior engineers on the core broker — replication, partitioning, message storage. Two engineers on the control plane — topic management, ACLs, quota enforcement. One engineer on the client SDK — producer and consumer libraries with retry logic, batching, and observability baked in. One engineer on monitoring and operations — dashboards, alerting, runbooks. One SRE embedded in the team from day one. Timeline: 6 months to an internal alpha with 2-3 pilot teams, 9 months to general availability. But honestly, unless there's a strong reason to build in-house, I'd first evaluate managed services like Amazon MSK or Confluent Cloud.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["team_sizing", "build_vs_buy", "timeline_estimation", "sre"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good instinct on build vs buy. Let's assume we have regulatory constraints that require on-prem deployment. Give me the technical architecture.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The architecture has three layers. The broker layer: a cluster of broker nodes that store and serve messages. Each topic is divided into partitions, each partition has a leader and 2 followers for replication. Messages within a partition are ordered. Producers send to the partition leader, the leader replicates to followers before acknowledging. The control plane: manages topic creation, partition assignment, broker membership, and configuration. This is the brain — uses a consensus store like etcd or ZooKeeper for metadata. The client layer: producer and consumer SDKs that handle serialization, partitioning, batching, compression, and offset management. The producer batches messages and sends them in bulk for throughput. The consumer pulls messages, processes them, and commits offsets.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["broker_architecture", "partitioning", "replication", "consensus", "producer_consumer_model", "offset_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now — you said 50 consumer teams will use this platform. How do you handle schema changes? The Payments team changes the payment event format. 50 consumers break.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "schema_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Schema management is critical for a shared platform. I'd mandate a schema registry — similar to Confluent's Schema Registry. Every topic has a registered schema (Avro, Protobuf, or JSON Schema). Producers must register and validate their schema before publishing. The registry enforces compatibility rules: backward compatible means new schema can read old data, forward compatible means old schema can read new data, full compatible means both. Default policy should be full compatibility. When the Payments team wants to add a field, the registry checks: can existing consumers still deserialize? If yes, approved. If they want to remove a required field, the registry rejects it. Schema evolution follows semantic versioning — breaking changes require a new topic version (payment-events-v2) with a migration period where both v1 and v2 are active.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["schema_registry", "schema_evolution", "backward_compatibility", "avro", "protobuf"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the on-call rotation look like? This is a platform service — if it's down, every team that depends on it is impacted.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "on_call" }
+    },
+    {
+      "role": "candidate",
+      "content": "On-call for a critical platform service needs to be robust. I'd structure it as: primary on-call rotates weekly among senior engineers on the team — at least 4 people in the rotation to avoid burnout. Secondary on-call is the tech lead or a senior engineer who's an escalation point. Runbooks for every known failure mode — broker node failure, partition leader election stalled, consumer group rebalancing storm, disk full, replication lag. Automated remediation for common issues — if a broker is unhealthy, auto-drain and replace. PagerDuty integration with severity levels: P1 for total message flow stopped, P2 for degraded throughput or elevated latency, P3 for a single consumer group issue. And critically — a cross-team communication channel. When the queue is degraded, all 50 consumer teams need to know. An automated status page and a Slack broadcast channel for incidents.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["on_call", "runbooks", "incident_management", "automated_remediation", "severity_levels"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about quotas and multi-tenancy. Team A produces 100K messages per second. Team B produces 100. How do you prevent Team A from starving Team B?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "multi_tenancy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multi-tenancy requires resource isolation. First, per-topic and per-producer rate limits — configured in the control plane. Each team gets a produce rate quota (messages/sec and bytes/sec) and a storage quota. The broker enforces these — if Team A exceeds their produce rate, the broker returns a throttle response and the producer backs off. Second, partition placement — don't colocate all of Team A's partitions on the same broker. Spread them so one team's load doesn't hotspot a single broker. Third, network bandwidth isolation — use network QoS or separate network interfaces for different priority tiers. Critical infrastructure topics (payments, orders) get higher priority than analytics topics. Fourth, a chargeback model — teams pay for their usage, which creates natural incentive to optimize. Monthly usage reports showing message volume, storage, and compute cost attributed to each team.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_tenancy", "rate_limiting", "resource_isolation", "chargeback", "partition_placement"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the situation where a consumer team falls behind? Their consumer lag is growing — they're processing messages from 6 hours ago. What's the organizational process?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "consumer_lag" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is part platform concern, part organizational process. On the platform side: automated alerting when consumer lag exceeds a configurable threshold — the consumer team gets paged, not the platform team. We provide dashboards showing lag per consumer group and per partition. We expose metrics that teams can integrate into their own monitoring. On the organizational side: each topic has a retention policy — say 7 days. If a consumer is 6 hours behind, they have runway. But if they're approaching the retention limit, messages will be deleted before they're consumed — data loss. We escalate this: the platform team reaches out to the consumer team, and if needed, the producing team. Sometimes the fix is more consumer instances. Sometimes the consumer code has a bug. Sometimes the solution is to temporarily increase the retention period. We also have a quarterly review meeting with the top 10 consumers by lag to discuss patterns.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consumer_lag", "retention_policy", "alerting", "organizational_process"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's get more technical. Talk me through the message storage layer. How are messages stored on disk and how do you ensure durability?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "message_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each partition is an append-only log on disk — a sequence of segment files. Each segment file is, say, 1GB. Messages are appended to the active segment. Each message has an offset (monotonically increasing sequence number), a timestamp, a key, and a value. An index file maps offsets to byte positions in the segment for fast random access. For durability: the producer can choose between acks=1 (leader writes to its local log before acking) or acks=all (leader waits for all in-sync replicas to confirm). The log is written with fsync either per-message (safest, slowest) or periodically (every 100ms — slight data loss risk but much faster). On disk, we use sequential writes only — no random IO — which is why spinning disks work fine for this workload. Segment files older than the retention period are deleted. For compacted topics, a background process removes older records with the same key, keeping only the latest.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["append_only_log", "segment_files", "offset_index", "fsync", "log_compaction", "durability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now a realism question: how do you onboard a new team onto the platform? What's the self-service experience?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "self_service" }
+    },
+    {
+      "role": "candidate",
+      "content": "Self-service is crucial — if every team needs to file a ticket and wait for the platform team, we become a bottleneck. The onboarding flow: team creates a namespace through a web portal or CLI tool. They define topics through a YAML configuration file in a Git repo (GitOps model) — topic name, partition count, replication factor, retention, schema. A CI pipeline validates the config (schema compatibility, naming conventions, quota limits) and applies it to the cluster. The SDK is published as a versioned library — teams add it as a dependency. The SDK handles all the complexity: connection management, serialization with schema validation, retries, metrics emission. Documentation with runnable examples for common patterns: simple publish, exactly-once processing, fan-out, dead letter queues. We also provide a sandbox cluster for teams to experiment without risk.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["self_service", "gitops", "sdk", "developer_experience", "sandbox"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned dead letter queues. How do you handle poison messages — a message that consistently crashes the consumer?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "dead_letter_queue" }
+    },
+    {
+      "role": "candidate",
+      "content": "The SDK handles this with a configurable retry policy. When a consumer fails to process a message, it retries — maybe 3 times with exponential backoff. If it still fails, the SDK publishes the message to a dead letter topic (topic-name.dlq) and advances the offset. The consumer continues processing the next message. The dead letter topic has long retention — 30 days — and the owning team gets alerted when messages arrive there. A separate tool lets them inspect DLQ messages, fix the bug, and replay them back to the original topic. Critically, the poison message never blocks the consumer from processing other messages. Without this pattern, a single bad message can halt all processing for a consumer group — we learned this the hard way at my previous company where a single malformed protobuf message blocked a 50-partition consumer group for 3 hours.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dead_letter_queue", "retry_strategy", "poison_message", "consumer_group"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's zoom way out. It's 2 years later. The platform is successful — 200 teams, 500 topics, 10 million messages per second. What are the biggest operational challenges at that scale?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "scaling_challenges" }
+    },
+    {
+      "role": "candidate",
+      "content": "At that scale, the challenges are more organizational than technical. First, topic proliferation and governance — teams create topics and abandon them. We need topic lifecycle management: owner metadata, activity tracking, and auto-archiving inactive topics after 90 days of zero produce/consume. Second, cross-team data dependencies become invisible — Team A publishes, teams B through Z consume, and nobody has a complete picture. We need a data catalog and lineage tracking. Third, cluster operations at scale — rolling upgrades across 100+ brokers take hours and any mistake is amplified. We need blue-green deployment capability for the broker fleet. Fourth, cost attribution becomes political — some teams generate most of the storage cost but blame the platform for being expensive. Detailed per-team billing is essential. Fifth, the platform team itself needs to grow — at 200 customer teams, we need a dedicated developer relations function, not just engineers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["topic_governance", "data_lineage", "rolling_upgrades", "cost_attribution", "org_scaling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last question. A VP from the Payments team calls you and says: 'Your queue dropped our payment events. We lost revenue.' What do you do?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "incident_response" }
+    },
+    {
+      "role": "candidate",
+      "content": "First, acknowledge and investigate immediately — don't get defensive. Step one: check our side — look at broker logs, partition health, replication status, and disk usage for the payment topic during the time window. Were messages actually dropped (offset gaps) or did the consumer just fall behind? Step two: check their side — is the consumer lagging? Did it crash? Are their offsets advancing? Many 'platform dropped messages' incidents are actually consumer bugs. Step three: involve both teams in a war room — shared screen, shared logs. Step four: if we did drop messages, understand exactly why — disk full? Replication failure? Under-replicated partitions that weren't caught by alerting? Step five: regardless of fault, help them recover — replay from backup if available, reconcile with the payment provider, help identify which transactions were affected. Step six: post-mortem with both teams. Blame-free. Action items with owners and deadlines.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["incident_response", "debugging", "post_mortem", "cross_team_collaboration"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. You clearly think about systems not just as technical artifacts but as organizational constructs with real people, teams, and processes around them. That's exactly the principal engineer mindset we're looking for. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 78,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 5,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 4,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional organizational awareness — ownership models, on-call, self-service, cost attribution",
+      "Strong understanding of multi-tenancy challenges at platform scale",
+      "Practical incident response approach that balances technical investigation with cross-team collaboration"
+    ],
+    "weaknesses": [
+      "Capacity estimation was thin — didn't calculate storage, network, or broker sizing",
+      "Caching strategy was not discussed — no mention of consumer-side caching or broker page cache",
+      "API design was implicit in the SDK discussion but never formalized",
+      "No discussion of exactly-once delivery semantics or transaction support"
+    ]
+  }
+}

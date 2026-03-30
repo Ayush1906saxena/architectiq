@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "senior",
+    "candidate_profile": "google-style",
+    "total_exchanges": 22,
+    "generation_id": "seed_303"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a URL shortening service like bit.ly. Before we get into the architecture, I want you to walk me through the math. What are the capacity requirements?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Let me start with some clarifying questions. What's the expected scale in terms of new shortened URLs per day? And what's the expected read-to-write ratio?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["qps", "read_write_ratio"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Assume 500 million new URLs per day and a 200:1 read-to-write ratio. Now give me exact numbers: QPS for reads and writes, storage per year, bandwidth in and out.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay. 500 million writes per day is about 5,787 writes per second. With 200:1 reads, that's roughly 1.16 million read redirects per second. For storage, each URL mapping has a short code, the original URL, creation timestamp, expiry, and user ID. I'd estimate about 500 bytes per record. That's 250 GB per day, about 91 TB per year. For bandwidth: write bandwidth is 500 bytes times 5,787 QPS, about 2.9 MB/s inbound. Read bandwidth for redirects is mostly the 301/302 response headers, say 200 bytes per redirect, so 200 bytes times 1.16M is about 232 MB/s outbound.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation", "bandwidth_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now tell me: how many unique short codes do you need to support over 10 years, and what's the minimum character length for a base62-encoded code?",
+      "annotation": { "action": "probe", "phase": "requirements", "target_concept": "base62_encoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Over 10 years, that's 500 million times 365 times 10, about 1.825 trillion unique codes. Base62 uses a-z, A-Z, 0-9 which is 62 characters. 62 to the 7th power is about 3.5 trillion, so 7 characters gives us enough headroom. 6 characters would only give about 56.8 billion, which is insufficient. So minimum 7 characters.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["base62_encoding", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the expected collision probability if you generate random 7-character base62 strings? Give me the math.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "collision_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a birthday problem variant. With N possible codes of 3.5 trillion and k insertions, collision probability is approximately k squared over 2N. After 1.8 trillion insertions, that's about (1.8T)^2 / (2 * 3.5T) which is about 463 billion. That's way above 1, meaning collisions are almost certain. We'd need to handle collisions, perhaps by retry, or better yet avoid randomness and use a counter-based approach to guarantee uniqueness.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["collision_handling", "base62_encoding"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right. So you'd prefer a counter-based approach. How do you generate unique sequential IDs across a distributed fleet of application servers? What's the algorithmic complexity of your approach?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "snowflake_id" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a range-based ID allocation. A centralized coordination service, say ZooKeeper or a simple database counter, allocates ranges of IDs. Each app server requests a batch of, say, 100,000 IDs. Locally, generating the next ID is O(1), just incrementing a counter. Requesting a new range is an amortized O(1) over the batch. Then we apply base62 encoding on the ID, which is O(log62 of ID), effectively O(1) since the ID is bounded to 7 characters. The lookup on read is O(1) with a hash index.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["snowflake_id", "base62_encoding"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the high-level architecture now. Keep it concise but cover the data flow for both write and read paths.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Write path: Client sends POST with the long URL. Load balancer routes to an app server. App server gets next ID from its pre-allocated range, applies base62 encoding, writes the mapping to the database, and returns the short URL. Read path: Client requests GET on the short URL. Load balancer routes to an app server. App server checks the distributed cache first. On a hit, return a 302 redirect. On a miss, query the database, populate the cache, then redirect. I use 302 rather than 301 so we can track analytics.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["api_design", "load_balancing", "base62_encoding", "redis_caching"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You have 1.16 million reads per second. What cache hit rate do you need to keep database load manageable, and how much memory does that cache require?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "redis_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "A Postgres cluster with read replicas can handle maybe 50,000 to 100,000 simple key lookups per second. So we need a cache hit rate of at least 91% to keep DB reads under 100K QPS. Realistically I'd target 95%+ hit rate. Using the 80/20 rule, 20% of daily URLs get 80% of traffic. 20% of 500M is 100M hot URLs. At 500 bytes each, that's 50 GB of cache. A Redis cluster with 4-5 nodes of 16 GB each handles that. With LRU eviction, the hot set stays in memory naturally.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "cache_eviction", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now, what's your database choice, and how do you handle the fact that after a few years you'll have trillions of rows?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a NoSQL store like DynamoDB or Cassandra since the access pattern is purely key-value: lookup by short code. No joins, no complex queries. For sharding, the short code itself serves as the partition key. DynamoDB handles this automatically. With Cassandra, I'd use a consistent hashing ring. Each node handles a range of the hash space. To calculate: 1.8 trillion records over 10 years at 500 bytes each is 900 TB. With a replication factor of 3, that's 2.7 PB. If each node holds 2 TB, we need about 1,350 nodes across 10 years.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "sharding_strategy", "consistent_hashing", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You switched from Postgres to Cassandra. What are the consistency trade-offs? Can a user create a short URL and immediately not find it?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "consistency_model" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good point. Cassandra is eventually consistent by default. If we write with consistency level ONE, a subsequent read on a different replica might miss the data. For URL creation, I'd write with consistency level QUORUM and read with QUORUM. With RF=3, QUORUM is 2, so W+R > N guarantees strong consistency for this path. The trade-off is higher write latency, maybe 10-15ms instead of 2-5ms. But for a write path that's only 5,787 QPS, that's acceptable. For the high-volume read path on existing URLs, we can use consistency level ONE since the data is immutable after creation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistency_model", "quorum_reads", "replication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if the coordinator node for a QUORUM write times out? The write may or may not have been applied. How do you handle that?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "idempotency" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the classic idempotency problem. Since we control the short code generation deterministically from a counter, retrying the write with the same short code is inherently idempotent. The insert either succeeded or it didn't. We can safely retry with the same key. If the original write went through, the retry is a no-op because the data is identical. We should set a reasonable write timeout and retry up to 3 times before returning an error to the client. The client can also retry since the short code is deterministic for a given ID.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["idempotency", "retry_logic"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss the load balancer layer. At 1.16 million requests per second, how many application servers do you need and what load balancing algorithm would you use?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "load_balancing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each app server handling a redirect does a cache lookup and returns a response. With an async framework like Go or Java with Netty, a single server can handle about 20,000-30,000 concurrent connections. At 1.16M QPS with an average latency of 10ms, we have about 11,600 concurrent requests in flight. So we need around 40-50 app servers for the read path with headroom. For load balancing, I'd use round-robin with health checks at the L7 layer. We don't need sticky sessions since the service is stateless. Weighted round-robin if servers have different capacities.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["load_balancing", "capacity_estimation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when one of your Cassandra nodes goes down? Walk me through the impact on reads and writes.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "node_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "With RF=3 and QUORUM consistency, losing one node means the remaining 2 replicas can still satisfy both reads and writes since QUORUM requires 2 out of 3. The cluster remains fully available. Cassandra uses a gossip protocol to detect the failure and the hinted handoff mechanism queues writes destined for the downed node on other coordinators. When the node comes back, it receives the hints and catches up. If the node is down for longer than the hint window, we'd need to run a repair to reconcile. The main impact is slightly increased latency as coordinators route around the failed node.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["node_failure", "replication", "consistency_model"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Final question. Your cache cluster goes down entirely. 1.16 million QPS suddenly hits your database. What's your plan?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's a thundering herd scenario. First line of defense: the cache should be a cluster with replicas, so total loss is unlikely. But assuming it happens, I'd implement a circuit breaker that detects the cache failure and switches to degraded mode. In degraded mode, we use a local in-process LRU cache on each app server, maybe 1 GB each. We also apply adaptive rate limiting: shed a percentage of read requests, returning 503 with a Retry-After header. For the database, Cassandra at CL=ONE can actually handle high read throughput since reads are distributed across the ring. 1.16M QPS across 1,350 nodes is only about 860 reads per node per second, which is manageable. So Cassandra might actually survive, though latency would increase from sub-millisecond cache hits to 5-10ms disk reads.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_failure", "circuit_breaker", "rate_limiting", "thundering_herd"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good analysis. We're out of time. Thanks for walking through the design.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 72,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 7
+    },
+    "strengths": [
+      "Excellent capacity estimation with precise math throughout",
+      "Strong understanding of collision probability and base62 keyspace sizing",
+      "Good consistency analysis for Cassandra QUORUM reads and writes"
+    ],
+    "weaknesses": [
+      "Requirements gathering was minimal — relied on interviewer to drive the scope",
+      "Did not discuss analytics, monitoring, or CDN layer",
+      "Switched database choice mid-interview without fully justifying the pivot from Postgres"
+    ]
+  }
+}

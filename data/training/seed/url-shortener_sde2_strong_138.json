@@ -1,0 +1,180 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "sde2",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_138"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortener like bit.ly. Before we dive in, what questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question. So first, what's the expected scale? I'm thinking about this from a data-intensive application perspective — the read and write volumes will heavily influence whether we need something like eventual consistency or can get away with strong consistency. What's our QPS for reads and writes?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "consistency_model", "read_write_ratio"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's say 50 million new URLs per day, 200:1 read-to-write ratio. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Do we need analytics on clicks? Also, should shortened URLs expire? And one more — do we need to handle custom aliases or just system-generated short codes?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["analytics", "url_expiration", "custom_aliases"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes to analytics — basic click counts. URLs have a default 3-year TTL but can be made permanent. Support both custom and auto-generated. Let's start with the design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me estimate capacity. 50M writes/day is about 580 writes/sec. With a 200:1 ratio, that's 116K reads/sec. For storage, if each record is about 500 bytes — short code, long URL, metadata — that's 25GB/day, roughly 27TB over 3 years. Now, the interesting thing from a DDIA perspective is that this is a read-heavy workload with simple key-value access patterns, which maps nicely to a partitioned datastore with aggressive caching.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation", "partitioning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good numbers. Walk me through the high-level architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. The write path: client sends POST /api/v1/urls with the long URL. Load balancer routes to an app server. The app server generates a short code — I'll get to the encoding strategy — stores the mapping in the database, and returns the short URL. The read path: GET /{shortCode} hits the load balancer, app server checks Redis cache first, on hit we redirect with 302. On miss, we query the DB, populate cache, redirect. For analytics, we asynchronously write click events to a Kafka topic so we don't block the redirect.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "load_balancing", "redis_caching", "kafka", "async"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good overview. Let's talk about the encoding. How do you generate the short codes?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "base62_encoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "So for uniqueness across distributed nodes, we should use CRDTs for the URL counter. Each node maintains its own counter as a G-Counter — a grow-only counter — and they merge via the max function. This gives us conflict-free ID generation without coordination. Then we base62-encode the counter value to get the short code.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["base62_encoding", "crdt", "distributed_counter"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Hmm, CRDTs are interesting but maybe overkill for a counter? A G-Counter gives you a counter per node, but you still need to combine them to get a unique ID. How would merging actually produce unique short codes? Wouldn't two nodes potentially generate the same merged value?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "base62_encoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "You're right, I was over-complicating this. CRDTs are great for shared mutable state, but unique ID generation is a different problem. A simpler approach: use a Snowflake-like ID generator — 41 bits for timestamp, 10 bits for machine ID, 12 bits for sequence number. Each server generates unique IDs independently with no coordination needed. We base62-encode the resulting 64-bit number. With 7 characters of base62, we get 3.5 trillion unique codes, which is way more than enough.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["snowflake_id", "base62_encoding"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good recovery. Now let's talk about the database. What would you use?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "The access pattern is essentially single-key lookups — very simple. From a DDIA perspective, this is where you think about the difference between B-tree and LSM-tree based storage engines. For reads, B-trees are efficient with O(log n) lookups. LSM-trees are write-optimized but reads can be slower due to checking multiple SSTables. Given our 200:1 read-to-write ratio, I'd lean toward a B-tree-based engine — so PostgreSQL or MySQL. I'd use Postgres with a primary key on short_code and partition by hash to distribute data across shards.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "btree", "lsm_tree", "sharding_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good reasoning on storage engines. How would you handle the caching layer?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "redis_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Redis cluster with cache-aside pattern. For sizing: assuming 20% of URLs are hot and account for 80% of traffic, that's 10M URLs at 500 bytes = 5GB. Very manageable for Redis. I'd set a TTL on cache entries matching the URL TTL. For eviction, LRU works since we're dealing with a popularity-based access pattern — which Kleppmann describes as a power-law distribution. One thing I'd add: for the write path, we should use write-through caching to avoid the case where a URL is created but the first few reads are cache misses.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "cache_eviction", "cache_aside", "write_through_cache"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Makes sense. Now, how do you handle consistency between the cache and database? What if they go out of sync?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "consistency_model" }
+    },
+    {
+      "role": "candidate",
+      "content": "For URL shorteners, the data is essentially immutable once created — the mapping from short code to long URL doesn't change. So cache invalidation is actually a non-issue for the core use case. The only mutation is deletion when a URL expires, and for that we can use the cache TTL. If we add features like URL editing, then we'd need to invalidate the cache entry on update. I'd use a change data capture approach — read the Postgres WAL and publish invalidation events. But honestly, for this system, the simplicity of immutable data means we avoid most distributed caching pitfalls.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistency_model", "cache_invalidation", "cdc"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good insight about immutability. Let's talk about fault tolerance. What happens if one of your database shards goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each shard should have replication. I'd use synchronous replication to one follower and asynchronous to a second follower. So we have a leader with two followers per shard. If the leader fails, we promote the synchronous follower — it's guaranteed to have all committed writes. The async follower might lag slightly but serves as an additional safety net. For failover detection, I'd use a consensus mechanism — maybe a sidecar running Raft or just rely on Patroni for Postgres which uses etcd underneath.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["replication", "leader_election", "consensus", "failover"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid. What about handling hot keys? What if one short URL goes viral and gets millions of reads per second?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "hotspot_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hot keys are a classic skew problem. The cache helps a lot here — Redis can handle hundreds of thousands of reads per second for a single key. But if we're talking millions of RPS for one key, even Redis might struggle. I'd add two layers: first, an in-process local cache on each app server with a short TTL, say 5-10 seconds. This distributes the load across all app server instances. Second, for extreme cases, we could replicate the hot key across multiple Redis nodes by appending a random suffix — read from shortcode_1, shortcode_2, etc. — spreading the load.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hotspot_handling", "local_cache", "cache_sharding"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good approach. How about the analytics pipeline — how do you aggregate click data at this scale?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "analytics_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The click events flow into Kafka, partitioned by short_code so all events for the same URL go to the same partition — this enables correct counting without coordination. A stream processing layer, maybe Flink or Kafka Streams, aggregates counts in tumbling windows — say 1-minute windows — and writes the aggregated counts to a time-series store like ClickHouse. For real-time dashboard queries, ClickHouse is great because it's columnar and optimized for aggregation queries. The key insight is that we want exactly-once semantics for counting, which Kafka Streams provides with its transactional producer and consumer offsets.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["analytics_pipeline", "kafka", "stream_processing", "exactly_once"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned exactly-once semantics. In practice, how reliable is that guarantee?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "exactly_once" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fair point — exactly-once is really exactly-once within the Kafka ecosystem, not end-to-end. If the producer fires the event but the ack is lost, the producer might retry, creating a duplicate. Kafka's idempotent producer handles this with sequence numbers. But if the entire pipeline restarts and replays from an earlier offset, the downstream ClickHouse write might not be idempotent. In practice, for click analytics, I'd accept at-least-once with deduplication at the sink. Slight over-counting is acceptable for analytics — it's not a billing system.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["exactly_once", "idempotency", "at_least_once"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost out of time. Anything else you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things: rate limiting on the creation API — token bucket per API key. A URL validation service to check for malicious destinations. CDN for popular redirects at the edge. And monitoring: I'd track p50/p99 redirect latency, cache hit ratio, and the analytics pipeline lag. One thing I realize I could have done better — I jumped to CRDTs early when simpler approaches work fine. I tend to reach for distributed systems primitives from DDIA, but sometimes simpler is better.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "cdn_redirect", "monitoring", "self_awareness"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good self-awareness. You clearly have strong theoretical foundations — just remember that the simplest solution that meets the requirements is often the best. Nice interview overall.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 63,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 6
+    },
+    "strengths": [
+      "Strong theoretical understanding of storage engines and distributed systems concepts",
+      "Excellent recovery when challenged on CRDT approach — showed intellectual honesty",
+      "Good analytics pipeline design with nuanced understanding of delivery guarantees"
+    ],
+    "weaknesses": [
+      "Over-applied advanced concepts (CRDTs) before considering simpler solutions",
+      "Occasionally name-drops DDIA concepts without fully connecting them to the problem",
+      "Could improve on leading with practical solutions before theoretical frameworks"
+    ]
+  }
+}

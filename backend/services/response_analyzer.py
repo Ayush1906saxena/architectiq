@@ -82,6 +82,14 @@ FAILURE_SIGNALS = [
 ]
 
 
+STUCK_PHRASES = [
+    "i don't know", "i dont know", "not sure", "no idea", "idk",
+    "i'm not sure", "im not sure", "i have no idea", "pass",
+    "can you help", "give me a hint", "i'm stuck", "im stuck",
+    "no", "nope", "skip", "next",
+]
+
+
 class ResponseAnalysis:
     def __init__(self):
         self.concepts_mentioned: list[str] = []
@@ -95,6 +103,9 @@ class ResponseAnalysis:
             "referenced_alternatives": False,
             "discussed_failure_modes": False,
         }
+        self.is_stuck: bool = False
+        self.is_short_answer: bool = False
+        self.is_asking_question: bool = False
 
     def to_dict(self):
         return {
@@ -103,6 +114,9 @@ class ResponseAnalysis:
             "numbers": self.numbers,
             "decisions": self.decisions,
             "depth_signals": self.depth_signals,
+            "is_stuck": self.is_stuck,
+            "is_short_answer": self.is_short_answer,
+            "is_asking_question": self.is_asking_question,
         }
 
 
@@ -121,7 +135,16 @@ class ResponseAnalyzer:
     def _keyword_analysis(self, text: str) -> ResponseAnalysis:
         """Fast keyword-based analysis. Always works, no LLM needed."""
         result = ResponseAnalysis()
-        text_lower = text.lower()
+        text_lower = text.lower().strip()
+
+        # Detect stuck/short answers FIRST
+        result.is_short_answer = len(text_lower.split()) < 5
+        result.is_stuck = any(phrase in text_lower for phrase in STUCK_PHRASES) or (result.is_short_answer and not any(kw in text_lower for kw in KNOWN_KEYWORDS))
+        result.is_asking_question = text_lower.endswith("?")
+
+        # If stuck, return early — no concepts to extract
+        if result.is_stuck:
+            return result
 
         # Extract concepts
         for keyword, concept_id in KNOWN_KEYWORDS.items():

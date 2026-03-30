@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "discusses-testing",
+    "total_exchanges": 20,
+    "generation_id": "seed_215"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed. Users follow other users and see their posts in a timeline. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few questions. What's our scale — how many users and how many are daily active? What's the average number of followers per user, and do we have celebrity users with millions of followers? Should the feed be purely chronological or ranked? And what's the latency target for loading a feed?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scale_estimation", "fan_out", "feed_ranking", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500 million total users, 200 million daily active. Average user follows 200 people. Some celebrity users have 50 million followers. Chronological feed is fine for now but the architecture should support ranking later. Feed load time under 200ms. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me estimate the load. If 200M DAU check their feed an average of 5 times a day, that's 1 billion feed reads per day, about 11,500 per second. For writes, if 10% of DAU post once a day, that's 20M tweets per day, roughly 230 writes per second. The big challenge is fan-out — a celebrity tweeting triggers 50M fan-out operations. At the extreme, that's 50M writes per tweet.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "fan_out"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right. So how would you design the feed generation?",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": "fan_out_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a hybrid fan-out approach. For normal users (under 10K followers), use fan-out-on-write: when they tweet, we push the tweet ID into each follower's precomputed timeline in Redis. For celebrity users (over 10K followers), use fan-out-on-read: their tweets are fetched at read time and merged with the precomputed timeline. This bounds write amplification while keeping read latency low for most cases. The threshold of 10K can be tuned based on observed latency.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_on_write", "fan_out_on_read", "hybrid_approach", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Before we go deeper on the architecture, you mentioned something I want to explore. How would you actually test this hybrid approach? It seems complex.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "testing_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Testing is something I think about a lot — and for a feed system, it's especially tricky because correctness is hard to define and verify at scale. Let me break it down into layers. Unit tests: verify the fan-out logic — when user A with 500 followers tweets, all 500 timelines get updated. When celebrity B tweets, their tweet shows up when any follower reads their feed. Integration tests: verify the merge logic — if I follow 3 normal users and 2 celebrities, my feed correctly interleaves all their tweets in chronological order with no duplicates and no missing posts.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["unit_testing", "integration_testing", "feed_correctness"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you verify feed correctness at scale though? You can't manually check 200 million feeds.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "correctness_verification" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right. I'd build a feed correctness audit system. It works like this: we maintain a separate, simple, obviously-correct feed generator — literally a SQL query that joins the follow graph with tweets, sorted by timestamp. It's way too slow for production, but it produces the ground truth. Then we periodically sample, say, 10,000 random users, generate their feeds via both the production system and the ground-truth system, and compare. Any discrepancy gets logged with details: missing tweets, extra tweets, ordering differences. We set an SLO — feed correctness above 99.99% — and alert if it drops.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["correctness_verification", "ground_truth_comparison", "statistical_sampling", "slo"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a clever approach. What about load testing? How do you simulate realistic feed traffic?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "load_testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "For load testing the fan-out, we need to simulate the bursty nature of real traffic — it's not uniform. I'd create test scenarios: Scenario 1 — steady state: simulate 200K concurrent users reading feeds while 50 writes per second happen. Scenario 2 — celebrity burst: a celebrity with 10M followers tweets, triggering massive fan-out-on-read load as followers refresh. Scenario 3 — viral event: tweet volume spikes 5x during a breaking news event. I'd use a tool like Gatling or k6 with a custom plugin that maintains realistic follow graphs. The key is replaying production traffic patterns, not just sending uniform load.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["load_testing", "burst_simulation", "traffic_replay", "realistic_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the fan-out workers themselves — how do you test that they can keep up?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "fan_out_performance" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd measure fan-out lag — the time between a tweet being published and the last follower's timeline being updated. For a user with 5,000 followers, I'd expect fan-out to complete within 1-2 seconds. For our monitoring, I'd embed a trace ID in each tweet and track when the fan-out for the last follower is written. If fan-out lag exceeds 5 seconds, we alert. During load tests, I'd push the workers to their limits: how many tweets per second can the fan-out pipeline handle before lag starts growing unbounded? That gives us our capacity ceiling and tells us when to scale horizontally.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_lag", "distributed_tracing", "capacity_planning", "horizontal_scaling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about the data storage layer. What are you using?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three stores. Redis for the precomputed timelines — each user's timeline is a sorted set with tweet IDs scored by timestamp. We only keep the latest 800 tweets per user since nobody scrolls back that far. For tweet content, I'd use a document store or PostgreSQL — tweets are immutable once created, so reads are simple point lookups by tweet ID. For the social graph (who follows whom), a graph-oriented structure — but practically, a PostgreSQL table with a (follower_id, followee_id) index works fine for our access patterns.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_sorted_sets", "timeline_storage", "database_choice", "social_graph"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you test the Redis timeline consistency? If a tweet fan-out partially fails, some users see it and others don't.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "partial_failure_testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Partial failures are the hardest to test. I'd use chaos engineering. Specifically: inject failures into the fan-out pipeline — kill a worker mid-batch, simulate Redis timeouts for a subset of writes, introduce network partitions between fan-out workers and Redis shards. Then use the correctness audit I mentioned earlier to verify which users were affected. For the recovery mechanism: the fan-out queue should be idempotent — if a worker dies mid-batch, the message goes back to the queue and another worker retries. We verify this with a chaos test: kill a worker, wait for recovery, check that no timelines are missing the tweet.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chaos_engineering", "partial_failure", "idempotency", "recovery_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the read path? How do you handle the merge of precomputed and celebrity tweets efficiently?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "feed_merging" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a user loads their feed: step 1 — fetch their precomputed timeline from Redis (ZREVRANGE, very fast). Step 2 — look up which celebrities they follow (cached in Redis as a set). Step 3 — for each celebrity, fetch their latest tweets from a separate celebrity timeline cache. Step 4 — merge-sort all of these by timestamp and return the top N. The merge is in-memory and fast since we're dealing with small lists. Typical case: 1 Redis call for the timeline, 1 for celebrity list, and maybe 3-5 calls for celebrity tweets. With pipelining, this is 2-3 round trips, well under 50ms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_merging", "redis_pipelining", "merge_sort", "latency_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you test this merge logic doesn't introduce ordering bugs?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "merge_testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Property-based testing is perfect here. Using a framework like Hypothesis or QuickCheck, I'd define properties: the merged feed should be sorted by descending timestamp, should contain no duplicates, should contain exactly the union of precomputed tweets and celebrity tweets that fall within the time window, and should respect pagination boundaries. The framework generates random inputs — varying numbers of celebrities, different tweet volumes, edge cases like empty timelines or all-celebrity follows — and verifies the properties hold. I've found property-based tests catch merge bugs that hand-written unit tests miss, especially around boundary conditions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["property_based_testing", "merge_correctness", "edge_case_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What failure scenarios would you prepare for in production?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three big ones. First, Redis cluster failure: if the timeline cache goes down, we can't serve precomputed feeds. Fallback: switch everyone to fan-out-on-read temporarily — it's slower but works. We pre-plan the capacity for this degraded mode. Second, fan-out queue backup: during a viral event, the queue grows faster than workers can process. We auto-scale workers and implement backpressure — temporarily increase the celebrity threshold so more tweets use fan-out-on-read, reducing write pressure. Third, thundering herd on celebrity tweets: millions of users refresh at once when a celebrity tweets. CDN caching for celebrity feeds with a 5-second TTL absorbs most of this.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_failure", "backpressure", "thundering_herd", "cdn_caching", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running out of time. Final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd invest in end-to-end testing infrastructure: a staging environment with a realistic social graph (anonymized from production) where we can run full load tests and chaos experiments weekly. I'd also build a feed quality dashboard showing: feed freshness (time from tweet to appearing in followers' feeds), feed completeness (% of tweets that appear in all expected timelines), and merge latency distribution. For the architecture to support ranking later, the merge step is the natural injection point — instead of pure chronological sort, we'd score tweets before ranking. The testing framework I described would be critical for validating that ranking changes don't regress feed quality.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["staging_environment", "feed_quality_metrics", "ranking_extensibility", "testing_infrastructure"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "I really liked your focus on testing and verification. The correctness audit and property-based testing ideas were standout moments. Thanks for the discussion.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 70,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional focus on testing — correctness audits, property-based testing, chaos engineering",
+      "Practical load testing approach with realistic traffic patterns rather than uniform load",
+      "Strong operational thinking with fan-out lag monitoring and feed quality dashboards"
+    ],
+    "weaknesses": [
+      "API design was barely discussed — no endpoints or schema mentioned",
+      "Didn't explore database sharding strategy for tweets or social graph at this scale",
+      "Testing focus came at the cost of depth in other areas like caching eviction policies"
+    ]
+  }
+}

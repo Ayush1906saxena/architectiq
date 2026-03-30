@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "message-queue-design",
+    "level": "senior",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_468"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed message queue — like Kafka. Producers publish messages, consumers read them. What would you like to clarify?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. What's the throughput we're targeting — messages per second? What are the durability requirements — can we lose messages? Do we need ordering guarantees? And what's the expected message size?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["throughput", "durability", "ordering", "message_size"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "5 million messages per second, no message loss for acknowledged writes, ordered delivery per partition key, average message size 1KB. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Retention period — how long do we keep messages? And do consumers need to replay from arbitrary points in time, or just read from the latest?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["retention", "replay"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "7-day retention with full replay support. Let's start designing.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The core abstraction is a topic split into partitions. Each partition is an ordered, append-only log. Producers write to partitions — the partition is determined by hashing the message key, which ensures all messages with the same key land in the same partition and stay ordered. Consumers read from partitions sequentially, tracking their position with an offset. A consumer group divides partitions among its members so each message is processed once by the group.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["topic", "partition", "append_only_log", "key_hashing", "offset", "consumer_group"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good overview. Why an append-only log rather than a traditional message broker with per-message acknowledgment and deletion?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "append_only_log" }
+    },
+    {
+      "role": "candidate",
+      "content": "A few reasons. Sequential disk I/O — appending is the fastest write pattern. There's no random seeks or page splits like a B-tree. We can saturate disk bandwidth. Replay — since messages aren't deleted after consumption, any consumer can re-read from any point. This is huge for debugging, reprocessing after a bug fix, or backfilling a new downstream system. Multiple consumer groups — different teams can independently consume the same topic at their own pace without interfering with each other. With a traditional queue that deletes on ack, you'd need to duplicate messages per consumer. Simplicity — the broker doesn't track per-message state. It just appends and serves sequential reads. The consumer tracks its own offset.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sequential_io", "replay", "multi_consumer", "consumer_independence", "simplicity"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How many partitions per topic? And how many broker nodes do we need for 5M messages per second?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "5M messages per second at 1KB each is 5GB/s of write throughput. A single broker with good NVMe drives can handle maybe 200-500MB/s of sustained writes — let's say 300MB/s to be safe. So we need about 17 brokers just for write throughput. With replication factor 3, each message is written 3 times, so actual disk throughput is 15GB/s — now we need about 50 brokers. For partitions: each partition is assigned to one consumer in a consumer group, so the number of partitions sets the max parallelism. If we want consumers to scale to 100 instances, we need at least 100 partitions per topic. I'd default to 200-500 partitions for major topics to leave room to grow.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["throughput_estimation", "broker_sizing", "replication_overhead", "partition_count", "consumer_parallelism"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid estimation. Let's go deep on replication. How do replicas stay in sync?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each partition has one leader and two follower replicas. All writes go to the leader. Followers continuously fetch from the leader — they act as consumers of the leader's log. The leader tracks which followers are caught up — this set is called the ISR (in-sync replica set). A follower is 'in sync' if it's within a configurable lag threshold — maybe 10 seconds or 10,000 messages behind. When a producer writes with acks=all, the leader waits for all ISR members to replicate the message before acknowledging. If a follower falls out of ISR, the leader stops waiting for it — writes continue with the remaining ISR members.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["leader_follower", "isr", "fetch_replication", "acks_all", "lag_threshold"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if the leader dies?",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "leader_election" }
+    },
+    {
+      "role": "candidate",
+      "content": "A controller — a specially designated broker — detects the leader failure via heartbeat timeouts. It selects a new leader from the ISR. Since ISR members have all committed messages, no data is lost. The new leader starts accepting writes. Clients discover the new leader through metadata refresh — they periodically ask any broker for the current partition-to-leader mapping. During the leadership transition, there's a brief unavailability window for that partition — typically a few seconds. The risk: if all ISR members are down simultaneously, we either accept unavailability (safe) or promote an out-of-sync replica (risk of data loss). Kafka calls the latter 'unclean leader election.'",
+      "annotation": { "quality": "good", "concepts_mentioned": ["controller", "heartbeat", "leader_election", "metadata_refresh", "unavailability_window", "unclean_leader_election"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does offset management work? What happens if a consumer crashes between processing a message and committing its offset?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "offset_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "The consumer periodically commits its current offset to the broker — stored in a special internal topic. If the consumer crashes before committing, it restarts from the last committed offset and reprocesses some messages. This is the 'at-least-once' delivery guarantee — you might see duplicates. For exactly-once, the consumer's processing and offset commit need to be atomic. If the consumer is writing to a database, you could store the offset in the same database transaction as the processed result. Or use Kafka's transactional API, which lets you atomically write output messages and commit offsets.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["offset_commit", "at_least_once", "duplicate_processing", "exactly_once", "transactional_api"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle storage cleanup after the 7-day retention window?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "retention" }
+    },
+    {
+      "role": "candidate",
+      "content": "The partition log is broken into segment files — each segment is, say, 1GB. A segment is closed when it reaches the size limit or age limit, and a new active segment is opened. Retention is enforced by deleting whole segment files whose latest message timestamp is older than 7 days. A background thread checks periodically. Since we're deleting whole files rather than individual messages, it's an efficient O(1) operation per segment. Storage calculation: 5M messages/sec × 1KB × 86,400 sec/day × 7 days × 3 replicas ≈ 9PB. That's a lot of storage across those 50 brokers — about 180TB per broker. We'd need machines with dense storage — JBOD configurations with 12+ drives each.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["segment_files", "segment_deletion", "retention_enforcement", "storage_estimation", "jbod"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about monitoring? What are the key metrics to watch for a message queue?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "The most important: consumer lag — how far behind each consumer group is, measured in messages or time. If lag grows, the consumer can't keep up, and you'll run out of retention before it catches up. Under-replicated partitions — partitions where one or more ISR members have fallen behind. This indicates broker health issues. Produce and fetch latency — p50, p99, p999 at the broker level. Spikes indicate saturation. Disk usage and I/O utilization per broker. Network throughput per broker — approaching NIC capacity is a sign to rebalance or add brokers. And partition count per broker — uneven distribution causes hotspots.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["consumer_lag", "under_replicated_partitions", "latency_percentiles", "disk_utilization", "network_throughput", "partition_balance"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things: schema management — producers and consumers need to agree on message format. A schema registry that enforces backward compatibility prevents breaking changes from taking down consumers. And quotas — per-client throttling to prevent a misbehaving producer from overwhelming the cluster. Also, tiered storage — offloading older segments to S3 rather than keeping everything on expensive NVMe, which would dramatically reduce the storage cost for our 9PB estimate.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["schema_registry", "backward_compatibility", "quotas", "tiered_storage"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong finish — the tiered storage point is particularly practical at your storage estimate. Good interview overall. Thanks!",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 69,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 5,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 7
+    },
+    "strengths": [
+      "Solid capacity estimation with concrete numbers — broker count, storage calculation, and partition sizing",
+      "Good replication understanding — ISR, acks=all, and unclean leader election trade-off",
+      "Strong monitoring knowledge — identified the right operational metrics"
+    ],
+    "weaknesses": [
+      "Didn't discuss the page cache and zero-copy optimization — key to Kafka's performance at scale",
+      "Consumer rebalancing wasn't discussed — a major operational pain point",
+      "No discussion of compaction as an alternative to time-based retention"
+    ]
+  }
+}

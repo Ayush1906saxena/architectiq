@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "principal",
+    "candidate_profile": "good",
+    "total_exchanges": 20,
+    "generation_id": "seed_140"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed system. I'm interested in hearing your thoughts at the principal level — not just the technical architecture but also the organizational and product considerations. What are your initial questions?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Absolutely. At the principal level, I want to understand a few dimensions. Product: Is this a chronological feed or a ranked feed? Do we support ads interleaved in the feed? Are we optimizing for engagement, time-spent, or healthy conversations? Organizational: how many teams would be working on this — is this a greenfield build or evolving an existing system? Scale: how many DAUs and what's the average follow graph density — are we closer to Twitter's asymmetric follow model or Facebook's symmetric friend model?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_ranking", "organizational_structure", "product_strategy", "scale"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great framing. Ranked feed optimizing for meaningful engagement, not just clicks. Ads are required. 300 million DAUs, asymmetric follow model with power-law distribution — some accounts have 50M+ followers. This is an evolution of an existing system. Multiple teams. Walk me through your approach.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "feed_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the team structure because at this scale, the org design is the system design. I'd organize around three pillars: a Feed Platform team that owns the fan-out infrastructure, storage, and serving layer. A Ranking & ML team that owns the ranking models, feature engineering, and experimentation framework. And a Content & Safety team that handles content moderation, policy enforcement, and quality signals. Each pillar has clear API contracts between them. The platform team provides candidate generation, the ML team provides scoring, and the safety team provides filtering — they compose into the final feed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["organizational_structure", "team_boundaries", "api_contracts"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting to lead with org structure. Tell me about the ML ranking pipeline — how does that work end to end?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "ml_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ranking pipeline has multiple stages for efficiency. Stage 1 — Candidate Generation: we pull ~1000 candidate tweets from multiple sources: fan-out timeline (from people you follow), trending topics, out-of-network recommendations (tweets liked by people you follow), and ads. Stage 2 — Light Ranker: a lightweight model scores all 1000 candidates on basic features — recency, author-viewer affinity, content type. This prunes to ~200 candidates. Stage 3 — Heavy Ranker: a deep neural network scores the remaining candidates on hundreds of features — predicted engagement (like, retweet, reply probability), content quality score from the safety team, user interest vectors. Stage 4 — Policy Layer: remove duplicates, enforce diversity (no more than 3 tweets from the same author), insert ads at prescribed intervals, apply content moderation decisions. The output is a ranked list of ~50 tweets for the first page load.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ml_ranking", "candidate_generation", "multi_stage_ranking", "content_moderation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the A/B testing framework for feed algorithm changes? This seems critical for iterating on the ranking.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "ab_testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "A/B testing is foundational. The framework has several components. First, the experiment assignment service: when a user loads their feed, we hash their user_id with the experiment ID to deterministically assign them to a variant. This ensures consistent experience across sessions. We support nested experiments — a user can be in multiple non-conflicting experiments simultaneously using the concept of experiment layers. Each layer controls an independent aspect of the pipeline — one layer for the ranking model, another for the candidate generation strategy, another for the ad insertion policy. For metrics, we track both engagement metrics (CTR, time-spent, sessions per day) and health metrics (report rate, mute rate, unfollow rate). We require both to be neutral or positive before shipping a change. Statistical rigor: we use sequential testing so we can stop experiments early if the effect is clearly positive or negative, with proper multiple-comparison corrections. We run experiments for a minimum of 2 weeks to capture weekly patterns.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ab_testing", "experiment_layers", "sequential_testing", "guardrail_metrics"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the content moderation team structure work with the feed team? This intersection is often contentious.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "content_moderation" }
+    },
+    {
+      "role": "candidate",
+      "content": "It's the hardest organizational challenge. The content moderation team operates at two levels. Proactive: ML classifiers scan tweets at write time and produce content quality scores — toxicity, misinformation probability, spam likelihood. These scores are stored as tweet metadata and are inputs to the ranking model. The ranking team can down-rank low-quality content without removing it. Reactive: when users report content, the moderation team's tooling queues it for review. High-severity items (CSAM, imminent threats) trigger immediate takedown with human-in-the-loop confirmation. The key organizational principle: the moderation team sets policies, and the platform team implements them as configurable rules in the policy layer. The moderation team can add or modify rules without requiring ranking team involvement. This separation prevents the ranking team from having to make content judgment calls and gives the moderation team autonomy. I've seen this fail when moderation is treated as a feature of the ranking team — it needs to be an independent pillar with direct escalation paths to leadership.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["content_moderation", "ml_classification", "organizational_structure", "policy_separation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's go deeper on the technical infrastructure. How does the fan-out work for generating candidates?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hybrid fan-out is essential at this scale. For regular users (under 10K followers), we do fan-out on write: when they tweet, we push the tweet ID into each follower's pre-computed timeline stored in Redis. For celebrity accounts (over 10K followers), fan-out on write is too expensive — a 50M follower account would generate 50M writes per tweet. Instead, at read time, we merge the pre-computed timeline with a fresh fetch of tweets from followed celebrities. The threshold of 10K is tunable — we actually A/B tested different thresholds and found 10K was the sweet spot balancing write amplification vs read latency. The timelines in Redis store tweet IDs sorted by timestamp, with a max of 800 entries per user. When a user opens the app, we fetch these IDs, then hydrate them with tweet content from a separate tweet cache.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "hybrid_approach", "celebrity_handling", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle real-time updates — when a user is actively browsing and new tweets arrive?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "real_time_updates" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two mechanisms. Primary: WebSocket connections from the client to a push notification service. When new tweets are fan-out-written to a user's timeline, we also publish an event to a pub-sub system. The push service is subscribed per-user and sends a lightweight notification through the WebSocket — just 'N new tweets available', not the full tweet payload. The client then decides when to show the 'New tweets' pill at the top. Fallback: for clients that can't maintain WebSockets (corporate firewalls, unstable connections), we use Server-Sent Events as a unidirectional alternative. Last resort: client-side polling every 30 seconds. The key UX decision: we never auto-insert tweets into the timeline while the user is reading — that causes the jarring jump. We buffer new tweets and let the user pull them in by scrolling to the top or tapping the notification.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket", "sse", "pub_sub", "real_time_updates", "ux_consideration"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the feature store for the ML ranking models? How do you serve features at this scale?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "feature_store" }
+    },
+    {
+      "role": "candidate",
+      "content": "The feature store has two tiers. Batch features: computed offline — user embeddings, long-term interest profiles, author quality scores. These are computed daily via Spark jobs and loaded into a serving layer — essentially a distributed key-value store optimized for low-latency reads. We use something like a Redis cluster or a custom RocksDB-based store. Real-time features: computed on the fly or with sub-minute latency — recent engagement signals, trending topics, session context. These come from a stream processing layer (Flink) that processes the event stream and materializes aggregates. At serving time, the ranker fetches both sets of features, combining a ~500ms batch feature lookup with ~50ms real-time feature lookups. Total feature computation budget for the heavy ranker is under 200ms to meet our p99 feed load latency of 500ms. The feature store is the joint ownership area between the ML team and the platform team — it's one of the most important shared services.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feature_store", "batch_processing", "stream_processing", "latency_budget"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you think about feed quality metrics and ensuring the algorithm doesn't optimize for outrage?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "responsible_ai" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where principal-level judgment matters most. Pure engagement optimization will inevitably amplify outrage — anger drives clicks. We need a composite objective function. I'd define it as: Score = w1 * P(meaningful_engagement) + w2 * P(informed_interaction) - w3 * P(regret) - w4 * P(toxicity). Meaningful engagement means replies and quote-tweets vs passive likes. Informed interaction means the user actually read the article before sharing. Regret is measured by post-engagement surveys — 'Was this worth your time?' sampled on 1% of interactions. We track long-term health metrics: DAU retention, unfollow rate, time-to-first-report-action. If engagement goes up but 30-day retention drops, that's a red flag. Organizationally, we need a 'Responsible AI' function that audits the ranking system quarterly, reviews disparate impact across demographics, and has veto power over model changes that degrade health metrics beyond a threshold. This isn't just ethics — it's business sustainability.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["responsible_ai", "objective_function", "health_metrics", "organizational_governance"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle feed generation during a major event — say a World Cup final where tweet volume spikes 10x?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "spike_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Spikes during major events are predictable unpredictability. Pre-event: we scale up fan-out workers and Redis capacity based on the event calendar. We maintain a 'tentpole events' calendar with pre-provisioned capacity. During the event: the fan-out on write path is the bottleneck — everyone is tweeting and celebrities generate massive fan-out on read merges. We can temporarily switch to a higher fan-out threshold — maybe 5K instead of 10K — to reduce write amplification at the cost of slightly more read-time work. We also activate a 'trending event' candidate source that directly injects high-signal tweets about the event into everyone's feed, bypassing the normal fan-out path. The heavy ranker can be simplified during spikes — fall back to the light ranker if latency degrades, since recency is more important than personalization during live events. Post-event: scale back down. The key is that none of this requires code changes — it's all configuration-driven, controlled by an on-call engineer.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["spike_handling", "auto_scaling", "graceful_degradation", "operational_readiness"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "If you were building this system's roadmap for the next year, what would you prioritize?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Quarter 1: Improve the experimentation framework — faster experiment velocity is the single highest-leverage investment. If we can go from 10 experiments per quarter to 30, that compounds. Also invest in the feature store to reduce the time from 'ML team wants a new feature' to 'it's available in production' from weeks to days. Quarter 2: Build out the responsible AI framework — automated auditing, disparate impact monitoring, and the regret-based feedback loop. This is both the right thing to do and protects against regulatory risk. Quarter 3: Rebuild the candidate generation layer to support out-of-network recommendations better — this is the biggest lever for user engagement and new user retention. Quarter 4: Multi-modal feed — integrate short video, spaces (audio), and community posts into a unified ranking framework. Each content type needs its own feature set and engagement model, but the policy layer and experimentation framework are shared. Throughout: invest in the platform team's on-call experience and operational tooling. The feed system is the product — if it's down, everything is down.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["roadmap_planning", "prioritization", "experimentation_velocity", "platform_investment"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent roadmap. You demonstrated strong systems thinking and organizational awareness throughout. Thank you for the interview.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 76,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 6,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Excellent organizational design thinking — led with team structure and API contracts between teams",
+      "Strong A/B testing framework discussion with experiment layers and guardrail metrics",
+      "Thoughtful approach to responsible AI and content moderation as organizational challenges"
+    ],
+    "weaknesses": [
+      "Light on capacity estimation — didn't quantify storage, QPS, or memory requirements",
+      "Database design was underdeveloped — didn't discuss the tweet storage layer in detail",
+      "Could have discussed data pipeline architecture for ML training more concretely"
+    ]
+  }
+}

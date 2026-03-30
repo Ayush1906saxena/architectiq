@@ -1,0 +1,140 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "senior",
+    "candidate_profile": "good",
+    "total_exchanges": 20,
+    "generation_id": "seed_149"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a rate limiter that can be used across our microservices platform. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things I need to understand: What's the rate limiting scope — per user, per API key, per IP? What algorithms are acceptable — do we need smooth rate limiting or just hard caps? What's the scale — how many rate limit checks per second? And what should happen when the rate limiter itself is unavailable — fail open or fail closed?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_scope", "rate_limiting_algorithm", "scale", "failure_policy"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Per API key with IP-based fallback for unauthenticated requests. Token bucket algorithm preferred. 200K rate limit checks per second. Configurable fail-open or fail-closed per endpoint. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me design the token bucket implementation first. Each API key gets a bucket defined by two parameters: rate (tokens per second) and burst (max tokens). The bucket starts full at burst capacity. Each request consumes one token. Tokens are refilled at the rate. If the bucket is empty, the request is denied. The state per bucket is just two values: current tokens (float) and last_refill_timestamp. For 200K checks/sec, I need a fast, atomic backend — Redis is the natural choice.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "bucket_state", "redis"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the Redis implementation. How do you ensure atomicity?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "redis_atomicity" }
+    },
+    {
+      "role": "candidate",
+      "content": "The core operation — check and decrement — must be atomic. If two requests arrive simultaneously, they could both read the same token count, both see 1 token available, and both allow the request — consuming 2 tokens when only 1 was available. I'd use Redis MULTI/EXEC (optimistic transactions) for this. The flow:\n\n1. WATCH the key for the API key's bucket\n2. GET the current tokens and last_refill_time\n3. Calculate refilled tokens: tokens = min(burst, tokens + (now - last_refill) * rate)\n4. If tokens >= 1: MULTI, SET tokens-1 and now, EXEC\n5. If EXEC returns nil (key was modified by another request), retry from step 1\n\nThis is optimistic concurrency — under low contention it succeeds on the first try. Under high contention (many requests for the same API key), retries are needed. An alternative: use a Lua script instead. Lua scripts in Redis execute atomically without needing WATCH/MULTI. This is actually better because it avoids the retry loop:\n\n```lua\nlocal tokens = tonumber(redis.call('HGET', KEYS[1], 'tokens') or ARGV[1])\nlocal last = tonumber(redis.call('HGET', KEYS[1], 'last') or ARGV[3])\nlocal rate = tonumber(ARGV[2])\nlocal burst = tonumber(ARGV[1])\nlocal now = tonumber(ARGV[3])\ntokens = math.min(burst, tokens + (now - last) * rate)\nif tokens >= 1 then\n  redis.call('HSET', KEYS[1], 'tokens', tokens - 1, 'last', now)\n  return 1\nelse\n  redis.call('HSET', KEYS[1], 'tokens', tokens, 'last', now)\n  return 0\nend\n```\n\nI'd prefer the Lua approach — single round trip, guaranteed atomicity.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_atomicity", "multi_exec", "lua_scripting", "optimistic_concurrency"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good comparison of the two approaches. What happens when Redis goes down? You mentioned configurable fail policies.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "redis_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "When Redis is unavailable, the rate limiter client library needs to handle it gracefully. I'd implement a circuit breaker pattern. The circuit breaker tracks Redis call failures. When the failure rate exceeds a threshold (say 50% in a 10-second window), the circuit opens. While open, we don't even attempt Redis calls — saving latency. Every 30 seconds, we let one probe request through. If it succeeds, the circuit closes and we resume normal operation. When the circuit is open, the behavior depends on the endpoint configuration. For most endpoints: fail-open — allow all requests. The risk of a brief period without rate limiting is lower than the risk of a full service outage. For sensitive endpoints like login or payment: fail-closed — reject all requests with a 503 Service Unavailable. As a middle ground, I'd also implement a local in-memory rate limiter as a fallback. It's not globally coordinated, but it provides per-server rate limiting. With 10 app servers, the effective global rate limit is 10x the per-server limit — not perfect but better than nothing.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["circuit_breaker", "fail_open", "fail_closed", "local_fallback", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good fallback strategy. Let's talk about the high-level architecture. How does this fit into the request path?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "system_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "The rate limiter is deployed as middleware in the API gateway. Request flow: client sends request -> load balancer -> API gateway. The gateway middleware extracts the API key (from header or query param), determines the rate limit rules for that key (from a config cache), and calls the rate limiter client library. If allowed: forward to the downstream service. If denied: return 429 Too Many Requests with headers: X-RateLimit-Limit (the max rate), X-RateLimit-Remaining (tokens left), X-RateLimit-Reset (when the bucket refills), and Retry-After (seconds to wait). The rate limit configuration (which API key maps to which limits) is stored in a configuration database and cached in the gateway with a 60-second refresh interval. Admins can change limits dynamically without redeploying the gateway.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_gateway", "middleware", "rate_limit_headers", "configuration_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle Redis scaling for 200K checks per second?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "redis_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "A single Redis instance handles about 100-200K operations per second for simple operations, and Lua scripts are a bit more expensive. For 200K rate limit checks, we need at least 2-3 Redis nodes. I'd use Redis Cluster with hash-based sharding on the API key. Each API key's bucket lives on a deterministic shard. With 3 shards, each handles ~67K ops/sec — comfortable headroom. For high availability, each shard has a replica. Redis Cluster handles automatic failover when a primary goes down — the replica is promoted within seconds. One optimization: pipeline multiple rate limit checks in a single round trip. If the gateway handles requests in batches (which some async frameworks do), we can send multiple Lua script calls in a pipeline. This reduces network round trips from N to 1, though each script still executes atomically.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["redis_scaling", "redis_cluster", "sharding", "high_availability", "pipelining"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle monitoring? How do you know if the rate limiter is working correctly?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Monitoring at multiple levels. Operational metrics: Redis latency per operation (should be <1ms), circuit breaker state changes (log every open/close event), rate limiter middleware latency overhead (should be <2ms added to each request). Business metrics: total requests allowed vs denied per API key, 429 response rate as a percentage of total traffic (helps identify if limits are too aggressive), top 10 API keys by denial rate (helps identify customers who need tier upgrades or are abusing the system). Alerting: alert if Redis latency exceeds 5ms (indicating a performance issue), alert if the circuit breaker opens (Redis is having problems), alert if 429 rate exceeds 10% globally (either an attack or misconfigured limits). I'd also create a dashboard showing real-time token consumption per API key — useful for customer support when a user complains about being rate limited. They can see exactly when and how they hit the limit.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "operational_metrics", "business_metrics", "alerting", "dashboard"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about abuse scenarios? What if someone creates many API keys to circumvent rate limits?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "abuse_prevention" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good question — that's a key limit evasion strategy. Defense: layer the rate limiting. Per-API-key is the primary limit, but we also apply per-IP rate limits at a higher threshold. If someone creates 100 API keys from the same IP, they're still bounded by the IP limit. We also rate-limit the API key creation endpoint itself — no more than 5 keys per account per hour. For more sophisticated attacks: per-account rate limiting that aggregates across all API keys belonging to the same account. And for truly adversarial scenarios (botnets with distributed IPs), we'd integrate with a behavioral analysis system that looks at request patterns — automated traffic looks different from human traffic in terms of timing regularity, user-agent diversity, and request distribution.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["abuse_prevention", "layered_rate_limiting", "behavioral_analysis", "limit_evasion"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you test the rate limiter to ensure it's accurate under high concurrency?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Correctness testing under concurrency: I'd write a test that spawns 100 concurrent goroutines, each sending requests as fast as possible for 10 seconds against a rate limit of 100/sec. After 10 seconds, the total allowed requests should be close to 1000 (100/sec * 10 sec) with some tolerance for burst. If it's significantly more, we have a race condition. If significantly less, we're being too conservative. Load test: spin up the full stack (Redis cluster + gateway) in a staging environment. Use a load generator to simulate 200K checks/sec with realistic API key distribution (some keys hot, most cold). Verify that latency stays under 2ms and that rate limits are enforced correctly. Chaos test: kill a Redis node during the load test and verify that the circuit breaker activates, the fallback policy engages, and the system recovers when Redis comes back. Regression test: after any change to the Lua script or client library, run the full test suite. A bug in the rate limiter either lets too much traffic through (security risk) or blocks too much (availability risk) — both are bad.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["testing", "concurrency_testing", "load_testing", "chaos_testing", "correctness_validation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running out of time. Anything else you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things: I'd add a dry-run mode where the rate limiter logs what it would do without actually blocking — useful for tuning new limits before enforcing them. A rate limit override API for operators to temporarily increase or disable limits during incidents. And I'd consider adding a sliding window counter as an alternative algorithm for some use cases — it's more memory-efficient for per-minute limits where we don't need burst handling. Overall, the key design principle is that the rate limiter should never become the bottleneck itself — it must be faster and more reliable than the services it protects.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["dry_run", "operational_overrides", "sliding_window", "design_principles"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. Strong Redis implementation and excellent circuit breaker design. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 70,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 6,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent Redis atomicity analysis comparing MULTI/EXEC vs Lua scripts with clear rationale",
+      "Strong circuit breaker design with configurable fail-open/fail-closed per endpoint",
+      "Good monitoring strategy covering both operational and business metrics"
+    ],
+    "weaknesses": [
+      "Capacity estimation was minimal — didn't calculate Redis memory requirements",
+      "Multi-region rate limiting was not discussed — how to enforce global limits across DCs",
+      "Could have explored sliding window algorithms more deeply as an alternative to token bucket"
+    ]
+  }
+}

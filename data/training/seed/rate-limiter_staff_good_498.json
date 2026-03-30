@@ -1,0 +1,131 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "staff",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_498"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a distributed rate limiter. At staff level, I expect depth on the algorithms, the distributed coordination, and failure handling.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "First, requirements. What's the total request volume? Is rate limiting per-user, per-API-key, per-IP, or some combination? What time windows — per-second, per-minute, per-hour? And what's the allowed over-count — must it be exact or can we tolerate a few percent?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["request_volume", "rate_limit_dimensions", "time_windows", "exactness"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "2 million requests per second across the platform. Per-API-key limiting, with rules like 1000/minute and 10000/hour. 2% over-count is acceptable. The rate limiter runs across 20 API gateway instances.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me compare algorithms. Fixed window counter: simple, low memory (one counter per key per window), but has the well-known boundary burst problem — a client can send 2x the limit across a window boundary. Sliding window log: exact, stores every request timestamp, but memory-intensive — at 1000 RPM, that's 1000 timestamps per key. With millions of keys, that's tens of GB. Sliding window counter: the best compromise. Keep two counters — current window and previous window — and interpolate. Memory is just two integers per key per window. Accuracy is within a few percent. Token bucket: models rate as a steady stream. Bucket holds tokens up to a max capacity, refills at a fixed rate. Each request consumes one token. Allows controlled bursts (up to bucket capacity) followed by steady-rate flow. State is compact: just remaining tokens and last refill timestamp. I'd go with token bucket for per-second limits (natural burst handling) and sliding window counter for per-minute/per-hour limits (low memory, good accuracy).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fixed_window", "sliding_window_log", "sliding_window_counter", "token_bucket", "algorithm_comparison", "hybrid_approach"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong comparison. Where does the state live? 20 gateway instances all need to see the same counters.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "distributed_state" }
+    },
+    {
+      "role": "candidate",
+      "content": "Redis is the natural choice — in-memory, fast, supports atomic operations. For the token bucket: store {remaining_tokens, last_refill_timestamp} per API key. For the sliding window counter: store current_window_count and previous_window_count per key per window size. All 20 gateways share the Redis cluster. The check-and-decrement must be atomic to prevent races — if two gateways check simultaneously and both see 1 token remaining, both might allow the request. Solution: Redis Lua scripts. The entire logic — refill tokens, check, decrement — runs as a single atomic operation on the Redis server. No race conditions.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["redis", "atomic_operations", "lua_scripts", "race_condition_prevention", "token_bucket_state"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "At 2M requests per second, every request makes a Redis round-trip. Can Redis handle that?",
+      "annotation": { "action": "scaling_probe", "phase": "deep_dive", "target_concept": "redis_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "A single Redis node does about 200K ops/sec with Lua scripts. For 2M RPS, we need at least 10 Redis nodes. Shard by API key — hash the key to determine which Redis node to query. But there's a better approach: don't call Redis for every request. Implement a local token bucket on each gateway. The gateway maintains an in-process counter per key. For keys well below their limit (say, usage < 50% of limit), the local counter handles it without touching Redis. Only when the local counter approaches the threshold do we sync with Redis for the authoritative count. This reduces Redis calls by 80-90% — most requests from well-behaved clients never hit Redis.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_throughput", "sharding", "local_rate_limiting", "threshold_based_sync", "redis_call_reduction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the consistency between local counters across gateways? If a client spreads requests across all 20 gateways, the local counters don't see the full picture.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "distributed_consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right — the local counters are approximate. Two approaches. First, divide the global limit by the number of gateways — each gets a local quota of 50 requests per minute if the global limit is 1000 and there are 20 gateways. Problem: traffic is often uneven — sticky sessions or geographic routing means one gateway might get 80% of a client's traffic. The quota gateway gets exhausted while others sit idle. Second approach (better): each gateway periodically reports its local count to Redis (every 1-2 seconds) and fetches the aggregated global count back. Between syncs, the local counter is the source of truth. The worst-case over-count is: 20 gateways × 2 seconds × per-second rate. For a 1000/minute limit, that's a small fraction. And since the requirement allows 2% over-count, this is well within tolerance.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["quota_division", "sticky_sessions", "periodic_sync", "over_count_bound"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if Redis goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "redis_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fail-open: if Redis is unreachable, allow requests but fall back to local-only rate limiting. Each gateway enforces limit/20 locally. This is imperfect — a client could get 20x the intended limit if they hit all gateways — but it's better than either blocking all traffic or disabling rate limiting entirely. Meanwhile, Redis should be running as a cluster with replicas and automatic failover. The outage window should be seconds, not minutes. And we should alert immediately on Redis connectivity issues — losing rate limiting makes us vulnerable to abuse.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fail_open", "local_fallback", "redis_cluster", "automatic_failover", "alerting"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you communicate rate limit status to clients? And how do they handle being rate-limited?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "client_experience" }
+    },
+    {
+      "role": "candidate",
+      "content": "Standard response headers on every request: X-RateLimit-Limit (the max), X-RateLimit-Remaining (how many left), X-RateLimit-Reset (when the window resets, as a Unix timestamp). When rate-limited, return HTTP 429 with a Retry-After header indicating how many seconds to wait. Well-behaved clients use these headers to self-throttle — pause or back off before hitting the limit. The SDK we provide should implement exponential backoff with jitter on 429 responses. For burst-heavy clients, we could also offer a Retry-After header even on 200 responses when they're approaching the limit — a gentle warning to slow down.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["rate_limit_headers", "http_429", "retry_after", "exponential_backoff", "jitter", "soft_warning"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle dynamic rate limit changes? An admin wants to change a client's limit from 1000 to 5000/minute without restart.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "dynamic_configuration" }
+    },
+    {
+      "role": "candidate",
+      "content": "The rate limit rules live in a configuration service — a database-backed API. When an admin updates a rule, the config service pushes the change to all gateways. Two distribution mechanisms: polling (each gateway checks for config changes every 5-10 seconds) or pub/sub (config service publishes to a Redis pub/sub channel, gateways subscribe and get instant updates). I'd use pub/sub for immediacy with polling as a fallback in case a gateway misses a pub/sub message. The gateways maintain an in-memory cache of all rules. The cache is the source of truth for enforcement — the config service is the source of truth for management.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["configuration_service", "push_distribution", "polling_fallback", "in_memory_cache", "two_sources_of_truth"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Monitoring: a dashboard showing top rate-limited keys, rejection rates over time, Redis latency, and local vs Redis hit ratio. This helps identify both abusive clients and misconfigured rate limits. And for the future: ML-based anomaly detection that automatically suggests rate limit adjustments when traffic patterns change — like a DDoS attack or a viral event causing legitimate traffic spikes.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["monitoring_dashboard", "rejection_metrics", "local_redis_ratio", "anomaly_detection"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. Strong algorithm comparison and practical distributed design. The depth was solid across the board. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 71,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 6,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 7
+    },
+    "strengths": [
+      "Excellent algorithm comparison with clear trade-off reasoning for hybrid approach",
+      "Smart local rate limiting optimization with quantified Redis call reduction",
+      "Good consistency analysis for distributed counters with over-count bound calculation"
+    ],
+    "weaknesses": [
+      "Fail-open strategy was reasonable but didn't discuss circuit breakers or gradual degradation",
+      "No discussion of rate limiting at different layers (L4/L7, application, database)",
+      "Didn't address multi-region rate limiting — global vs per-region limits",
+      "Configuration distribution was good but didn't discuss safety (canary deployment of rule changes)"
+    ]
+  }
+}

@@ -1,0 +1,152 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "staff",
+    "candidate_profile": "copies-instagram",
+    "total_exchanges": 22,
+    "generation_id": "seed_419"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design the Twitter news feed — the timeline that shows tweets from people a user follows, sorted by recency. What clarifying questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. How many users total and DAU? What's the average number of people a user follows? How many tweets per day? Is this pure chronological or ranked? And what's the latency target for loading the feed?",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["user_scale", "follow_graph", "tweet_volume", "feed_ranking", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500M total users, 200M DAU. Average user follows 300 accounts but there's a power-law distribution — some users have 50M+ followers. 500M tweets per day. Chronological for now. Feed load under 500ms. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great. So I actually read a really detailed blog post from Instagram Engineering about how they built their feed system, and I think their approach is directly applicable here. Instagram uses a combination of fan-out-on-write for regular users and fan-out-on-read for celebrity accounts. They store pre-computed timelines in Redis. Let me describe exactly how Instagram does it.",
+      "annotation": { "quality": "mixed", "concepts_mentioned": ["fan_out_on_write", "fan_out_on_read", "instagram_reference", "redis_timeline"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "It's great that you've read engineering blogs — that shows initiative. But I need YOUR design decisions, not a description of Instagram's system. What trade-offs are YOU making and why? Let's start with your own analysis.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "design_decisions" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fair enough. So Instagram — I mean, let me think about this from first principles. The core question is: when should we compute the feed? At write time (when a tweet is posted) or at read time (when a user opens their timeline)? Fan-out-on-write: when User A tweets, push that tweet ID to the timeline of every follower. Pro: reads are fast, just fetch the pre-computed list. Con: write amplification for popular users. Fan-out-on-read: when a user opens their timeline, fetch recent tweets from all followed accounts and merge. Pro: no write amplification. Con: reads are slow for users following many accounts.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["fan_out_on_write", "fan_out_on_read", "write_amplification", "read_latency"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. So which approach do you choose?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "approach_selection" }
+    },
+    {
+      "role": "candidate",
+      "content": "So Instagram uses a hybrid — fan-out-on-write for users under a follower threshold and fan-out-on-read for celebrities. I'd do the same. The threshold... Instagram uses... hmm, I'm not sure of their exact number. Let me think about what makes sense for us. If a user has 10,000 followers, fan-out-on-write means 10,000 Redis writes per tweet. That's fast. If they have 10 million followers, that's 10 million writes — too expensive. So I'd set the threshold around 50,000 followers. Below that: fan-out-on-write. Above: fan-out-on-read.",
+      "annotation": { "quality": "mixed", "concepts_mentioned": ["hybrid_approach", "follower_threshold", "instagram_reference"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the math that justifies the 50,000 threshold. Why not 10,000 or 500,000?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "threshold_justification" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, let me reason through it. At 500M tweets per day, that's about 5,800 tweets per second. For fan-out-on-write: if the average tweeter has 300 followers, each tweet generates 300 Redis writes. 5,800 * 300 = 1.74 million Redis writes per second. That's high but manageable for a Redis cluster. Now, the top 0.1% of users — those with >50K followers. How many tweets per day do they generate? Maybe 10% of all tweets? So 580 tweets/sec from celebrities. If we fanned out a 50K-follower tweet: 580 * 50,000 = 29 million writes/sec. That would double our Redis write load just for the top users. The threshold is where the marginal cost of fan-out starts dominating. 50K feels like the inflection point, but honestly I'd tune it empirically with production data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["threshold_math", "redis_write_capacity", "cost_analysis", "empirical_tuning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now that's the kind of original analysis I'm looking for. Tell me about the storage layer for timelines.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "timeline_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "So Inst— I mean, the standard approach is Redis sorted sets for pre-computed timelines. Key: timeline:{user_id}, members: tweet IDs, scores: timestamps. But let me evaluate whether that's the right choice for OUR scale. 200M DAU with timelines of up to 800 tweet IDs each. 200M * 800 * 16 bytes = about 2.5 TB. With Redis overhead, maybe 4 TB. That requires a large Redis cluster — 60+ nodes at 64 GB each. That's expensive but feasible. Alternative: store timelines in a sorted column store like Cassandra — cheaper per byte but higher read latency. Since we need sub-500ms and the timeline is read-heavy, Redis is worth the cost. I'd use Cassandra as a backing store for timelines that get evicted from Redis.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_sorted_set", "memory_estimation", "cassandra_alternative", "tiered_storage", "cost_analysis"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good original analysis. How does the read path work when a user opens their timeline?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "read_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "When User X opens their timeline: 1) Fetch the pre-computed timeline from Redis — ZREVRANGE to get the top 50 tweet IDs sorted by timestamp. 2) Check if User X follows any celebrity accounts (users above our threshold). If yes, fetch recent tweets from each celebrity's tweet list (also in Redis or directly from the tweets table). 3) Merge the pre-computed timeline with celebrity tweets, sort by timestamp, take top 50. 4) For each tweet ID, hydrate: fetch the full tweet content, author profile, engagement counts (likes, retweets, replies) from their respective caches/stores. 5) Return the hydrated feed to the client. Step 4 can be batched — multi-get from Redis/cache for all 50 tweets at once.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["timeline_fetch", "celebrity_merge", "tweet_hydration", "batch_fetch", "multi_get"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What data store do you use for the tweets themselves?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "tweet_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Tweets are immutable once created (ignoring edits for now). High read volume, simple lookup by tweet_id. I'd use a sharded MySQL or PostgreSQL cluster — partition by tweet_id hash. Each tweet row: tweet_id, author_id, content (280 chars), created_at, reply_to_tweet_id, media_urls. At 500M tweets per day, 180B tweets per year. Each tweet ~500 bytes, so 90 TB per year. Sharded across maybe 100 database instances. A Redis cache in front — cache tweets by ID with LRU eviction. Popular tweets stay hot in cache. The cache handles 95%+ of reads; the database handles cache misses and writes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharded_database", "tweet_schema", "cache_layer", "immutable_data", "lru_eviction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the follow graph impact feed delivery? User A unfollows User B — what needs to happen?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "follow_graph_changes" }
+    },
+    {
+      "role": "candidate",
+      "content": "When User A unfollows User B: 1) Update the follow graph (remove the edge). 2) We do NOT retroactively clean User B's tweets from User A's timeline — that would be expensive. Instead, on the next timeline fetch, when we hydrate tweets, we check if the author is still followed. If not, filter them out. This is a lazy cleanup. Over time, as new tweets push old ones out of the timeline, User B's tweets naturally disappear. 3) Going forward, User B's fan-out workers no longer include User A when distributing new tweets. This eventual consistency for unfollows is acceptable — users won't notice a few stale tweets for a brief period.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lazy_cleanup", "follow_graph_update", "eventual_consistency", "fan_out_update"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What about failure handling — the Redis timeline cluster has a node failure?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "redis_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "With Redis Cluster, each shard has replicas. A single node failure triggers automatic failover to a replica — typically under 15 seconds. During that window, users whose timelines are on that shard get slightly stale data or a slower experience (fallback to Cassandra backing store). For a broader Redis outage: degrade to full fan-out-on-read for all users. This is slower — each timeline load now requires querying recent tweets from all 300 followed accounts — but it works. We'd need to rate-limit or simplify the feed (show fewer tweets) to handle the increased database load. Circuit breaker to detect Redis degradation and switch modes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_cluster_failover", "cassandra_fallback", "degraded_mode", "fan_out_on_read_fallback", "circuit_breaker"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add: monitoring on fan-out lag (time from tweet creation to it appearing in followers' timelines), Redis memory usage per shard, and feed load P99 latency. For future enhancements: ranked feed using an ML model that re-orders the chronological timeline based on relevance signals. And I want to acknowledge — I leaned too heavily on Instagram's architecture initially instead of reasoning from first principles. The best answers come from understanding the trade-offs yourself, not memorizing another company's solution.",
+      "annotation": { "quality": "adequate", "concepts_mentioned": ["monitoring", "ml_ranking", "self_reflection"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "I agree completely. Once you started doing your own analysis — like the threshold math and the Redis sizing — the quality jumped significantly. Reference architectures are great as starting points, but you need to demonstrate you understand WHY those decisions were made, not just WHAT they are. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 55,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 7,
+      "api_design": 5,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 6,
+      "failure_handling": 7,
+      "communication": 4
+    },
+    "strengths": [
+      "Strong quantitative analysis once pushed — threshold math and Redis sizing were excellent",
+      "Good lazy cleanup approach for unfollow scenarios",
+      "Solid failure handling with multi-level fallback strategy"
+    ],
+    "weaknesses": [
+      "Initially tried to describe Instagram's system instead of designing their own",
+      "Had to be redirected to think independently — staff candidates should lead, not recite",
+      "Kept referencing Instagram even mid-sentence — showed over-reliance on memorized material",
+      "Didn't discuss the write path (fan-out pipeline) in sufficient detail",
+      "No API design discussion — what does the feed endpoint look like?"
+    ]
+  }
+}

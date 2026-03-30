@@ -1,0 +1,109 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "staff",
+    "candidate_profile": "deep-lua-scripts",
+    "total_exchanges": 16,
+    "generation_id": "seed_394"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We've established that our rate limiter uses Redis with a sliding window log algorithm. You mentioned using Lua scripts for atomicity. Let's go deep — why Lua over Redis's MULTI/EXEC transactions?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "redis_lua_scripts" }
+    },
+    {
+      "role": "candidate",
+      "content": "MULTI/EXEC provides atomicity in the sense that commands in the transaction execute without interleaving, but it doesn't provide the ability to make conditional decisions based on intermediate results. With a sliding window rate limiter, I need to: (1) remove expired entries from the sorted set with ZREMRANGEBYSCORE, (2) count remaining entries with ZCARD, (3) conditionally add the new request only if the count is below the limit, and (4) set the key expiry. With MULTI/EXEC, I can't branch on the ZCARD result — all commands are queued before any execute. I'd have to do an optimistic concurrency approach with WATCH, which introduces retries under contention. With Lua, the entire read-decide-write sequence runs atomically on the Redis server in a single evaluation — no race conditions, no retries, no round trips between steps. It's a single network round trip from the client, versus minimum 4 round trips for a non-pipelined approach or 2 for a pipeline with WATCH.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_lua_scripts", "multi_exec_limitations", "atomic_read_decide_write", "optimistic_concurrency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Can you walk me through the atomicity guarantees of Lua scripts in Redis? What happens if the script is long-running?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "lua_atomicity_guarantees" }
+    },
+    {
+      "role": "candidate",
+      "content": "Redis is single-threaded for command execution — the event loop processes one command at a time. A Lua script is treated as a single command, so while it's running, nothing else executes. This gives us serializable isolation — the strongest possible. But the flip side is dangerous: a long-running Lua script blocks the entire Redis instance. All other clients queue up waiting. Redis has a lua-time-limit config (default 5 seconds). After that threshold, Redis starts accepting commands again but only SCRIPT KILL and SHUTDOWN NOSAVE — it doesn't actually kill the script automatically. If the script has already performed writes, SCRIPT KILL won't work either because that would leave Redis in an inconsistent state. So we must keep scripts extremely fast — ideally under 1 millisecond. For our rate limiter, the script does O(log N) work for the ZREMRANGEBYSCORE and O(1) for ZCARD and ZADD, where N is the window size. With a window of, say, 1000 requests, that's well under a microsecond on modern hardware.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_single_threaded", "serializable_isolation", "lua_time_limit", "script_kill_limitations", "performance_complexity"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. You mentioned network round trips. Tell me about EVALSHA and script caching — how does that work and why does it matter?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "evalsha_script_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "When you use EVAL, you send the full script text to Redis on every invocation. For our rate limiter handling 100K+ requests per second, sending even a 500-byte script each time adds up — that's 50MB/s of redundant network traffic. EVALSHA solves this. You first load the script with SCRIPT LOAD, which returns the SHA1 hash of the script body. Then you call EVALSHA with just the 40-byte hash instead of the full script. Redis caches scripts in memory indefinitely (until SCRIPT FLUSH or server restart). The pattern in production: on application startup, load the script and cache the SHA1. On every rate limit check, call EVALSHA. If it returns a NOSCRIPT error — which happens after a Redis restart or failover — fall back to EVAL with the full script, which automatically re-caches it, then resume using EVALSHA. Most Redis client libraries handle this fallback transparently. The bandwidth savings matter at scale, but more importantly, EVALSHA avoids the overhead of Redis parsing and compiling the Lua bytecode on every call — the compiled bytecode is cached alongside the script.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["evalsha_script_caching", "sha1_hashing", "noscript_fallback", "bandwidth_optimization", "bytecode_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you debug Lua scripts running inside Redis? That seems like it could be a nightmare.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "lua_debugging" }
+    },
+    {
+      "role": "candidate",
+      "content": "It is one of the harder aspects. Redis has a built-in Lua debugger (redis-cli --ldb), which lets you set breakpoints, step through execution, and inspect variables. But it only works in a synchronous debugging mode that forks a new session — you'd never use it in production. For production debugging, my approach is multi-layered. First, I use redis.log() within the script to emit messages to the Redis log at configurable severity levels — useful for rare edge cases. Second, I structure the script to return diagnostic information alongside the result. Instead of just returning 0 or 1 for allowed/denied, I return a table: {allowed, current_count, oldest_timestamp, window_size}. The application can log these for debugging without modifying the script. Third, I maintain a test harness that runs the exact same Lua script against a local Redis instance with crafted scenarios — boundary conditions, expired windows, exactly-at-limit cases. Fourth, I use MONITOR command on a staging Redis to see the raw commands the Lua script executes internally. The key principle is: keep Lua scripts as small and deterministic as possible — complex business logic belongs in the application, not in Lua.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lua_debugging", "redis_ldb", "redis_log", "diagnostic_return_values", "test_harness", "monitor_command"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk performance. How does a Lua-based rate limiter compare to a pure-command approach in terms of throughput? Have you benchmarked this?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "lua_performance_benchmarks" }
+    },
+    {
+      "role": "candidate",
+      "content": "I have benchmarked this in a previous system. The results were compelling. A pure-command approach using pipelined ZREMRANGEBYSCORE + ZCARD + ZADD + EXPIRE takes 4 commands per request but only 1 RTT with pipelining. However, it's not atomic — under high concurrency, race conditions cause over-admission by 5-15%. Adding WATCH/MULTI/EXEC for correctness dropped throughput by about 40% due to retries under contention. The Lua approach: single EVALSHA call, one RTT, fully atomic. Throughput was about 120K operations per second on a single Redis 6 instance on modern hardware (c5.xlarge equivalent). The Lua script itself added about 10 microseconds of server-side processing time compared to raw command execution. The dominant cost is still network latency, not Lua execution. Where Lua loses is Redis Cluster — scripts that touch multiple keys must ensure all keys hash to the same slot (using hash tags like {user:123}). If your rate limiter key includes both user ID and endpoint, you need to structure keys carefully. In our case, we use {user_id}:endpoint:rate_limit to force all keys for a user to the same slot.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lua_performance_benchmarks", "throughput_comparison", "race_condition_quantification", "redis_cluster_hash_tags", "key_structure"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about Lua memory limits in Redis? Can a Lua script accidentally consume all available memory?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "lua_memory_limits" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes, this is a real concern. Lua scripts in Redis share the same memory space as Redis data. Redis doesn't enforce a separate memory limit for Lua — if your script creates large tables or strings in Lua, that memory comes from Redis's allocator and counts toward maxmemory. In extreme cases, a script that, say, loads a huge sorted set into a Lua table for processing could trigger OOM or eviction of real data. Mitigations: first, never pull large datasets into Lua variables — use Redis commands within the script to process data in place. For our rate limiter, we call redis.call('ZCARD', key) rather than fetching all members and counting in Lua. Second, Redis 7.0 introduced function-level memory tracking with redis.setresp() and better Lua memory accounting. Third, set the lua-replicate-commands option (now default in Redis 7+) so scripts replicate effects rather than the script itself — this avoids memory-heavy replays on replicas. Fourth, code review all Lua scripts for memory allocation patterns before deployment. The scripts should allocate O(1) memory, never O(N) where N is data-dependent. Our rate limiter script allocates exactly one local variable for the count — it's constant memory regardless of window size.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lua_memory_limits", "maxmemory_interaction", "in_place_processing", "memory_accounting", "constant_memory_scripts"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last question on this deep dive. How do you test Lua scripts? What's your testing strategy for correctness?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "lua_testing_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Testing Lua scripts requires a layered approach because you can't unit test them in isolation from Redis — the redis.call() API only exists inside the Redis runtime. Layer 1: Integration tests against a real Redis instance using testcontainers or a local Redis in CI. I write scenarios that exercise every branch: request within limit, request at exact limit, request over limit, expired window cleanup, empty key (first request), and concurrent requests. Each test sets up state, runs EVALSHA, and asserts both the return value and the resulting Redis state (ZCARD, TTL, etc.). Layer 2: Property-based testing. I use a framework like Hypothesis to generate random sequences of (timestamp, user_id) pairs and verify invariants: the count never exceeds the limit, expired entries are always cleaned up, and the window slides correctly. Layer 3: Chaos testing. I run the rate limiter under load, then kill Redis and verify the NOSCRIPT fallback works correctly on the replica. I also test what happens when the script encounters unexpected data — say, a key that's a string instead of a sorted set (our script checks type first and resets). Layer 4: Shadow mode in production. Deploy the new script alongside the old one, run both, compare results, alert on divergence. Only promote the new script after 24 hours of zero divergence.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["integration_testing", "property_based_testing", "chaos_testing", "shadow_mode", "testcontainers", "invariant_verification"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thorough testing strategy. Thanks for the deep dive on Redis Lua — you clearly have hands-on experience here.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 76,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 9,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Deep practical knowledge of Redis Lua internals including atomicity model, memory behavior, and EVALSHA caching",
+      "Concrete performance benchmarks with real numbers comparing Lua vs MULTI/EXEC approaches",
+      "Comprehensive testing strategy covering integration, property-based, chaos, and shadow testing"
+    ],
+    "weaknesses": [
+      "Did not discuss broader rate limiter design — scope was narrow to Lua implementation",
+      "Requirements gathering and capacity estimation were not covered in this focused deep dive"
+    ]
+  }
+}

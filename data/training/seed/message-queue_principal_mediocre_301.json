@@ -1,0 +1,141 @@
+{
+  "metadata": {
+    "problem_id": "message-queue",
+    "level": "principal",
+    "candidate_profile": "mediocre",
+    "total_exchanges": 22,
+    "generation_id": "seed_301"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed message queue platform — think building Kafka as a managed service. I want to understand both the platform vision and the technical internals. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several high-level questions. Who are our customers — are we building this for internal teams within our company or as a public cloud offering? What's the SLA we need to provide — what availability and durability targets? And what's the engineering org size — how many engineers do we have to build and operate this?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["customer_base", "sla_targets", "org_capacity"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Public cloud offering like AWS Kinesis or Confluent Cloud. 99.99% availability SLA, zero data loss. 50 engineers. Scale target: 10 million messages per second aggregate across all tenants. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "platform_vision" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the platform vision. A managed message queue needs to solve three problems: provisioning, operation, and observability. For provisioning, customers should be able to create a topic with desired throughput and retention via an API call — no ticket filing. We auto-provision the underlying infrastructure. For operation, the platform handles replication, rebalancing, scaling, and patching without customer involvement. For observability, we provide out-of-the-box dashboards showing throughput, consumer lag, error rates, and capacity utilization. The differentiator is serverless pricing — customers pay per message, not per broker. This means we need a multi-tenant architecture where many customers share underlying broker infrastructure.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["managed_service", "self_service_provisioning", "multi_tenancy", "serverless_pricing", "observability"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good platform vision. Multi-tenancy is interesting — how do you isolate noisy neighbors? One customer doing 1M messages per second shouldn't degrade the experience of another customer doing 100 messages per second.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "tenant_isolation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Tenant isolation has multiple dimensions. For compute isolation, we run a fleet of broker nodes and assign each tenant's partitions to specific brokers. High-throughput tenants get dedicated broker nodes; small tenants share brokers with bin-packing. For storage isolation, each tenant's data is in separate disk directories with per-tenant I/O quotas using Linux cgroups. For network isolation, we apply per-tenant rate limits at the proxy layer — each tenant has a configured throughput cap. If they exceed it, we return a throttle response. We also separate the data plane (message production and consumption) from the control plane (topic creation, configuration changes) so a burst of management operations doesn't affect message delivery.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tenant_isolation", "noisy_neighbor", "cgroups", "rate_limiting", "control_plane_data_plane"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong answer on isolation. Let me test the technical depth. A producer sends a message to a partition. Walk me through exactly what happens on the partition leader from the moment the TCP packet arrives to the moment the ACK goes back.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "write_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "The message arrives at the broker, gets validated — we check authentication, authorization, and that the topic exists. Then it's... appended to the partition's log. The log is a file on disk. We use OS page cache for performance — the write goes to the page cache and the OS flushes to disk asynchronously. Then we need to replicate to followers before ACKing. The followers pull the message and append to their logs. Once enough replicas confirm, we ACK the producer.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["authentication", "page_cache", "replication", "ack_protocol"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You said 'the followers pull the message.' How exactly does that work? Is it push or pull? How does the leader know when enough replicas have the message? What's the in-sync replica set and how is membership determined?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "replication_protocol" }
+    },
+    {
+      "role": "candidate",
+      "content": "In Kafka's model, it's pull-based — followers continuously fetch from the leader. The leader tracks which offset each follower has reached. A follower is 'in-sync' if it's within a certain number of messages or time of the leader. The ISR set is the group of replicas that are caught up. When a producer sends a message with acks=all, the leader waits until all ISR members have the message. If a follower falls too far behind, it's removed from the ISR. But I'm fuzzy on the exact mechanism — is it the leader that removes the follower from ISR, or does the controller manage that?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["pull_replication", "isr", "acks_all", "follower_lag"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The leader manages ISR locally. If a follower hasn't fetched within replica.lag.time.max.ms, it's removed from the ISR and the leader reports the change to the controller. Now, what happens during a consumer rebalance? A consumer in a group crashes — walk me through what happens.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "consumer_rebalancing" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a consumer crashes, it stops sending heartbeats. The group coordinator detects this after a timeout and triggers a rebalance. The remaining consumers are notified and... I think they all stop consuming, report their current offsets, and the coordinator reassigns partitions. Then each consumer resumes from the new assignment, reading from the last committed offset for each partition. But I'm not sure about the details of the rebalance protocol — is it a stop-the-world event or can it be incremental?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["heartbeat", "group_coordinator", "rebalance_protocol", "offset_commit"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "In the original protocol, it's stop-the-world — all consumers pause during rebalance. Kafka introduced cooperative incremental rebalancing to reduce the pause. Let me pivot. How would you handle the multi-tenancy data storage — 10 million messages per second across all tenants on shared disks?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "storage_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 10M messages per second with 1KB average, that's 10GB per second of writes. With a 7-day default retention, we're storing about 6PB. We'd use a tiered storage approach: hot data (last 24 hours) stays on local NVMe SSDs for low-latency reads, and older data is offloaded to object storage like S3 with a lazy-loading mechanism. This dramatically reduces the local disk requirement. For the NVMe tier, we need roughly 864TB of storage across the cluster — maybe 50-100 broker nodes with 10-20TB of NVMe each.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tiered_storage", "nvme_ssd", "object_storage", "retention_policy", "capacity_planning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good storage architecture. How do you handle the operational side — scaling broker nodes up and down?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cluster_operations" }
+    },
+    {
+      "role": "candidate",
+      "content": "Adding a broker is the easy part — we add the node and the controller starts assigning new partitions to it. The hard part is partition reassignment — moving existing partitions to rebalance load. Each partition move involves copying the log data from the old broker to the new one, which can be gigabytes. We need to throttle this to avoid saturating the network and impacting live traffic. I'd do reassignment during off-peak hours and limit the bandwidth per reassignment to 100Mbps. For removing a broker, we drain it first — move all its partitions to other brokers — then shut it down.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["partition_reassignment", "broker_scaling", "throttling", "drain_procedure"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How about security for a multi-tenant public cloud service?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "security" }
+    },
+    {
+      "role": "candidate",
+      "content": "Security has multiple layers. Authentication: each tenant gets API keys (or mTLS certificates) that identify them. Authorization: ACLs per topic — tenant A can't read tenant B's topics. Encryption: TLS for data in transit, and disk encryption for data at rest — either using the cloud provider's encrypted volumes or application-level encryption with per-tenant keys for true isolation. We also need audit logging — every administrative action and access attempt is logged with tenant identity for compliance. Network isolation: tenants connect through a private VPC endpoint, not the public internet.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["authentication", "authorization", "encryption", "audit_logging", "vpc_endpoint"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How would you structure the engineering team of 50 to build this?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "team_structure" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd organize into four teams. The Core team (15 engineers) owns the broker internals — replication, storage engine, producer/consumer protocols. The Platform team (12 engineers) owns multi-tenancy, provisioning, scaling, and the control plane API. The Reliability team (8 engineers) owns monitoring, alerting, chaos testing, and incident response. The Clients team (8 engineers) owns the producer and consumer SDKs in multiple languages and the CLI tools. The remaining 7 are cross-functional: product management, technical writing, and a small team for the web console UI. I'd hire a principal engineer to own the storage engine since that's the most technically complex component.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["team_structure", "org_design", "hiring_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Good platform thinking, but the internals of replication and consumer rebalancing needed more depth. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 53,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 6,
+      "caching_strategy": 4,
+      "scalability": 7,
+      "failure_handling": 5,
+      "communication": 7
+    },
+    "strengths": [
+      "Excellent platform vision — multi-tenancy, serverless pricing, and tenant isolation were thoroughly addressed",
+      "Strong tiered storage architecture with concrete capacity calculations",
+      "Thoughtful team structure for a 50-person engineering org"
+    ],
+    "weaknesses": [
+      "Could not explain partition leader write path in detail beyond surface-level description",
+      "Consumer rebalancing protocol was acknowledged as a gap — unable to explain cooperative rebalancing",
+      "ISR management was fuzzy — uncertain whether leader or controller manages ISR membership",
+      "No discussion of exactly-once semantics or transaction support"
+    ]
+  }
+}

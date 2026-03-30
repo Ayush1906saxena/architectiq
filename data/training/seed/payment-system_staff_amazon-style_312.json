@@ -1,0 +1,141 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "staff",
+    "candidate_profile": "amazon-style",
+    "total_exchanges": 22,
+    "generation_id": "seed_312"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a payment processing system. This is a Tier-1 service — if it goes down, revenue stops. Let's start with the operational requirements.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "tier1_service" }
+    },
+    {
+      "role": "candidate",
+      "content": "As a Tier-1 service, availability is the top priority after correctness. I'd target 99.999% availability — five nines — which allows only 5.26 minutes of downtime per year. This means: no single points of failure, automated failover at every layer, and the ability to survive any single component failure without user impact. The SLOs: charge API responds within 1 second at p99. Refund API within 2 seconds. Webhook delivery within 30 seconds. All payment state transitions are durable — once we acknowledge a charge to the caller, it must be persisted.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["availability", "sla_slo", "tier1_requirements", "durability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Five nines is ambitious. What's the blast radius of a deployment to this service?",
+      "annotation": { "action": "probe", "phase": "requirements", "target_concept": "blast_radius" }
+    },
+    {
+      "role": "candidate",
+      "content": "Blast radius must be minimized at every level. Cell-based architecture: instead of one global deployment, we partition the system into independent cells. Each cell handles a subset of merchants — say 5% of total traffic. A bad deployment to one cell affects only 5% of merchants. Deployment within a cell: canary one instance first with 1% of that cell's traffic for 30 minutes. Monitor error rate, latency, and — critically — payment success rate. If payment success rate drops by even 0.5%, automatic rollback. Then ramp to 10%, 50%, 100% over 2 hours. Between cells: deploy to one cell, bake for 4 hours, then roll to the next. Full fleet deployment takes 2-3 days. This is slow by design — speed of deployment is less important than safety for a payment system.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["blast_radius", "cell_architecture", "canary_deployment", "deployment_safety"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me more about the cell architecture. How do you partition merchants into cells?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "cell_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each cell is a fully independent deployment: its own application servers, its own database, its own cache, its own queues. No shared infrastructure between cells except the routing layer. Merchant assignment: we hash the merchant_id to assign them to a cell. A routing service at the edge maps each incoming API request to the correct cell based on the merchant. Cells are sized to handle 10% of total traffic each, so 10 cells. The routing service is the only shared component — it's extremely simple (a lookup table) and replicated across all regions. If a cell becomes unhealthy, we can mark it as draining and re-route its merchants to a healthy cell that has spare capacity. Each cell maintains 50% headroom for exactly this purpose.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cell_architecture", "blast_radius", "routing_service", "capacity_headroom"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the canary process in detail. What metrics trigger automatic rollback?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "canary_metrics" }
+    },
+    {
+      "role": "candidate",
+      "content": "The canary runs on a dedicated instance that receives 1% of the cell's traffic via weighted load balancing. Metrics compared between canary and baseline: First, payment success rate — the most important metric. If it drops more than 0.5 percentage points below the baseline, instant rollback. Second, error rate — 5xx responses. If canary 5xx rate exceeds 0.1%, rollback. Third, p99 latency. If canary p99 exceeds 2x the baseline p99, rollback. Fourth, a custom correctness metric: the rate of idempotency key conflicts (same key, different response). Any non-zero rate triggers rollback. The rollback is fully automated — the deployment pipeline monitors these metrics every 30 seconds and acts within 60 seconds. We also have a manual kill switch — any engineer can abort a deployment from a Slack bot. Post-rollback, the pipeline creates a SEV-3 ticket and pages the deploying team.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["canary_metrics", "automated_rollback", "deployment_safety"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's talk about the data layer. How do you design the database for a Tier-1 payment system?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Within each cell, I'd use Aurora PostgreSQL with Multi-AZ deployment. Synchronous replication to a standby in a different AZ — zero data loss on failover. The writer instance handles all payment writes. Read replicas handle read-heavy operations like payment history and reporting. The schema follows event sourcing: the payments table stores the current state, and a payment_events table stores every state transition immutably. Writes use serializable isolation for critical operations like refund amount validation. Backup strategy: continuous WAL archiving to S3, plus daily snapshots. Point-in-time recovery to any second within the last 35 days. For disaster recovery: the cell's Aurora cluster is replicated to a DR region asynchronously. RPO is under 1 second. RTO is under 5 minutes with automated failover.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_design", "aurora_postgres", "synchronous_replication", "event_sourcing", "disaster_recovery"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned the rollback plan briefly. A deployment passes canary but fails at 50% rollout. Walk me through the rollback.",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "rollback" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rollback steps: First, the deployment pipeline detects the regression at 50%. It immediately stops routing traffic to the new instances and shifts all traffic to the old instances — this takes about 30 seconds via the load balancer. Second, we verify the old instances can handle 100% of the cell's traffic — they should be running at 50% utilization since half the traffic was on new instances. Third, we terminate the new instances. Fourth, we check for any data corruption: did the new code write anything incorrect to the database? We run a validation query comparing recent payment states against the payment events log. If inconsistencies are found, we flag them for manual review. Fifth, we send a notification to the team with the deployment failure reason, the affected time window, and the number of impacted transactions. The pipeline then blocks future deployments until a human reviews and approves. Total rollback time: under 2 minutes from detection to full recovery.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rollback", "data_validation", "traffic_shifting", "deployment_safety"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle database schema migrations for a Tier-1 payment service? You can't have downtime.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "schema_migration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Schema migrations are one of the riskiest operations. We use a multi-phase approach. Phase 1 — expand: add new columns or tables without removing or modifying existing ones. The old code ignores the new columns. This is safe because it's purely additive. Phase 2 — migrate: deploy code that writes to both old and new structures. Backfill existing data. Verify that old and new data are consistent. Phase 3 — contract: deploy code that reads only from the new structure. Once confirmed, remove the old columns in a separate migration. Each phase is a separate deployment with its own canary and bake period. The total migration might take 2-3 weeks. We never use ALTER TABLE to rename or change column types on large tables — that locks the table. Instead, we create a new table, dual-write, backfill, then swap. Tools like pg_repack or gh-ost help with this.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["schema_migration", "expand_migrate_contract", "zero_downtime", "online_migration"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "A major external payment processor (like Visa's network) has a partial outage — some transactions succeed, some timeout randomly. How do you handle this?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "partial_outage" }
+    },
+    {
+      "role": "candidate",
+      "content": "A partial outage is harder than a full outage because the circuit breaker doesn't trip — the success rate is still above threshold. Handling: implement an adaptive timeout. If the processor's p99 latency increases 3x, we reduce our timeout to shed the slow requests early rather than tying up threads. Track per-BIN (bank identification number) success rates — the outage might affect specific card issuers. If a specific BIN's success rate drops below 50%, route those transactions to a different processor that uses a different payment network path. For merchants, surface this proactively: expose a status.payments.example.com page showing real-time processor health. Auto-retry failed transactions after 5 minutes if the error type indicates a transient issue. But never auto-retry if the error could be the customer's card being declined — that's not a transient error.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["partial_outage", "adaptive_timeout", "per_bin_routing", "smart_retry"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you test changes to a payment system? You can't test with real money in production.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "testing_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Testing pyramid: Unit tests cover business logic — refund validation, idempotency logic, state machine transitions. Integration tests run against a sandboxed payment processor environment — most processors provide test mode with fake card numbers that simulate various outcomes (success, decline, timeout, 3DS challenge). Load tests: replay anonymized production traffic against a staging cell to verify performance under load. Shadow testing: new versions process a copy of real production traffic but don't actually charge cards — we compare the decisions the new code would make against the old code's actual decisions. Chaos tests: inject failures — database slowness, processor timeouts, network partitions — in the staging cell and verify the system degrades gracefully. Finally, production testing with synthetic transactions: a small pool of test merchants continuously run end-to-end payment flows in production using test card numbers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["testing_strategy", "sandbox_testing", "shadow_testing", "chaos_testing", "synthetic_transactions"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last area: how do you handle compliance and auditing? Regulators can ask for records.",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "compliance" }
+    },
+    {
+      "role": "candidate",
+      "content": "Compliance requires immutable, complete records. The payment_events table is append-only — we never delete or modify entries. We stream events to a separate audit data warehouse that's isolated from production — different AWS account, different access controls. Only the compliance team can query it. Records are retained for 7 years (per financial regulations). Access to production payment data requires MFA and is logged — every database query by an engineer is recorded. PCI-DSS: we scope ourselves to SAQ-A by never handling raw card data. SOC 2 Type II: annual audit of our controls, including deployment processes, access management, and incident response. We also run quarterly disaster recovery drills: simulate a region failure and verify we can continue processing payments and produce complete audit reports from the DR site.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["compliance", "audit_trail", "data_retention", "pci_compliance", "soc2"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong operational focus for a Tier-1 service. Thanks for the detailed walkthrough.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 75,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 6,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 4,
+      "scalability": 8,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Outstanding blast radius control with cell-based architecture",
+      "Excellent deployment safety — canary metrics, automated rollback, and schema migration strategy",
+      "Strong operational maturity — testing pyramid, compliance, disaster recovery drills"
+    ],
+    "weaknesses": [
+      "API design was not discussed — no endpoint contracts or versioning strategy",
+      "Caching was entirely absent from the discussion",
+      "Capacity estimation was minimal — no QPS, storage, or infrastructure cost calculations",
+      "Payment correctness (idempotency, reconciliation) was less detailed than expected for a payment system"
+    ]
+  }
+}

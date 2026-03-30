@@ -1,0 +1,179 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_288"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a video streaming platform — think YouTube or Netflix. Users upload videos and other users watch them. Before we dive in, what questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great topic. Let me clarify a few things: What's our expected scale — how many daily active users, concurrent viewers, and video uploads per day? What video quality ranges do we need to support — SD through 4K? And is this a user-generated content platform like YouTube or a licensed content platform like Netflix?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "scale_estimation", "content_type"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good questions. Assume 500 million DAU, 5 million concurrent viewers at peak, and 500K new video uploads per day. User-generated content, so anything from 360p to 4K. Average video length is 7 minutes. What else do you need?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "What's the expected time from upload to playback availability — do users expect real-time or is a few minutes acceptable? Also, do we need to support live streaming or just video-on-demand? And what about geographic distribution — is the audience global?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["upload_latency", "live_streaming", "geographic_distribution"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Video-on-demand only for now. Processing within 5 minutes is acceptable. Global audience with heavy concentration in North America, Europe, and Asia. Let's begin the design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with capacity estimation. 500K uploads per day at an average of 7 minutes. If the average raw upload is 500MB (assuming 1080p at ~10 Mbps bitrate), that's 250TB of raw uploads per day. After transcoding to multiple resolutions — say 360p, 480p, 720p, 1080p, and 4K — each video might have 5 renditions, so roughly 1PB of processed content per day. For reads, 5 million concurrent viewers at an average bitrate of 5 Mbps is 25 Tbps of egress bandwidth. That's massive — CDN is absolutely critical.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "storage_estimation", "bandwidth_estimation", "cdn"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good numbers. Walk me through the upload-to-playback pipeline end to end.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "upload_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The pipeline has several stages. First, the client performs a chunked upload — we split the video into 5MB chunks on the client side. The client requests a pre-signed upload URL from our Upload Service, then uploads chunks directly to S3. Chunked upload is critical because users have unreliable connections and we need resumability — if a chunk fails, we retry just that chunk, not the whole file. Once all chunks are uploaded, the client notifies the Upload Service which triggers a completion event.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chunked_upload", "s3_presigned_url", "upload_resumability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What happens after the upload completes?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "transcoding_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The Upload Service publishes a message to an SQS transcoding queue. A fleet of transcoding workers picks up jobs from this queue. Each worker pulls the raw video from S3, runs FFmpeg to produce multiple renditions. For a 7-minute video, we generate 5 quality levels. Each rendition is split into 4-second segments — this is the HLS format. The worker outputs the segments back to S3 and generates an HLS manifest file (m3u8) that lists all segments with their durations and quality levels. The master manifest references sub-manifests for each bitrate. Once transcoding completes, the worker updates the Video Metadata Service to mark the video as 'READY' and invalidates any CDN cache entries for that video's page.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["transcoding_queue", "ffmpeg_workers", "hls_manifest", "video_segmentation", "sqs"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle transcoding at this scale — 500K videos a day, each needing 5 renditions?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "transcoding_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's 2.5 million transcoding jobs per day, about 29 per second. Each job takes roughly 2-3 minutes on a GPU-accelerated instance. So we need about 5,000 concurrent workers at peak. I'd use an auto-scaling group of EC2 GPU instances — g5 instances with NVIDIA GPUs for hardware-accelerated encoding. During off-peak hours we scale down to maybe 2,000. We can also split a single video's renditions into parallel jobs — 5 workers handle one video simultaneously, cutting latency from 15 minutes to 3 minutes. The SQS queue handles backpressure naturally — if we fall behind, the queue grows and we scale up.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["auto_scaling", "gpu_transcoding", "parallel_processing", "backpressure"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice. Now let's talk about the playback side. How does the client actually stream the video?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "adaptive_bitrate" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a user clicks play, the client first fetches the master m3u8 manifest from the CDN. This manifest lists available quality levels with their bandwidth requirements. The video player implements adaptive bitrate (ABR) streaming. It starts by estimating available bandwidth — usually by measuring the download speed of the first few segments. Based on that, it selects the appropriate quality level. As the user watches, the player continuously monitors buffer health and download throughput. If bandwidth drops — say the user goes from WiFi to cellular — the player switches to a lower bitrate rendition for the next segment. This is seamless because each segment is self-contained and independently decodable. The ABR algorithm balances three signals: throughput estimation, buffer level, and quality stability to avoid annoying oscillation between resolutions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["adaptive_bitrate", "hls_streaming", "bandwidth_estimation", "buffer_management", "cdn"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What CDN architecture would you use for serving at 25 Tbps globally?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "cdn_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "At this scale, a single CDN provider won't cut it — we'd use a multi-CDN strategy. We'd have contracts with CloudFront, Akamai, and Fastly, and use DNS-based or client-side CDN selection to route users to the provider with the best performance for their region. For popular content — the top 10% of videos — we'd push proactively to CDN edge caches using origin push rather than waiting for the first viewer to cause a cache miss. For long-tail content, we rely on origin-pull from our S3 origin. I'd also build a mid-tier cache layer between origin and edge — regional PoPs that serve as a shield to reduce origin load.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_cdn", "cdn_push_pull", "origin_shield", "geographic_distribution"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss the metadata layer. How do you store and serve video metadata?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "metadata_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Video metadata includes title, description, uploader, tags, view count, upload timestamp, processing status, and manifest URLs. I'd use a combination: DynamoDB for the core video record because it gives us single-digit millisecond reads at any scale with partition key on video_id. For search and discovery — title search, tag filtering, trending — I'd use Elasticsearch. View counts are high-write, so I'd buffer them in Redis and flush to DynamoDB periodically in batches rather than incrementing on every view. The schema in DynamoDB: partition key is video_id, and we store the manifest URL, status, resolution metadata, and thumbnail URLs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dynamodb", "elasticsearch", "redis_counters", "database_schema"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if a transcoding worker crashes midway through processing?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "fault_tolerance" }
+    },
+    {
+      "role": "candidate",
+      "content": "SQS visibility timeout handles this naturally. When a worker picks a message, SQS hides it for a configured timeout — say 10 minutes. If the worker crashes, it never deletes the message, so after 10 minutes SQS makes it visible again and another worker picks it up. We also set a max receive count — after 3 failed attempts, the message moves to a dead-letter queue for manual inspection. The transcoding job is idempotent: re-processing just overwrites the same S3 paths. For partially completed multi-rendition jobs, each rendition is a separate SQS message, so only the failed rendition retries.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sqs_visibility_timeout", "dead_letter_queue", "idempotency", "fault_tolerance"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What about content moderation — how do you prevent harmful content from being served?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "content_moderation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Content moderation fits into the pipeline between upload and publish. After chunks are assembled but before transcoding, we run an automated moderation step. We sample keyframes from the video — one every 2 seconds — and run them through a pre-trained moderation ML model that flags nudity, violence, and other policy violations. We also run audio through a speech-to-text model and check for hate speech. If the automated check flags the content, the video goes into a human review queue and its status stays 'PENDING_REVIEW'. Only videos that pass moderation move to 'TRANSCODING' status. This adds maybe 30 seconds to the pipeline but prevents harmful content from ever reaching viewers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["content_moderation", "ml_classification", "pipeline_gating"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the recommendation feed — the homepage that shows users what to watch next?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "recommendation_system" }
+    },
+    {
+      "role": "candidate",
+      "content": "The recommendation feed is a separate service. It precomputes personalized feeds offline using a batch pipeline — we run a collaborative filtering model nightly on user watch history and engagement data. The output is a ranked list of video_ids per user, stored in a fast KV store like Redis or DynamoDB. When the user opens the app, we fetch their precomputed feed and hydrate it with fresh metadata. For new users without history, we fall back to popularity-based recommendations — trending videos in their region. The feed service also mixes in real-time signals: if a user just watched 3 cooking videos, we boost cooking content in their next refresh using a lightweight re-ranking layer.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["recommendation_system", "collaborative_filtering", "batch_processing", "real_time_ranking"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running short on time. How would you handle a viral video — one that suddenly gets millions of views in minutes?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "hot_key_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Viral videos create a hot key problem. The CDN edge caches are the first line of defense — once the video segments are cached at edge PoPs, even millions of concurrent viewers are served from cache without hitting origin. But the metadata requests can spike. I'd handle this with multiple layers: first, the CDN caches the metadata API response with a short TTL of 30 seconds. Second, application-level caching in Redis with the video_id as key. Third, for view count updates, I'd use a write-behind buffer — increment a local counter and flush to Redis every 5 seconds to avoid hammering the counter. If a single Redis shard becomes the bottleneck, I'd replicate that key across multiple read replicas.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hot_key_handling", "cdn_caching", "write_behind", "read_replicas"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last question — any thoughts on cost optimization at this scale?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": "cost_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Cost is dominated by three things: storage, CDN egress, and transcoding compute. For storage, I'd move videos older than 90 days with low view counts to S3 Infrequent Access — saves about 45% on storage costs. Videos not viewed in a year go to Glacier with on-demand re-transcoding if accessed. For CDN, we negotiate volume discounts and use the multi-CDN strategy to play providers against each other. For transcoding, spot instances can reduce GPU costs by 60-70% since our queue-based system handles interruptions gracefully — a preempted job just goes back to the queue. I'd also avoid transcoding to 4K unless the source is actually 4K quality.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cost_optimization", "storage_tiering", "spot_instances", "s3_lifecycle"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. You covered the entire upload-to-playback pipeline with solid depth. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 76,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "End-to-end pipeline from chunked upload through transcoding to HLS playback was comprehensive",
+      "Excellent understanding of adaptive bitrate streaming and CDN architecture",
+      "Strong cost optimization reasoning with concrete numbers on savings"
+    ],
+    "weaknesses": [
+      "API design was mentioned implicitly but not formally specified with endpoints and contracts",
+      "Could have discussed DRM and content protection for premium content"
+    ]
+  }
+}

@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "sde2",
+    "candidate_profile": "good",
+    "total_exchanges": 20,
+    "generation_id": "seed_073"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing service like Uber. Focus on the core ride matching flow. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few questions. How many riders and drivers are we supporting? Is this a single city or global? And do we need to support different ride types like shared rides or just point-to-point?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["scale", "geographic_scope", "ride_types"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's design for a single large city — 1 million active riders, 50,000 active drivers. Just point-to-point rides. Matching should happen within 10 seconds. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "What's the request volume? At peak hours, how many ride requests per second? And for location tracking — how frequently do drivers send their location updates?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["qps", "location_updates"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "At peak: 100 ride requests per second. Drivers send location updates every 3 seconds. Let's start designing.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay let me think about the numbers. 50,000 drivers sending location every 3 seconds — that's about 17,000 location updates per second. Plus 100 ride requests per second. The location updates are the hot path. Let me outline the main components: a Rider App that sends ride requests, a Driver App that sends location updates and receives ride offers, a Ride Matching Service, a Location Service that tracks driver positions, and a Trip Service that manages active trips.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["capacity_estimation", "system_components", "location_updates"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good component breakdown. Walk me through the ride request flow.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "ride_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "The rider opens the app, enters their destination, and taps 'Request Ride.' The request goes to our API server with the rider's current GPS coordinates and destination. The Ride Matching Service queries the Location Service for nearby available drivers. It selects the best match — probably the closest available driver — and sends a ride offer to that driver's app via a push notification or WebSocket connection. The driver has 15 seconds to accept. If they accept, we create a Trip in the Trip Service and notify the rider. If they decline or don't respond, we try the next closest driver.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["ride_matching", "websocket", "driver_selection", "trip_management"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the Location Service store and query driver positions? When you need to find 'drivers near this location,' how does that work?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "location_indexing" }
+    },
+    {
+      "role": "candidate",
+      "content": "The simplest approach: store each driver's latest latitude and longitude in a database — maybe Redis for speed. When we need nearby drivers, we compute the distance from the rider's position to each available driver using the Haversine formula, which gives the distance between two lat/long points on a sphere. We filter drivers within, say, 5km and sort by distance. With 50,000 drivers, iterating through all of them and computing distance is actually fast — it's just math on 50K entries, which takes milliseconds in memory.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["haversine", "redis", "brute_force_search"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That works at 50K drivers. What if we scaled to 500K drivers in a larger market — would the brute force approach still work?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "spatial_indexing" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 500K, iterating all drivers is still probably fast enough — 500K distance calculations in memory should still be under 10ms on modern hardware. But if we scale further or need to be more efficient, we could use a spatial index. One approach is to divide the city into a grid — each cell is, say, 1km x 1km. We maintain a mapping of grid_cell_id to list of driver_ids. When we need nearby drivers, we compute which grid cell the rider is in and check that cell plus the 8 surrounding cells. That limits our search to a small subset of drivers. I know there are fancier structures like geohashing or R-trees, but the simple grid would work well for a city.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["spatial_indexing", "grid_based_search", "geohashing"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How do you handle the 17,000 location updates per second from drivers?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "location_updates" }
+    },
+    {
+      "role": "candidate",
+      "content": "Drivers maintain a persistent WebSocket connection to our backend. Every 3 seconds, the driver app sends a location update with lat, long, timestamp, heading, and speed. Our server updates the driver's position in Redis. It's basically a SET operation per update — overwriting the previous position. At 17K updates/second, a single Redis instance can handle this easily — Redis does 100K+ operations per second. We'd also update the grid index if the driver moved to a different cell. For durability, we don't need to persist every location update — we only care about the latest position. But we might log locations to a time-series database for trip tracking and route reconstruction.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["websocket", "redis", "location_updates", "time_series"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if the rider's app or driver's app loses connection during a trip?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "connection_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the rider loses connection, the trip continues — the driver still has the destination and can complete the ride. When the rider reconnects, the app fetches the current trip state from the Trip Service. If the driver loses connection, it's trickier. We stop receiving location updates, so we can't track the trip. I'd set a timeout — if no update for 30 seconds, alert the rider that we've lost contact with the driver. If it's a temporary blip (going through a tunnel), the driver reconnects and sends their latest position. If the driver is truly unreachable for 5+ minutes, we'd mark the trip as interrupted and offer the rider a new ride.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["connection_failure", "trip_state_management", "reconnection", "timeout"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How do you compute the fare for a ride?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "The fare has a base fare plus a per-mile and per-minute charge. We compute it from the actual trip route — using the driver's GPS trail. The Trip Service calculates total distance from the sequence of GPS points and the elapsed time. Fare = base + (distance * per_mile_rate) + (time * per_minute_rate). We'd also need surge pricing — when demand exceeds supply, the price multiplier goes up. We can compute a supply/demand ratio per grid zone: if a zone has 50 requests in the last 5 minutes but only 10 available drivers, the surge multiplier goes up.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fare_calculation", "surge_pricing", "supply_demand"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the database. What data do you store and where?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use different stores for different needs. Redis for real-time state: driver locations, driver availability status, active trip tracking — all volatile, in-memory. PostgreSQL for persistent data: user accounts, driver profiles, trip history, payment records. These need ACID transactions, especially for payments. The trip history table would be the largest — with 100 rides per second, that's 8.6 million trips per day. At maybe 1KB per trip record, that's 8.6GB per day — very manageable for Postgres. Over a year, 3TB — we'd want to partition by date.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["polyglot_persistence", "redis", "postgresql", "table_partitioning", "capacity_estimation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're wrapping up. What would you add to make this production-ready?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. First, ETA estimation — when matching, we should consider not just straight-line distance but actual driving time using a routing API. A driver 2km away on the highway is better than one 1km away in gridlock. Second, safety features — share trip status with trusted contacts, panic button that alerts support. Third, monitoring — track matching time, trip completion rate, cancellation rate, and driver utilization. Fourth, handling of the payment flow — authorization when the trip starts, capture when it ends, with proper handling of tips and fare disputes.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["eta_estimation", "safety_features", "monitoring", "payment_flow"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You built a clean, practical design that works for the given scale. The brute-force location matching was a refreshingly honest approach — engineers sometimes overcomplicate things with geohashing when simple math is fast enough. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 56,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 5,
+      "scalability": 5,
+      "failure_handling": 6,
+      "communication": 7
+    },
+    "strengths": [
+      "Pragmatic approach — chose simple brute-force location matching appropriate for the scale",
+      "Good capacity estimation with concrete numbers for location updates and storage",
+      "Clean separation of real-time (Redis) and persistent (PostgreSQL) data"
+    ],
+    "weaknesses": [
+      "No discussion of distributed architecture — single-server Redis is a SPOF",
+      "Didn't discuss matching optimization beyond nearest driver (ETA, driver ratings)",
+      "Limited scalability discussion — what happens when expanding to multiple cities?"
+    ]
+  }
+}

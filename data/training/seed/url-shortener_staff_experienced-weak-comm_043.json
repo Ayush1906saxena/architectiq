@@ -1,0 +1,141 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "staff",
+    "candidate_profile": "experienced-weak-comm",
+    "total_exchanges": 22,
+    "generation_id": "seed_043"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service like bit.ly. Large scale, high availability. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "So we're talking massive scale right? Like billions of URLs. I've actually built something similar. Quick question — do we need analytics? And what about custom short codes?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["scale", "analytics", "custom_codes"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes, 200 million URLs per day. Analytics on click counts. Custom and auto-generated codes. Let's design it.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay so first thing — we need to think about the database sharding strategy. With 200 million URLs per day we're going to accumulate billions of records. I'd use hash-based sharding on the short code across maybe 256 shards. Each shard is a PostgreSQL instance with — oh wait, actually, before I get into that, we should probably talk about the CDN layer. If we put a CDN in front of the redirect endpoint, we can serve a huge percentage of redirects from the edge. Popular URLs like marketing campaign links get millions of clicks, and the CDN handles all of that without touching our origin. We could use Cloudflare or CloudFront with — actually, hold on, the analytics piece is interesting too. If we're doing click counting, we need to decide whether to count at the CDN edge or at our origin. If the CDN serves a 301 redirect from cache, we never see the request, so we lose the analytics data. That's a fundamental tension between—",
+      "annotation": { "quality": "mixed", "concepts_mentioned": ["sharding_strategy", "cdn_redirect", "analytics_pipeline", "301_vs_302"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've touched on three different topics in 30 seconds — sharding, CDN, and analytics. Let's be structured. Can you start with the high-level architecture? What are the main components and how does a request flow through them?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, sorry. High-level: there are two main flows. Write path: client POSTs a long URL, gets back a short code. Read path: client GETs the short code, gets a 302 redirect to the original URL. Components: load balancer, application servers, a code generation service, the database, a Redis cache, and an analytics pipeline. For the write path, the app server calls the code generation service for a unique short code, stores the mapping in the database, and returns the URL. For the read path, the app server checks Redis first — cache hit means instant redirect. Cache miss goes to the database, populates the cache, then redirects.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["api_design", "load_balancing", "redis_caching", "code_generation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's go deeper on one of those topics. Pick the one you think is most interesting at this scale.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The database sharding is the most critical piece. So 200M URLs/day is about 2,300 writes per second. With a 100:1 read ratio that's 230,000 reads per second. Over 5 years, we're looking at 365 billion rows. A single database can't — oh and the caching layer is really important here too. If we get 99% cache hit rate on reads, only 2,300 reads/sec hit the database, which is totally manageable. But the question is whether we can achieve 99% because—",
+      "annotation": { "quality": "mixed", "concepts_mentioned": ["capacity_estimation", "sharding_strategy", "cache_hit_rate"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You're drifting again — you started with sharding, jumped to caching. Let's stay on sharding. How do you shard 365 billion rows?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right. Hash-based sharding on the short code. Take the short code, compute a hash, mod by the number of shards. I'd start with 256 shards — each holds about 1.4 billion rows over 5 years. PostgreSQL handles that comfortably with proper indexing. The routing logic sits in the application layer — each app server knows the sharding function and connects to the correct shard directly. No proxy layer needed unless we want to abstract it (like Vitess). Adding shards later is painful with hash-mod — you'd need to rehash. So I'd use consistent hashing for the shard mapping, where adding a shard only requires migrating a fraction of keys. The migration itself would use a double-read pattern: check the new shard first, fall back to the old shard during migration. Writes go to the new shard immediately.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hash_sharding", "shard_sizing", "consistent_hashing", "migration_strategy", "double_read"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's much better — focused and deep. Now tell me about the code generation at this scale.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "code_generation" }
+    },
+    {
+      "role": "candidate",
+      "content": "For code generation — so there are several approaches. I could use a Snowflake-like ID generator, or a range-based allocator, or random codes with collision checking. At 2,300 writes/sec, collision probability with random 7-character base62 codes is — hmm, with 62^7 = 3.5 trillion possible codes and 365 billion URLs over 5 years, that's about a 10% fill rate, so collisions would become noticeable. I'd go with the range-based approach: a ZooKeeper or etcd-backed counter service allocates ranges of 1 million IDs to each app server. The app server converts the ID to base62 locally. No collision possible, no per-request coordination. The counter service is only called once per million requests. If the app server dies, we waste at most a million IDs — with 3.5 trillion possible codes, that's negligible.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["code_generation", "range_allocator", "base62_encoding", "collision_analysis", "coordination_avoidance"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good depth. Now let's talk about the analytics pipeline you started mentioning earlier.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "analytics_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "So analytics — every redirect event needs to be captured. On the hot path, when we serve a redirect, we fire an event to Kafka containing the short code, timestamp, IP, user agent, referrer. A stream processor — Flink or Spark Streaming — consumes these events, enriches with geo data from the IP, and writes to — so there's an interesting question here about the CDN and analytics. If we want CDN-level caching for redirects, we have a few options. One: use 302 redirects so the CDN doesn't cache and every request hits our origin. Downside: we can't use CDN caching for the most popular URLs. Two: use CDN edge functions (like Cloudflare Workers) to log analytics events at the edge before redirecting. The worker logs to a lightweight endpoint, and the redirect happens at the edge. Best of both worlds but more complex. Three: use CDN access logs — most CDNs provide logs with a delay. We process those logs for analytics. Simplest, but analytics are delayed by minutes to hours and the log format might not have everything we need.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["analytics_pipeline", "kafka", "stream_processing", "cdn_analytics", "edge_functions", "cdn_logs"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good — that was a coherent analysis of the CDN-analytics trade-off. Which would you choose?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cdn_analytics" }
+    },
+    {
+      "role": "candidate",
+      "content": "Option two — edge functions. The latency overhead of an edge function logging an event is minimal (sub-millisecond), and we get both CDN caching benefits and real-time analytics. The edge function fires a non-blocking POST to a collection endpoint in each region. Those events flow into the same Kafka-based analytics pipeline. The complexity is manageable — the edge function is maybe 20 lines of code.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["edge_functions", "non_blocking_logging", "cdn_analytics"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about failure scenarios? What if your Redis cache goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If Redis goes down, all 230K reads/sec hit the database shards directly. With 256 shards, that's about 900 reads/sec per shard — each PostgreSQL instance handles that easily. So actually, the system degrades gracefully — higher latency (database reads are slower than Redis) but no outage. The CDN layer also helps: even if Redis and the database are slow, the CDN continues serving cached redirects for popular URLs. I'd still run Redis as a cluster with replicas to minimize the chance of a full cache outage. And I'd have circuit breakers on the Redis client — if Redis is unresponsive, skip the cache and go straight to the database rather than waiting for timeouts.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["graceful_degradation", "cache_failure", "circuit_breaker", "shard_load_distribution"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add rate limiting on the URL creation API, malware scanning of destination URLs before shortening, a URL expiration cleanup job, and monitoring on: redirect latency (p50/p99), cache hit rates, analytics pipeline lag, and shard imbalance across the database cluster.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["rate_limiting", "malware_scanning", "monitoring", "cleanup_job"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You have strong technical depth, but I had to redirect you four times to keep the discussion focused. At the staff level, communication structure is as important as technical knowledge. When you did go deep on one topic, the answers were excellent. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 58,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 8,
+      "api_design": 5,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 3
+    },
+    "strengths": [
+      "Deep sharding analysis with concrete sizing and migration strategy",
+      "Excellent code generation comparison with collision probability math",
+      "Strong CDN-analytics trade-off analysis with three clear options"
+    ],
+    "weaknesses": [
+      "Repeatedly jumped between topics without finishing any — required 4 interviewer redirects",
+      "Poor communication structure undermined the demonstration of clearly strong technical knowledge",
+      "Requirements gathering was rushed — jumped into solutions too quickly",
+      "At the staff level, the ability to structure a discussion is a core competency and was clearly lacking"
+    ]
+  }
+}

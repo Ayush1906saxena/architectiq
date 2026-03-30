@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "sde2",
+    "candidate_profile": "good",
+    "total_exchanges": 20,
+    "generation_id": "seed_063"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a key-value store — something like a simplified Redis. Before we dive in, what questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure! A few questions: What's the expected data size — are we talking megabytes or terabytes? Do we need to support just GET and PUT, or also things like DELETE and TTL? And what's our latency target?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["data_size", "api_operations", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good questions. Let's say the entire dataset fits on a single machine — up to 100GB. Support GET, PUT, and DELETE. TTL would be nice but not required. Latency should be single-digit milliseconds for reads. This is for a single-server deployment.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "single_server_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. And for the values — are we talking about small blobs like a few KB each, or could they be larger? Also, do we need persistence, or is in-memory only acceptable?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["value_size", "persistence"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Values are up to 1MB each, keys are up to 256 bytes. We definitely need persistence — data should survive a server restart. Let's start with your high-level approach.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Alright. At a high level, I'd use an in-memory hash map as the primary data structure for serving reads and writes. The hash map gives us O(1) lookups, which is perfect for key-value access. For persistence, I'd use a write-ahead log — every write operation gets appended to a log file on disk before we update the in-memory hash map. On restart, we replay the log to rebuild the hash map.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["hash_map", "write_ahead_log", "persistence"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That makes sense. Walk me through the API — what does the interface look like for clients?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd expose a simple TCP-based protocol. Three commands: PUT key value, GET key, and DELETE key. The server listens on a port, accepts connections, parses the command, and executes it. For PUT, we write to the WAL, then update the hash map, and return OK. For GET, we just look up the hash map and return the value or NOT_FOUND. For DELETE, we write a tombstone to the WAL and remove from the hash map.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["api_design", "tcp_protocol", "tombstone"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now, the WAL will grow forever as writes accumulate. How do you handle that?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "log_compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, good point. I'd implement log compaction. Periodically — say when the WAL exceeds a certain size like 1GB — we take a snapshot of the current hash map and write it to a separate snapshot file. Then we can truncate all WAL entries before that snapshot. On restart, we load the latest snapshot first, then replay only the WAL entries that came after it. This keeps the WAL bounded.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["log_compaction", "snapshots"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if the server crashes in the middle of writing a snapshot?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "crash_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, that's a good edge case. If the snapshot is partially written, it's corrupted. I'd handle this by writing the snapshot to a temporary file first, then doing an atomic rename once it's fully written. The rename operation is atomic on most filesystems. So if we crash mid-write, the temp file is just garbage and we fall back to the previous valid snapshot plus the full WAL.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["crash_recovery", "atomic_rename"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice. What about memory management? If the dataset approaches 100GB, most of that is values. How do you handle memory pressure?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "memory_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "So if we have 100GB of data and the machine has, say, 128GB of RAM, we're tight. One approach is to keep all keys in memory but store values on disk, with a memory-mapped file or a simple file-based lookup. The hash map stores key -> file_offset pairs. Reads would need a disk seek, but with an SSD that's still under a millisecond. For hot keys, we could layer an LRU cache on top that keeps frequently accessed values in memory.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["memory_management", "memory_mapped_files", "lru_cache"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a reasonable approach. How would you handle concurrent access — multiple clients reading and writing at the same time?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "concurrency" }
+    },
+    {
+      "role": "candidate",
+      "content": "For concurrency, I'd use a read-write lock on the hash map. Multiple readers can access it simultaneously, but writes take an exclusive lock. Since writes also need to hit the WAL, the write path is already slower, so the exclusive lock isn't adding much overhead. If we want better write throughput, we could shard the hash map into, say, 16 segments, each with its own lock — so writes to different segments can happen in parallel.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["concurrency", "read_write_lock", "sharding"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good thinking on the striped locking. What about the WAL writes — if two threads try to append to the log at the same time?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "concurrency" }
+    },
+    {
+      "role": "candidate",
+      "content": "The WAL needs to be sequential — entries should be in order. So I'd use a single mutex for WAL appends. To avoid this becoming a bottleneck, I could batch writes — accumulate a small buffer of pending writes and flush them together. This also helps with disk I/O since we do fewer, larger writes instead of many small ones.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["write_batching", "concurrency"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Makes sense. Let's talk about durability guarantees. If I do a PUT and get back OK, is the data guaranteed to be on disk?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "durability" }
+    },
+    {
+      "role": "candidate",
+      "content": "That depends on whether we call fsync after each WAL write. Without fsync, the data might be in the OS page cache but not yet on the physical disk — a power failure could lose it. If we fsync every write, we get strong durability but writes slow down significantly — maybe 1-2ms per write on SSD. A middle ground is to fsync every N writes or every 100 milliseconds, whichever comes first. We could let the client choose the durability level per request.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["durability", "fsync", "page_cache"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good trade-off. Let's say a client reports that reads are getting slow. How would you debug that?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "debugging" }
+    },
+    {
+      "role": "candidate",
+      "content": "First, I'd check system metrics — CPU usage, memory usage, disk I/O. If memory is full and we're swapping, that would explain slow reads. I'd look at whether we're hitting the disk-backed path too often, meaning our in-memory cache isn't big enough. I'd also check if a long-running snapshot or compaction is causing I/O contention. On the application side, I'd check if we have a hot key problem — one key getting hammered — or if a write lock is blocking readers for too long.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["debugging", "monitoring", "hot_keys"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're coming to the end. Is there anything you'd add or change about this design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A couple things. I'd add a checksum to each WAL entry so we can detect corruption during replay. I'd also add basic monitoring — expose metrics like hit rate, read/write latency percentiles, and memory usage over a simple HTTP endpoint. And if we ever needed to scale beyond one machine, the sharded hash map design would make it easier to split data across servers later.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["checksums", "monitoring", "future_scaling"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great job. You covered the fundamentals really well for a single-server design. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 60,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 5,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 6,
+      "scalability": 4,
+      "failure_handling": 6,
+      "communication": 7
+    },
+    "strengths": [
+      "Solid understanding of single-server fundamentals — WAL, snapshots, crash recovery",
+      "Good concurrency approach with striped locking and write batching",
+      "Thoughtful durability trade-off with configurable fsync"
+    ],
+    "weaknesses": [
+      "No capacity estimation — didn't compute QPS or memory requirements upfront",
+      "No discussion of distributed concepts — single-server scope only",
+      "Didn't discuss data encoding or serialization format"
+    ]
+  }
+}

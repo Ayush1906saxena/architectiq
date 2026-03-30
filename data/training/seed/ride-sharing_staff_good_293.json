@@ -1,0 +1,159 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "staff",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_293"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing platform like Uber. I want to understand how you'd architect the system for matching riders with drivers in real time. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd like to understand scale and scope. How many cities are we operating in? What's our peak concurrent rides? What's the driver-to-rider ratio we're targeting? And are we dealing with just car rides or also bikes, scooters, etc.?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scale_estimation", "geographic_scope", "product_scope"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "50 cities globally, 1 million concurrent rides at peak, driver-to-rider ratio of about 1:3 in active hours. Cars only for now. Tell me how you'd approach this.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me work through the numbers. 1 million concurrent rides means roughly 1 million active drivers on trips plus maybe 500K idle drivers waiting. Those 1.5 million drivers are sending GPS pings every 3-4 seconds, which is roughly 400K location updates per second globally. On the ride request side, if an average ride is 15 minutes, 1M concurrent rides means about 67K new ride requests per minute, or roughly 1,100 per second. The location update throughput is the primary scaling challenge.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "location_tracking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. Let's focus on the geospatial component — how do you efficiently find nearby drivers?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "geospatial_indexing" }
+    },
+    {
+      "role": "candidate",
+      "content": "The core data structure is a geohash-based spatial index. Geohashing converts a latitude/longitude into a string where shared prefixes indicate spatial proximity. I'd use precision level 6 which gives cells of about 1.2km x 600m — good granularity for urban matching. The index structure: a hash map where keys are geohash strings and values are sets of driver IDs in that cell. When a ride request comes in at coordinates (lat, lng), we compute the geohash, then search that cell plus its 8 neighboring cells — this gives us a search radius of roughly 2-3km. For sparser areas, we can expand to include the neighbors-of-neighbors.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geohashing", "spatial_indexing", "precision_analysis", "neighbor_search"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does a driver's location update propagate through this index?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "location_update_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a driver's GPS ping arrives, we compute their new geohash. If it hasn't changed from the previous ping — which is often the case since a car moves at most 30 meters in 3 seconds — we just update the timestamp without modifying the index. If the geohash has changed, we remove the driver from the old cell and add them to the new cell. This is an O(1) operation on the hash map. At 400K pings per second, maybe 30% result in cell changes — so about 120K index mutations per second. I'd shard this index by city. Each city's Location Service instance handles maybe 10-30K pings per second, well within a single machine's capability.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["location_update_optimization", "sharding_by_city", "index_mutation_rate"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good optimization on skipping unchanged geohashes. Now, once you have a set of nearby drivers, how do you select the best one?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "driver_matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Raw proximity isn't enough — we need ETA-based scoring. A driver 300m away but stuck in traffic might have a 10-minute ETA, while a driver 1km away on a clear road might arrive in 3 minutes. The Matching Service takes the candidate drivers from the spatial lookup, calls the Routing Service to compute driving ETAs from each driver to the pickup point, then ranks them by a composite score. The score formula: 0.5 * normalized_ETA + 0.2 * driver_rating + 0.15 * acceptance_rate + 0.15 * vehicle_match. We'd batch the ETA computations — sending 10-20 driver origins and one destination to the routing service in a single request is much more efficient than individual calls.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["eta_scoring", "routing_service", "composite_scoring", "batch_routing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "This approach dispatches one request at a time. What about global optimization — maybe it's better to assign Driver A to Rider 2 even though Driver A is closest to Rider 1, because Driver B is only available for Rider 1?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "batch_matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great point — that's the batch matching optimization. Instead of greedily assigning the nearest driver to each request, we can batch requests that arrive within a short window — say 2 seconds — and solve a bipartite matching problem. We build a cost matrix of ETAs between all pending riders and nearby drivers, then use the Hungarian algorithm (or an approximation for speed) to find the globally optimal assignment that minimizes total wait time. The trade-off is latency: each rider waits an extra 2 seconds for the batch to fill. In high-demand areas with many simultaneous requests, the global optimization reduces average wait time by 15-20% despite the batching delay. In low-demand areas, we fall back to greedy matching since there aren't enough concurrent requests to benefit.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["batch_matching", "hungarian_algorithm", "bipartite_matching", "optimization_tradeoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. Let's shift topics — how does the payment integration work?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "payment_integration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, I'll be honest — payment is an area I haven't deeply designed before. At a high level, when a trip starts, we authorize a hold on the rider's payment method for the estimated fare. When the trip completes, we capture the actual amount based on distance and time. If the actual fare exceeds the hold, we charge the difference. We'd use a payment processor like Stripe. But I'm not sure about the specifics of handling split payments, refund flows, or how to deal with the driver payout side efficiently at scale.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["payment_authorization", "fare_calculation"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's fine — the auth-capture pattern is the right approach. What about safety features?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "safety" }
+    },
+    {
+      "role": "candidate",
+      "content": "I know safety is important for ride-sharing but I'll admit it's not an area I've thought about deeply from a system design perspective. Basic things would be trip sharing with contacts, an emergency button, and driver background checks. I imagine there's a lot of real-time monitoring involved but I'd need to dig deeper into the specific implementations.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["safety_features"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair enough. Let's go back to your strength area — let's talk about how you'd handle the Location Service at 400K pings per second across 50 cities.",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "location_service_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd partition by city — each city runs its own Location Service cluster. The biggest cities might handle 30-50K pings per second each. The architecture per city: drivers connect via WebSocket to a fleet of gateway servers behind a load balancer. The gateway servers forward location updates to the in-memory spatial index via an internal message bus. The spatial index is replicated for read availability — the Matching Service reads from replicas while writes go to the primary. For persistence, we stream all location events to Kafka, and a downstream consumer writes to a time-series database like TimescaleDB for historical route reconstruction. The spatial index itself is ephemeral — if it crashes, we rebuild from the last few seconds of Kafka events plus the next round of driver pings.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["city_partitioning", "websocket_gateway", "spatial_index_replication", "kafka_streaming", "timescale_db"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if a city's Location Service goes down entirely?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "fault_tolerance" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the Location Service for a city goes down, matching is impaired for that city. Existing trips in progress continue since the trip state lives in the Trip Service, not the Location Service — riders and drivers can still navigate using their local maps. For new matches, we have two layers of redundancy. First, the spatial index runs as a replicated cluster — losing one node doesn't lose the service. If the entire cluster goes down, we fail over to a standby cluster in a different availability zone, which rebuilds its index from the Kafka location stream within 10-15 seconds. During that rebuild window, we queue incoming ride requests and process them once the index is warm. Worst case, riders see a 'Finding drivers...' spinner for 15 extra seconds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fault_tolerance", "availability_zones", "index_rebuild", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle the surge pricing from a technical perspective?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "The Pricing Service runs a periodic job — every 60 seconds per city — that computes supply-demand ratios at the zone level. I'd use geohash level 4 cells for pricing zones, which are roughly 5km x 5km — larger than matching cells because pricing should be stable over a neighborhood. The inputs: count of available drivers per zone from the Location Service, and ride request rate per zone from the Trip Service, both over a 5-minute rolling window. The output is a surge multiplier map per city. The map is cached in Redis with a 60-second TTL and served to the Rider App when they open the app. The multiplier follows a piecewise linear curve calibrated per city — a supply-demand ratio of 0.5 might mean 2x in New York but 1.5x in a smaller market where riders are more price-sensitive.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_pricing", "zone_pricing", "supply_demand_ratio", "city_calibration"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost out of time. Any final thoughts on what you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Two things I'd add. First, a Simulation Service that replays historical ride patterns to test matching algorithm changes before deploying to production — bad matching changes can cause rider churn. Second, monitoring: we'd track match rate (percentage of requests that find a driver within 30 seconds), average ETA accuracy (predicted vs actual), and driver utilization rate as our golden metrics. Any sustained degradation triggers a PagerDuty alert.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["simulation_testing", "observability", "golden_metrics", "alerting"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great interview. Your geospatial indexing and matching algorithm design were particularly strong. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 70,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent geohashing implementation with precision analysis and cell-change optimization",
+      "Strong ETA-based matching with batch optimization using Hungarian algorithm",
+      "Honest about knowledge gaps rather than hand-waving through unfamiliar areas"
+    ],
+    "weaknesses": [
+      "Payment integration was surface-level — expected more depth at staff level",
+      "Safety features were dismissed too quickly for a ride-sharing platform where safety is core"
+    ]
+  }
+}

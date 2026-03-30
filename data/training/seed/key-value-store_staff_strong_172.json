@@ -1,0 +1,149 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_172"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a multi-tenant key-value store — think DynamoDB or Azure Cosmos DB as a managed service. Multiple customers sharing infrastructure but with strong isolation guarantees. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a great platform problem. Key questions: First, what consistency models do we offer — strong, eventual, or configurable per-tenant? Second, what's the tenant scale — hundreds of enterprise tenants or millions of self-serve tenants? Third, what isolation guarantees do we need — performance isolation (noisy neighbor prevention), data isolation, or both? Fourth, do tenants have different SLAs — some needing single-digit millisecond latency while others accept higher latency at lower cost? Fifth, what's our data model — pure key-value or do we support secondary indexes and range queries?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistency_models", "tenant_scale", "isolation_guarantees", "tiered_sla", "data_model"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Configurable consistency. Millions of self-serve tenants, ranging from hobby projects to large enterprises. Both performance and data isolation are critical. Tiered SLAs — free, standard, premium. Key-value with range queries on the sort key, like DynamoDB. Scale: 10 million requests per second across all tenants, 500TB total data. Focus on multi-tenancy architecture.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "multi_tenancy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the fundamental architecture decision: shared infrastructure vs dedicated infrastructure per tenant. At millions of tenants, dedicated infrastructure is economically impossible — we'd have millions of database instances. So we need shared infrastructure with logical isolation. The architecture has three main layers: a routing/gateway layer that handles authentication, rate limiting, and tenant identification; a storage layer that physically stores data; and a control plane that manages tenant provisioning, quota enforcement, and capacity planning. The key challenge is the storage layer — how to multiplex millions of tenants onto shared storage nodes without one tenant's workload affecting another's.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["shared_infrastructure", "logical_isolation", "three_layer_architecture", "noisy_neighbor"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's dive into the storage layer. How do you partition data across nodes?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "partitioning" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a two-level partitioning scheme. Level 1: data is partitioned into logical partitions based on the tenant's partition key. Each partition is a contiguous range of data that's the unit of placement and replication. A tenant's data might span many partitions depending on their data size. Level 2: partitions are assigned to physical storage nodes using consistent hashing with virtual nodes. Each physical node hosts partitions from many tenants. Critically, the partition assignment is managed by a metadata service — a strongly consistent store (like etcd or ZooKeeper) that maps partition_id -> [storage_node_1, storage_node_2, storage_node_3]. When a request arrives, the gateway looks up which node owns the partition for the given key and routes directly. The partition size is bounded — say 10GB max. When a partition grows beyond this, we split it into two daughter partitions and potentially rebalance them across nodes. This is similar to how DynamoDB's adaptive partitioning works.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["two_level_partitioning", "consistent_hashing", "virtual_nodes", "metadata_service", "partition_splitting", "adaptive_partitioning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now the hard part — noisy neighbor prevention. How do you prevent one tenant's heavy workload from degrading another tenant's experience on the same node?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "noisy_neighbor" }
+    },
+    {
+      "role": "candidate",
+      "content": "Noisy neighbor prevention operates at multiple levels. Level 1 — Admission control at the gateway: per-tenant rate limiting based on their provisioned throughput. If a tenant purchased 1,000 read units/second and they send 5,000, the excess is rejected with a throttling error before it reaches the storage layer. This is the first line of defense. Level 2 — Resource isolation at the storage node: each storage node uses IO scheduling to ensure fair resource allocation. I'd implement a weighted fair queue for disk IO, where each tenant's partitions on that node get IO bandwidth proportional to their provisioned capacity. For CPU, we use cgroup-like isolation — each tenant's request processing is bounded to a CPU share. For memory, each tenant's cache allocation is bounded — a tenant can't monopolize the buffer pool. Level 3 — Partition-level throttling: even within a tenant's quota, a single hot partition can cause issues. We track throughput per partition, and if a partition exceeds its fair share of the node's capacity, we can split it and migrate one half to a less-loaded node. This is reactive but handles hotspots. Level 4 — Physical isolation for premium tenants: enterprise tenants with strict SLA requirements can opt into dedicated storage nodes where only their partitions are placed. This is the ultimate isolation but costs more.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["admission_control", "per_tenant_rate_limiting", "io_scheduling", "weighted_fair_queue", "cgroup_isolation", "cache_isolation", "hot_partition_splitting", "dedicated_nodes"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you implement the per-tenant rate limiting accurately in a distributed system? The gateway has many instances.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Same challenge as any distributed rate limiter. I'd use token bucket algorithm with a central token reservoir and local token caches. A central rate limiter service (backed by Redis) maintains the authoritative token count per tenant. Each gateway instance pre-fetches a batch of tokens — say 100 tokens at a time. It serves requests locally until the tokens are exhausted, then fetches more. The batch size adapts: high-traffic tenants get larger batches (less frequent refills), low-traffic tenants get smaller batches (tighter accuracy). Accuracy bound: worst case, we over-admit by (num_gateway_instances * batch_size) tokens during a burst. With 100 gateway instances and a batch size of 100, that's 10K extra requests — acceptable for a 1,000 RU/s tenant over a 1-second window, representing a 10x overshoot. To tighten this, we reduce batch sizes for lower-tier tenants. The central rate limiter also tracks consumed capacity per tenant over sliding windows and publishes this data for billing. An important detail: we rate limit at the partition key level too, not just the tenant level, to detect and throttle hot keys that could cause partition-level hotspots.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "distributed_rate_limiting", "adaptive_batch_size", "overshoot_bounding", "hot_key_detection", "billing_integration"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about capacity planning. How do you decide how many storage nodes you need and how to place tenant data?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "capacity_planning" }
+    },
+    {
+      "role": "candidate",
+      "content": "Capacity planning has two dimensions: provisioned capacity (what tenants have purchased) and actual usage (what they're actually consuming). Storage nodes have a capacity budget across four resources: CPU, memory, disk IOPS, and disk space. Each partition placed on a node consumes some fraction of these resources. The placement service's job is bin-packing: assign partitions to nodes such that no node exceeds its budget on any resource dimension. This is a variant of the multi-dimensional bin packing problem. I'd use a greedy first-fit-decreasing heuristic: sort partitions by their resource demand (primarily by throughput), and assign each to the node with the most remaining capacity that can still fit it. For auto-scaling: we monitor the aggregate utilization across nodes. When average utilization exceeds 70% on any resource dimension, we add nodes and rebalance partitions. Rebalancing is done by the placement service, which identifies the most overloaded nodes, selects partitions to migrate, and live-migrates them to under-utilized nodes. The migration is transparent to clients — the metadata service is updated atomically, and during migration, the old node continues serving reads while the new node catches up.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_dimensional_bin_packing", "capacity_budgeting", "auto_scaling", "live_migration", "placement_service", "transparent_migration"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about tenants whose usage patterns are very bursty — quiet most of the time but occasionally spike 100x?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "burst_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Burst handling is key to a good multi-tenant experience. I'd implement a burst capacity model similar to DynamoDB's. Each tenant accumulates unused throughput capacity as 'burst credits' — up to 5 minutes of their provisioned capacity. During a spike, they can consume burst credits at up to 10x their provisioned rate. Once credits are exhausted, they're throttled to their provisioned rate. The storage node reserves some headroom capacity — say 20% — specifically for handling burst across all tenants. Since tenant bursts are typically uncorrelated (not everyone spikes at once), statistical multiplexing makes this work: the shared burst pool is much smaller than the sum of all tenants' potential burst. If bursts are correlated (like a Black Friday scenario), we need a different approach: queue the excess requests and drain them at the provisioned rate, returning a 'retryable throttle' response with exponential backoff hints. Premium tenants with 'on-demand' pricing don't have fixed provisioned capacity — they pay per request and the system auto-scales their partitions based on real-time demand.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["burst_credits", "statistical_multiplexing", "headroom_reservation", "throttle_with_backoff", "on_demand_pricing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle data isolation? How do you ensure one tenant can never read another tenant's data?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "data_isolation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Data isolation is enforced at multiple layers. Layer 1 — Logical isolation: every key in the storage engine is prefixed with the tenant ID. The storage layer enforces that a request can only access keys matching the authenticated tenant's prefix. This is baked into the storage engine's read/write path, not just the gateway — defense in depth. Layer 2 — Encryption isolation: each tenant has a unique data encryption key (DEK) derived from a per-tenant key encryption key (KEK) stored in a KMS. Data at rest is encrypted with the tenant's DEK. Even if a bug bypasses the logical isolation, the attacker gets encrypted data they can't decrypt. Premium tenants can bring their own KMS key (BYOK) for additional control. Layer 3 — Access control: the gateway validates the tenant's authentication token (JWT or API key) and injects the tenant ID into the request context. The storage layer reads the tenant ID from the request context, never from the client's query. Layer 4 — Audit logging: every data access is logged with the tenant context, enabling forensic analysis if a breach is suspected. We periodically run cross-tenant data access audits as a canary.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["logical_isolation", "key_prefix", "encryption_per_tenant", "dek_kek", "byok", "defense_in_depth", "audit_logging"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the consistency model. How do you offer configurable consistency per tenant?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "configurable_consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each partition has a replication factor of 3 — one leader and two followers. For strong consistency: reads and writes go through the leader. The leader acknowledges a write only after it's replicated to at least 2 of 3 replicas (quorum write). Strong reads always go to the leader, which guarantees reading the latest write. For eventual consistency: writes still go to the leader with quorum replication for durability, but reads can be served by any replica. This is faster and distributes read load, but may return stale data if the follower hasn't caught up. The consistency level is configurable per request, not just per tenant — a tenant might use strong consistency for their financial transactions table and eventual consistency for their analytics cache table. Implementation-wise, the routing logic in the gateway handles this: strong reads route to the leader node, eventually consistent reads route to the nearest replica. The interesting edge case is session consistency — a user's reads should reflect their own writes. I'd implement this using a session token that encodes the highest write sequence number. The gateway routes session-consistent reads to a replica that's at least caught up to that sequence number.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["quorum_replication", "leader_based_strong_reads", "eventual_consistency_reads", "per_request_consistency", "session_consistency", "session_token"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a storage node fails? How does the system recover without affecting tenants?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "node_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Node failure handling is transparent to tenants. Detection: the placement service monitors storage nodes via heartbeats. If a node misses 3 consecutive heartbeats (over ~15 seconds), it's declared failed. Immediate response: for partitions where the failed node was the leader, the remaining replicas run leader election — the most up-to-date replica becomes the new leader. Since we use quorum writes, the new leader has all committed data. The metadata service is updated with the new leader address. For partitions where the failed node was a follower, the remaining replicas continue operating with a degraded replication factor of 2. Recovery: the placement service selects a healthy node to host a new replica for each partition that lost one. The new replica performs a full data copy from the current leader, then switches to streaming replication. During the data copy, the partition operates with 2 replicas — writes still use quorum (2/2 = both must acknowledge), which temporarily makes the partition sensitive to a second failure. To mitigate this vulnerable window, we prioritize re-replication of under-replicated partitions and can temporarily allow writes with 1/2 acknowledgment if the re-replication is taking long.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["heartbeat_detection", "leader_election", "quorum_writes", "degraded_replication", "re_replication", "vulnerable_window"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last area — how do you handle tenant onboarding and quota changes without downtime?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "tenant_lifecycle" }
+    },
+    {
+      "role": "candidate",
+      "content": "Tenant onboarding is handled by the control plane. When a new tenant signs up: the control plane provisions their metadata (tenant ID, authentication credentials, quota limits) in the configuration store. Initially, the tenant gets a small number of partitions (maybe 2-4) assigned to nodes with available capacity. No data movement is needed — the partitions are created empty. Time from signup to first API call: under 10 seconds. For quota changes: if a tenant upgrades from 1,000 to 10,000 RU/s, the control plane updates the rate limit configuration. If the existing partitions can handle the increased throughput, no data movement is needed. If not, the placement service splits partitions and/or migrates them to nodes with more headroom. This is done live — the partition continues serving traffic during migration. The rate limit increase takes effect immediately at the gateway layer, while the storage-level capacity adjustment may take a few minutes to fully propagate. During this window, the tenant gets their new rate limit but might experience slightly higher tail latency until the data is properly distributed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tenant_onboarding", "fast_provisioning", "live_quota_changes", "live_partition_migration", "control_plane"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great interview. Your multi-layered approach to isolation and capacity management was very thorough. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 80,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 9,
+      "caching_strategy": 7,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Comprehensive multi-layer noisy neighbor prevention from gateway to storage node",
+      "Excellent data isolation architecture with defense-in-depth encryption strategy",
+      "Strong capacity planning with multi-dimensional bin packing and live migration"
+    ],
+    "weaknesses": [
+      "Capacity estimation could have been more detailed with per-node throughput calculations",
+      "Caching strategy at the client and gateway layers was not explored"
+    ]
+  }
+}

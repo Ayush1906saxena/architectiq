@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "staff",
+    "candidate_profile": "cost-conscious",
+    "total_exchanges": 22,
+    "generation_id": "seed_099"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a video streaming platform like Netflix or YouTube. Users upload videos, and millions of viewers watch them. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "First, what's our scale and budget model? The cost profile of video streaming is dominated by storage, transcoding compute, and CDN bandwidth — those three can easily be 80% of total infrastructure cost. How many videos uploaded per day, average video length, and how many concurrent viewers?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cost_analysis", "capacity_estimation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10,000 videos uploaded per day, average 10 minutes each. 5 million concurrent viewers at peak. Budget is a concern — we need to be cost-efficient.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me run the cost numbers right away. 10K videos at 10 minutes each = 100K minutes = 1,667 hours of raw video per day. At 1080p, raw video is about 5GB per hour, so that's roughly 8.3TB of raw uploads per day. But we transcode to multiple bitrates — say 360p, 480p, 720p, 1080p — which roughly doubles the storage to 15-18TB per day. At $0.023/GB for S3 Standard, that's about $12,000/month just for new uploads. Over a year, storage alone is $144K for new content — and that's before existing catalog. We need a tiering strategy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "storage_cost", "transcoding", "cost_analysis"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Impressive cost math. What's your tiering strategy?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "storage_tiering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hot-warm-cold storage tiers based on video popularity. Hot tier: S3 Standard for videos accessed in the last 30 days — this covers maybe 20% of our library but 80% of views. Warm tier: S3 Infrequent Access for videos accessed in the last 6 months — $0.0125/GB, almost half the cost. Cold tier: S3 Glacier for videos not accessed in 6+ months — $0.004/GB, that's an 83% savings over Standard. A lifecycle policy automatically transitions videos between tiers. The key insight: most uploaded videos are watched heavily in the first week and then traffic drops exponentially. So the tier transition saves us enormously. For the cold tier, retrieval takes minutes, but for a video nobody has watched in 6 months, a few minutes of buffering is acceptable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["storage_tiering", "s3_glacier", "lifecycle_policies", "cost_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Walk me through the video upload and transcoding pipeline.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "transcoding_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "User uploads directly to S3 using pre-signed URLs — this bypasses our servers entirely, saving egress costs and server compute. On upload completion, S3 triggers an event notification to an SQS queue. A transcoding service picks up the job. Now here's the cost-critical decision: transcoding compute. We don't need always-on instances. I'd use AWS Spot Instances for transcoding — up to 90% cheaper than on-demand. Since transcoding is fault-tolerant (we can restart a failed job), spot interruptions are fine. A single c5.4xlarge spot instance costs about $0.27/hour and can transcode roughly 5x real-time for 1080p. For 1,667 hours of video per day at 4 bitrates, we need about 1,333 instance-hours. At spot pricing, that's $360/day or $10,800/month — versus $108,000/month on-demand.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["presigned_urls", "transcoding_pipeline", "spot_instances", "cost_optimization", "sqs"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a 10x savings on transcoding. How do you handle the CDN for delivery?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "cdn" }
+    },
+    {
+      "role": "candidate",
+      "content": "CDN is typically the biggest cost. Let me compare options. CloudFront charges about $0.085/GB for the first 10TB. At 5 million concurrent viewers watching maybe 3 Mbps average bitrate, that's 15 Tbps aggregate bandwidth. Per month, rough estimate: if average session is 30 minutes and there are 20M unique viewers per day, that's about 6.75 PB per month of CDN transfer. At $0.04/GB (volume pricing), that's $270K/month just for CDN. Alternative: a multi-CDN strategy using CloudFront + a cheaper provider like BunnyCDN ($0.01/GB in some regions) or Fastly for US traffic. Route based on cost per region — use the cheapest CDN that meets latency requirements. Another option at our scale: self-hosted CDN with bare-metal servers at IX points. Netflix does this with Open Connect — the amortized cost per GB can be under $0.005.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn", "multi_cdn", "cost_optimization", "bandwidth_estimation", "open_connect"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting multi-CDN approach. How does the video player choose which CDN to use?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "cdn_routing" }
+    },
+    {
+      "role": "candidate",
+      "content": "A CDN selection service that runs server-side. When the player requests a video manifest, the service evaluates: viewer's geographic region, current cost per GB for each CDN in that region, real-time performance metrics (latency, buffer ratio) from our CDN monitoring, and current CDN capacity. It returns the manifest with URLs pointing to the selected CDN. We can also split mid-stream — HLS/DASH adaptive streaming allows segment-level CDN switching. If CDN A starts performing poorly, the next segment request goes to CDN B. The cost optimization here is significant: in Asia-Pacific, where CloudFront is $0.14/GB but a regional CDN might be $0.03/GB, we save 78% by routing locally.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_routing", "adaptive_streaming", "hls", "cost_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the database layer? How do you store video metadata?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Video metadata in PostgreSQL — it's relatively small data. Each video record has title, description, uploader, upload_time, duration, available_resolutions, storage_tier, and view_count. With 10K uploads/day, after 5 years we have about 18M videos — easily handled by a single PostgreSQL instance. No need for sharding here, which saves operational cost. A read replica for the recommendation service. For view counts, we don't update the main row on every view — that's a hot-write bottleneck. Instead, we increment in Redis and flush to Postgres every 5 minutes. Redis is already in the stack for session management so no additional cost.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["postgresql", "database_design", "redis_caching", "cost_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if a video suddenly goes viral — 10x normal traffic in an hour?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "traffic_spike" }
+    },
+    {
+      "role": "candidate",
+      "content": "The CDN absorbs most of this — that's what CDNs are designed for. The video segments are cached at edge locations and serve directly without hitting origin. For a viral video, CDN cache hit rate should be 99%+. The concern is the CDN bill — a 10x spike means 10x bandwidth cost. Mitigation: we can pre-negotiate burst pricing with CDN providers, or if we're multi-CDN, shift traffic to the cheapest provider that has capacity. On the origin side, if the video isn't in CDN cache yet (new viral video), we need origin shield — a mid-tier cache between CDN edge and S3. CloudFront Origin Shield costs about $0.009/GB but prevents S3 request costs from spiking. Without origin shield, 10x traffic hitting S3 directly would cost us in request fees — $0.0004 per GET adds up fast at scale.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_caching", "origin_shield", "traffic_spike", "cost_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How about optimizing transcoding costs further? Any creative approaches?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "transcoding_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several. First: per-title encoding — analyze each video's complexity and choose optimal bitrate ladders. A talking-head video needs much less bitrate than an action scene. Netflix found this saves 20% bandwidth with no quality loss. Second: skip transcoding for unpopular resolutions upfront. Only transcode to 720p and 1080p initially. If a video gets traction, trigger 360p and 4K transcoding on-demand. Third: use hardware-accelerated encoding on GPU instances — an NVIDIA T4 instance transcodes 3-4x faster than CPU, and the cost per video minute is lower despite higher instance cost. Fourth: for re-uploads of identical content (surprisingly common), content-based hashing to detect duplicates and skip transcoding entirely.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["per_title_encoding", "lazy_transcoding", "gpu_transcoding", "deduplication", "cost_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the total monthly infrastructure cost estimate for this system?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "cost_analysis" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me add it up. Storage: with tiering, roughly $40K/month after the first year of accumulated content. Transcoding: $11K/month on spot instances. CDN: $150K-270K/month depending on multi-CDN optimization — this is the dominant cost. Compute (API servers, metadata services): $5K/month. Database: $2K/month for managed PostgreSQL and Redis. Monitoring and logging: $3K/month. Total: roughly $210K-330K/month. The biggest lever is CDN — every 10% optimization there saves $15K-27K/month. At scale, building our own CDN PoPs becomes economically viable when CDN costs exceed $500K/month.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cost_analysis", "total_cost_of_ownership"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Any final thoughts on the design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "One more cost optimization: reserved instances for our always-on infrastructure — API servers, databases, Redis. A 1-year reserved instance commitment saves 30-40% over on-demand. Also, a cost anomaly alerting system — if daily spend exceeds 120% of the rolling average, we get paged. I've seen a misconfigured transcoding job burn through $50K in a weekend. Finally, right-sizing — monthly review of instance utilization. If our API servers average 20% CPU, we're over-provisioned.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["reserved_instances", "cost_alerting", "right_sizing", "monitoring"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent cost awareness throughout. Every decision had a dollar figure attached. Strong interview — thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 9,
+      "api_design": 5,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 6,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional cost analysis — every design decision had concrete dollar amounts",
+      "Creative cost optimizations: spot instances, multi-CDN, per-title encoding, lazy transcoding",
+      "Strong capacity estimation with end-to-end total cost of ownership calculation"
+    ],
+    "weaknesses": [
+      "API design was barely discussed — no mention of streaming protocols or API contracts",
+      "Failure handling was limited — only covered viral traffic spike, not database or transcoding failures",
+      "Security and access control for videos not addressed"
+    ]
+  }
+}

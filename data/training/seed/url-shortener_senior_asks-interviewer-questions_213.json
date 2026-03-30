@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "senior",
+    "candidate_profile": "asks-interviewer-questions",
+    "total_exchanges": 22,
+    "generation_id": "seed_213"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service like bit.ly. It should handle significant scale. What questions do you have before we get started?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Before I jump into requirements, can I ask something slightly unusual? I find I design better systems when I understand the organizational context. How does your team currently handle URL shortening — is this a greenfield project or are you replacing something existing? What pain points are you facing with the current approach?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["organizational_context", "migration_considerations"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's actually a really thoughtful question. Let's say we have a basic service that uses a MySQL database with sequential IDs. It's hitting scaling issues at around 10,000 requests per second, and we've had incidents where the single database became a bottleneck. We also have no caching layer. Go ahead and design the replacement.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "organizational_context" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's very helpful context. A few follow-ups on the existing system: What's the current data volume — how many URLs are already stored? Are there any contractual SLAs around redirect latency or uptime? And one more — what's the team's operational comfort level? For instance, are you already running Kafka or Redis in production, or would those be new infrastructure?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_migration", "sla_requirements", "infrastructure_constraints"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good questions. About 500 million existing URLs, SLA is 99.9% uptime and sub-100ms p99 redirects. The team runs Redis and PostgreSQL but not Kafka. Let's proceed with the design.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Perfect. So given we're replacing an existing system with 500M URLs, this is really a migration problem as much as a design problem. Let me think about scale first. If we're already hitting 10K RPS and growing, I'll design for 50K RPS writes and 500K RPS reads to give us runway. That's roughly 4.3 billion new URLs per day at peak. Storage: 500M existing plus let's say 100M new per day, at about 500 bytes each — 50GB per day for new data, and 250GB for the existing corpus.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation", "migration_considerations"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Hold on — 50K writes per second seems quite high. How did you arrive at that number?",
+      "annotation": { "action": "challenge", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fair push-back. I was giving 5x headroom over the current 10K RPS, which is aggressive. Let me be more precise — if the service is growing at, say, 30% year-over-year, in 3 years we'd need about 22K RPS. So 25K writes per second is a more reasonable target with buffer. For reads, if the read-to-write ratio is 50:1, that's 1.25M reads per second at the top end. Actually, can I ask — what's the observed read-to-write ratio on the current system?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "growth_projection", "read_write_ratio"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "It's about 100:1 reads to writes. So your revised numbers are reasonable. Walk me through the architecture.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Alright. High-level: clients hit a CDN for the most popular redirects — this alone could absorb 60-70% of read traffic for hot URLs. Behind that, a load balancer distributes to stateless application servers. For URL creation: POST /api/v1/urls with the long URL. The app server generates a short code, writes to PostgreSQL (since the team already knows Postgres), and populates the Redis cache. For redirects: GET /{shortCode} checks Redis first, then Postgres on cache miss. I'd return 302 by default for analytics, with an option for 301.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_redirect", "load_balancing", "api_design", "redis_caching", "database_choice"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned the team already runs Postgres and Redis. How does that factor into your design decisions?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "infrastructure_constraints" }
+    },
+    {
+      "role": "candidate",
+      "content": "It's a huge factor. In real systems, operational familiarity often trumps theoretical optimality. The team knows Postgres — they know how to tune it, back it up, handle failovers. If I proposed Cassandra for higher write throughput, sure it might scale better for writes, but the team would need months to build operational confidence. So my approach is: Postgres with horizontal sharding for writes, Redis cluster for read caching, and only introduce new technology if we hit a wall that can't be solved with what we have. This also reduces migration risk since we're already on MySQL — Postgres is a small jump.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "operational_complexity", "technology_selection"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Smart. How would you handle the ID generation? The current system uses sequential MySQL IDs.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "base62_encoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sequential IDs have the enumeration problem — someone can just iterate to find all URLs. For the new system, I'd use a range-based ID allocator. A lightweight coordination service hands out ranges of, say, 100K IDs to each app server. Within its range, the server assigns IDs locally — no contention. Then I apply a lightweight permutation — a Knuth multiplicative hash — before base62 encoding to make short codes look random. This gives us the performance of sequential allocation with the unpredictability of random codes. One thing though — we need to reserve a range that doesn't collide with the 500M existing IDs during migration.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["base62_encoding", "collision_handling", "distributed_id_generation", "data_migration"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the migration from the old system. How do you move 500 million URLs without downtime?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "data_migration" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the hardest part, honestly. I'd use a dual-write, gradual cutover strategy. Phase 1: deploy the new system alongside the old one. All new writes go to both systems. Phase 2: bulk-migrate old URLs in batches — stream from MySQL to Postgres using a migration worker, maybe 10K rows per batch to avoid lock contention. Phase 3: switch reads to the new system using a feature flag, with fallback to the old system on cache miss in the new one. Phase 4: once the migration is verified — checksums on URL counts and random sampling of redirects — decommission the old system. The whole process might take a week for 500M rows.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_migration", "dual_write", "feature_flags", "zero_downtime_deployment"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if a redirect request comes in for an old URL that hasn't been migrated yet?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "data_migration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Great edge case. During migration, the read path has a fallback chain: check Redis → check new Postgres → check old MySQL. If we find it in old MySQL, we serve the redirect AND lazily migrate that record to the new system. This way, frequently accessed URLs migrate themselves via read traffic, and the bulk migration handles the long tail. We tag lazily-migrated records so the bulk migration skips them. After migration completes, we remove the fallback to old MySQL.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_migration", "lazy_loading", "read_repair"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice. Let's talk about sharding. How would you shard the Postgres database?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd shard by hash of the short code. The short code is the primary lookup key for reads, so this ensures redirects only hit one shard. I'd start with 16 shards — each holding roughly 31M existing URLs plus new growth. With consistent hashing and virtual nodes, we can split shards later without a full reshard. For the write path, since we're generating IDs centrally, we know which shard to write to based on the hash of the resulting short code. One consideration: custom aliases might have hot keys, so I'd monitor per-shard QPS and use shard-level rate limiting if needed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_strategy", "consistent_hashing", "hot_key_problem"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about failure handling? What if a shard goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "single_point_of_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each shard would be a Postgres primary with one synchronous replica for durability and one async replica for read scaling. If the primary fails, the sync replica promotes automatically — Patroni handles this well, and the team likely knows it since they're on Postgres. During failover, which takes about 10-30 seconds, writes to that shard queue up behind a circuit breaker and retry. Reads fall back to the Redis cache, which should have most hot data. URLs on the failed shard that aren't cached would return a 503 temporarily — but given 16 shards, only 6% of URLs are affected. That's a graceful degradation that still meets our 99.9% SLA.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["single_point_of_failure", "replication", "circuit_breaker", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've asked several questions about the team and their infrastructure. How would you typically prioritize what to build first?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "implementation_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd sequence by risk and impact. Sprint 1: stand up the new Postgres cluster and Redis cache, deploy the application layer with the new ID generation — no migration yet, just handle new URLs. Sprint 2: implement the dual-write and read fallback to old MySQL. Sprint 3: run the bulk migration while dual-write ensures no data loss. Sprint 4: cut over reads entirely, monitor for a week, then decommission old MySQL. Throughout this, the old system is still running — so if anything goes wrong, we roll back the feature flag and we're on the old system. This incremental approach is how I'd de-risk the project.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["implementation_strategy", "rollback_plan", "feature_flags", "risk_mitigation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're about out of time. Anything else you'd like to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. I'd invest in observability from day one — dashboard showing redirect latency per shard, cache hit rates, migration progress, and error rates per component. I'd also set up synthetic monitoring that continuously resolves a set of known short URLs to detect issues before users do. And I'd build an abuse prevention layer — rate limiting on creation to prevent spammers from generating millions of links, plus a URL scanning pipeline to flag phishing or malware destinations. These operational concerns are often what separates a system that works in theory from one that works in production.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "rate_limiting", "abuse_prevention", "observability"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "I really appreciated that you asked about our existing system and team constraints before designing. That's a mature approach. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 9
+    },
+    "strengths": [
+      "Outstanding requirements gathering — asked about organizational context, team skills, and existing infrastructure before designing",
+      "Migration strategy was thorough with dual-write, lazy migration, and rollback plans",
+      "Consistently made pragmatic technology choices based on team familiarity"
+    ],
+    "weaknesses": [
+      "Capacity estimation was initially off and needed correction",
+      "Could have gone deeper on the caching layer — eviction policies, cache warming strategies",
+      "Didn't discuss analytics pipeline or geographic distribution"
+    ]
+  }
+}

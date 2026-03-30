@@ -1,0 +1,169 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_111"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a chat system — think WhatsApp or Slack. It should support one-on-one and group messaging. Where would you like to start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Before I ask my clarifying questions, I want to name the hardest problem upfront: message ordering is the core challenge. In a distributed system, ensuring that all participants in a chat see messages in the same order, especially in group chats with concurrent senders, is fundamentally difficult. Let me address that first, then build the system around it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_ordering", "distributed_systems"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting approach — leading with the hardest part. Go ahead.",
+      "annotation": { "action": "deepen", "phase": "requirements", "target_concept": "message_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "In a group chat, Alice and Bob might send messages at nearly the same time. Their messages arrive at different servers. We need a total order. My approach: each chat group has a single designated ordering server — a lightweight sequencer. Every message for that group is routed to its sequencer, which assigns a monotonically increasing sequence number. This is the authoritative order. The sequencer is the bottleneck, but for a single chat group, the throughput requirement is low — even the busiest group chat won't exceed a few hundred messages per second. The bottleneck is per-group, not system-wide.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_ordering", "sequencer", "total_ordering", "bottleneck_analysis"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if the sequencer for a group goes down?",
+      "annotation": { "action": "failure_probe", "phase": "high_level_design", "target_concept": "sequencer_failover" }
+    },
+    {
+      "role": "candidate",
+      "content": "The sequencer state is just the last assigned sequence number — a single integer. We replicate this to a standby. On failure, the standby takes over, starts from the last known sequence number plus a safety gap (e.g., +1000) to avoid reuse. Messages during the failover gap are buffered by the sender or the gateway and retried. The safety gap means some sequence numbers are skipped, but that's fine — ordering is preserved, just not contiguous. Failover takes a few seconds at most. We use ZooKeeper or etcd for leader election of the sequencer.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sequencer_failover", "leader_election", "replication", "zookeeper"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let me ask the usual questions — what's the scale we're designing for?",
+      "annotation": { "action": "redirect", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me ask: how many users, daily actives, and average messages per day? What's the max group size? Do we need media support — images, videos? And what about message history — how far back should it be searchable?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "group_size", "media_support", "message_history"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "1 billion users, 500 million DAU. 50 billion messages per day. Max group size 500. Text and images. Full history searchable. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "50 billion messages per day is about 580K messages per second. Each message averages maybe 200 bytes for text. That's 116 MB/s of raw message data, 10 TB per day, 3.6 PB per year. For images, let's assume 10% of messages include images averaging 500 KB — that's 5 billion images per day, 2.5 PB per day just in media. We'll need an object store like S3 for media, separate from message storage.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "storage_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good numbers. Now build the architecture around your ordering solution.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Here's the architecture. Users connect via WebSocket to a Gateway Service — stateless servers maintaining persistent connections. When a user sends a message, the gateway routes it to the Chat Service, which identifies the target group's sequencer. The sequencer assigns the order, then the message is written to the Message Store (a Cassandra cluster, partitioned by chat_id). After persistence, the Chat Service pushes the message to all online group members via their gateway connections. For offline members, the message is stored and delivered when they reconnect. A Presence Service tracks who's online and on which gateway.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket", "gateway_service", "sequencer", "database_choice", "presence_service", "offline_delivery"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Why Cassandra for message storage?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "The access pattern is highly write-heavy — 580K writes per second — and reads are sequential: 'give me the last N messages for chat_id X.' Cassandra is designed for high write throughput with its LSM-tree storage engine. Partitioning by chat_id and clustering by sequence_number gives us efficient range queries for message history. The schema would be: partition key = chat_id, clustering key = sequence_number (descending), columns = sender_id, content, timestamp, media_url. This lets us do 'SELECT * FROM messages WHERE chat_id = ? ORDER BY seq_num DESC LIMIT 50' efficiently.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "cassandra", "database_schema", "lsm_tree"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the 'delivered' and 'read' receipt semantics?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "delivery_guarantees" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three states: sent, delivered, read. 'Sent' means the sequencer accepted it and it's persisted. 'Delivered' means the recipient's device acknowledged receipt — the gateway pushes the message, and the client sends back a delivery ACK. 'Read' means the user opened the chat — the client sends a read ACK. Both ACKs flow back through the gateway to the Chat Service, which updates the message status and notifies the sender. In group chats, we track per-member delivery/read status. For efficiency, instead of individual read receipts, we store the 'last_read_sequence_number' per user per chat. Everything up to that number is 'read'. This ties back to our sequencer — the sequence numbers make read tracking trivial.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["delivery_guarantees", "read_receipts", "message_ordering", "sequencer"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's elegant — using the sequence number for read tracking. How do you ensure exactly-once delivery?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "exactly_once_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "True exactly-once is impossible in distributed systems, so I'd implement effectively-once using idempotency. The sender assigns a client-generated UUID to each message before sending. The sequencer deduplicates based on this UUID — if it sees the same UUID twice (due to client retry), it returns the already-assigned sequence number without creating a duplicate. On the recipient side, the client also deduplicates by UUID before displaying. The message store has a unique constraint on (chat_id, client_message_id). So even with retries at every layer, the user sees each message exactly once.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["exactly_once_delivery", "idempotency", "deduplication", "client_message_id"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle message search across full history?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "search" }
+    },
+    {
+      "role": "candidate",
+      "content": "Cassandra isn't great for full-text search, so I'd use a separate search index. When a message is persisted, an async event publishes it to Kafka, and a consumer indexes it in Elasticsearch. The search index is partitioned by user_id — each user's searchable messages include all chats they're part of. The search API takes a query and returns matching messages with chat_id and sequence_number, which can then be used to load the surrounding context from Cassandra. For privacy, the search index only contains messages the querying user has access to — we enforce this at index time by writing to each participant's index partition.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["search", "elasticsearch", "kafka", "async", "privacy"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about end-to-end encryption? How does it affect your design?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "encryption" }
+    },
+    {
+      "role": "candidate",
+      "content": "End-to-end encryption changes things significantly. With E2E encryption, the server never sees plaintext — which means server-side search becomes impossible on encrypted content. The messages stored in Cassandra are ciphertext. Search would have to be client-side — download message metadata and decrypt locally. For group chats, we'd use the Signal Protocol's sender keys approach: the sender encrypts once with a shared group key, rather than encrypting separately for each member. Key distribution and rotation become new challenges. The sequencer still works fine — it operates on opaque message payloads. But our Elasticsearch index becomes useless for content search — we could only search metadata like timestamps and sender.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["encryption", "e2e_encryption", "signal_protocol", "search"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good trade-off awareness. Let's talk about the presence service — how does it scale?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "presence_service" }
+    },
+    {
+      "role": "candidate",
+      "content": "With 500M DAU, tracking online/offline status is expensive if done naively. I'd use a heartbeat model: clients send a heartbeat every 30 seconds. The presence service stores (user_id, gateway_id, last_heartbeat) in Redis. If heartbeat is missed for 60 seconds, the user is marked offline. For group chats, when someone sends a message, we look up presence for all group members — but we don't need to fan out presence changes to all contacts. Instead, presence is checked on demand: when you open a chat, the UI queries presence for that user. For the contact list view, we batch-query presence for visible contacts only. This avoids the N-squared problem of broadcasting every presence change.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["presence_service", "heartbeat", "redis_caching", "lazy_evaluation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running short on time. Summarize the key design decisions.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three key decisions define this design. First, per-group sequencers for total message ordering — this is the foundation that makes delivery receipts, read tracking, and gap detection all trivial. Second, Cassandra partitioned by chat_id with sequence number clustering — optimized for the dominant access pattern of sequential message reads. Third, a push-first delivery model via WebSocket with offline message queuing — prioritizing low latency for online users while guaranteeing eventual delivery for offline users. The sequencer is the only stateful, centralized component per group, but its scope is narrow and its failover is simple.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_ordering", "sequencer", "database_choice", "websocket", "offline_delivery"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great interview. I really liked that you led with the ordering problem — it showed strong architectural thinking. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 9,
+      "caching_strategy": 7,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Led with the hardest problem — message ordering — showing strong architectural instinct",
+      "Sequencer design elegantly solved ordering, receipts, and read tracking in one abstraction",
+      "Thorough treatment of exactly-once delivery via client-generated UUIDs and deduplication"
+    ],
+    "weaknesses": [
+      "API design was not explicitly discussed — no endpoint contracts or protocol details",
+      "Caching strategy was light — didn't discuss caching recent messages or chat metadata"
+    ]
+  }
+}

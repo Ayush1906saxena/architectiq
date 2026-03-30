@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "sde2",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_203"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design the news feed for a social media platform like Twitter. When users open the app, they see recent posts from accounts they follow. Where would you like to begin?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd like to start by understanding the scale. How many users are active? How many posts per day? What's the average number of follows per user? And is the feed chronological or ranked?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "read_write_ratio", "feed_ranking"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "50 million daily active users. 10 million new posts per day. Average user follows 300 accounts. Chronological feed for now. What other questions do you have?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Is there a max post length? Do we need to handle media like images and videos, or just text? And how fresh does the feed need to be — is it okay if a new post takes a few seconds to appear in followers' feeds?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["latency", "media_handling"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Text only for now, 280 characters. A few seconds of delay is fine. Go ahead with the design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do some quick math. 50 million DAU, let's say each user checks their feed 5 times a day — that's 250 million feed requests per day, roughly 2,900 per second. For writes, 10 million posts per day is about 116 per second. So reads vastly outnumber writes, about 25:1.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "read_write_ratio"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now, the straightforward approach — what would the simplest implementation look like?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "naive_approach" }
+    },
+    {
+      "role": "candidate",
+      "content": "The simplest approach: user requests their feed, we look up who they follow (300 accounts), then query the posts table for recent posts from those 300 accounts, sort by timestamp, take the top 50. Something like SELECT * FROM posts WHERE author_id IN (...300 ids...) ORDER BY created_at DESC LIMIT 50.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["sql_query", "naive_approach"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's wrong with that approach at our scale?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "query_performance" }
+    },
+    {
+      "role": "candidate",
+      "content": "Wait, if I think about this more carefully — every single feed request triggers a query that fans out to 300 authors in the posts table. At 2,900 feed requests per second, that's 2,900 queries each scanning 300 author partitions and merging results. That's N queries per feed load where N is the number of followed accounts. The database would be crushed. Even with good indexes, the merge-sort across 300 ranges per request at nearly 3K QPS isn't going to fly.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["query_performance", "fan_out_on_read", "scalability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good catch. So what's the alternative?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "fan_out_on_write" }
+    },
+    {
+      "role": "candidate",
+      "content": "Instead of building the feed at read time, we pre-compute it at write time. When someone posts, we push that post into every follower's pre-built feed. This is fan-out-on-write. Each user has a feed stored in something like Redis — a sorted set keyed by user_id, with post IDs scored by timestamp. When a user opens the app, we just read their pre-built feed: ZREVRANGE user:123:feed 0 49. That's a single O(log n + k) Redis command.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_on_write", "redis_caching", "sorted_set"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How expensive is the fan-out? Let's do the math.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "fan_out_cost" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right. If the average user has 300 followers, each post triggers 300 Redis writes. At 116 posts per second, that's 116 * 300 = 34,800 Redis writes per second just for fan-out. Redis can handle 100K+ operations per second per instance, so a single Redis instance could handle this. But some users — celebrities — might have millions of followers. A single post from someone with 5 million followers would generate 5 million writes. That's a problem.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_cost", "hot_user_problem", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle celebrities?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "hybrid_fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "A hybrid approach. Set a threshold — say, users with more than 10,000 followers are 'celebrities.' For regular users, we do fan-out-on-write as described. For celebrities, we skip the fan-out. Instead, when a user loads their feed, we fetch their pre-built feed from Redis AND separately fetch recent posts from any celebrities they follow (fan-out-on-read for just those accounts). Then merge the two lists by timestamp on the server. Most users follow maybe 5-10 celebrities, so that's only 5-10 extra lookups at read time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hybrid_fan_out", "hot_user_problem"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid. Walk me through the full architecture now.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "high_level_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "From the top: requests come through a load balancer. For posting: the Post Service writes the post to the database, then publishes an event to a message queue like Kafka. A Fan-out Worker consumes the event, looks up the author's followers, and for each non-celebrity follower, pushes the post ID into their Redis feed. For reading: the Feed Service reads the user's feed from Redis, also fetches any celebrity posts they need, merges them, fetches the full post content from a Post Cache or the database, and returns the response.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["load_balancing", "microservices", "kafka", "fan_out_on_write", "redis_caching", "message_queue"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Why Kafka between the Post Service and Fan-out Worker?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_queue" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two reasons. First, decoupling — the Post Service shouldn't have to wait for the fan-out to complete before responding to the user. The user just wants confirmation their post was saved, and the fan-out can happen asynchronously. Second, buffering — if we get a burst of posts, Kafka absorbs the spike and the Fan-out Workers process at their own pace. It also gives us retry capability — if a worker fails, the message stays in Kafka.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["message_queue", "async", "decoupling", "buffering"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if the Fan-out Worker crashes mid-way through distributing to followers?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the worker crashes after pushing to 150 out of 300 followers, 150 people don't get the post in their feed. With Kafka, I'd only commit the offset after the entire fan-out is complete. So if the worker crashes, another worker will re-process the message from the beginning. The 150 followers who already got it will get a duplicate push to their sorted set, but since we're using the post ID as the member and timestamp as the score, Redis ZADD is idempotent — adding the same member again just updates the score (which is the same), so no duplicates in the feed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["failure_handling", "idempotency", "kafka_offset"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How much Redis memory do we need for all the feeds?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let's say we keep the last 500 post IDs per user's feed. Each entry in a Redis sorted set is roughly 16 bytes — 8 for the post ID and 8 for the score. So 500 * 16 = 8KB per user. For 50 million users, that's 50M * 8KB = 400GB. That's a lot for a single Redis instance. We'd need a Redis cluster with maybe 10 nodes at 64GB each, giving us some headroom. We could also only keep feeds for active users and evict inactive ones.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "redis_cluster", "memory_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. I'd add monitoring on fan-out latency — the time from post creation to appearing in followers' feeds. I'd implement cursor-based pagination for scrolling through the feed. And for the post content cache, I'd use a separate Redis instance or Memcached since post content is read-heavy and cache-friendly. If we add media later, we'd need a CDN and separate media storage, but the feed architecture stays the same since we're just storing post IDs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "cursor_pagination", "cdn_redirect", "media_handling"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent job. You identified the fan-out problem on your own and worked through it clearly. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 62,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 5,
+      "database_design": 6,
+      "caching_strategy": 8,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Independently realized the fan-out problem: 'Wait, N queries per feed load won't scale'",
+      "Strong capacity math for both QPS and Redis memory",
+      "Good handling of the celebrity/hot user problem with a hybrid approach"
+    ],
+    "weaknesses": [
+      "Didn't explicitly discuss API endpoints (GET /feed, POST /posts)",
+      "No discussion of database choice or schema beyond basic SQL",
+      "Didn't cover what happens when Redis cluster goes down"
+    ]
+  }
+}

@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "senior",
+    "candidate_profile": "amazon-style",
+    "total_exchanges": 22,
+    "generation_id": "seed_305"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We're going to design a URL shortening service. Before we talk about architecture, I want to start with the customer. Who is your customer, and what problem are you solving for them?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "customer_obsession" }
+    },
+    {
+      "role": "candidate",
+      "content": "There are a few customer segments. End users who want to share clean, short links on social media or in emails. Businesses and marketers who need branded short links with analytics — click-through rates, geographic data, referrer info. And internal teams at our company who use it for shortening links in notifications, emails, or documentation. Each has different needs: end users want simplicity and speed, businesses want analytics and customization, internal teams want reliability and SLA guarantees.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["customer_segments", "product_requirements"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good segmentation. What SLA would you commit to for this service? Think about availability, latency, and durability.",
+      "annotation": { "action": "probe", "phase": "requirements", "target_concept": "sla_slo" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the redirect path, I'd commit to 99.99% availability — that's about 52 minutes of downtime per year. Redirects should be under 100ms at p99 globally. For the creation path, 99.95% availability is acceptable since it's less critical. Durability is non-negotiable: once a short URL is created, it must never be lost. I'd target 99.999999999% durability — eleven nines, similar to S3. We also need an SLO for the time between URL creation and the link being resolvable: under 1 second.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sla_slo", "availability", "latency", "durability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you measure whether you're meeting those SLAs? What's your operational setup?",
+      "annotation": { "action": "probe", "phase": "requirements", "target_concept": "operational_excellence" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd have synthetic canaries running in every region — they continuously create short URLs and resolve them, measuring end-to-end latency. These feed into CloudWatch dashboards. We'd have alarms at multiple thresholds: a warning at p99 > 80ms (approaching SLA), and a critical alarm at p99 > 95ms that pages the on-call. For availability, we measure real user success rates, not just server-side metrics — if the load balancer drops the request, that counts as downtime. Weekly ops review meetings to look at the error budget: if we've burned 50% of our monthly error budget, we freeze deployments and focus on stability.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "canary_testing", "error_budget", "operational_excellence"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Alright, let's get into the architecture. Walk me through the high-level design.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The service has three main planes. The data plane handles redirects — this is the hot path. Request comes in, hits a global load balancer like ALB, routes to a fleet of stateless redirect servers in the nearest region. They check an in-memory local cache, then a Redis cache, then DynamoDB. First hit wins, redirect returns. The control plane handles URL creation, custom aliases, and configuration. It writes to DynamoDB and invalidates caches. The analytics plane asynchronously processes click events via Kinesis into a data lake for reporting. All three planes are independently scalable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["system_decomposition", "load_balancing", "redis_caching", "database_choice", "analytics_pipeline"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned DynamoDB. Why that over, say, Aurora or Redis as the primary store?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "DynamoDB fits this use case well because the access pattern is simple key-value lookup by short code. DynamoDB gives us single-digit millisecond reads at any scale with minimal operational burden — no sharding management, no replica lag concerns. It handles the scaling automatically. It also provides global tables for multi-region replication, which is crucial for our 99.99% availability SLA. Aurora would work but requires more operational overhead — managing read replicas, failover, connection pooling. Redis as primary is risky because it's in-memory, so durability depends on persistence configuration, and it's expensive at 100+ TB scale.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "dynamo_db", "operational_excellence"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about your deployment strategy. How do you ship changes to this service without breaking the SLA?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "deployment_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "We use a staged deployment pipeline. Code goes through unit tests, integration tests, then deploys to a gamma/pre-production environment that mirrors production traffic via shadow mode. Once validated, we deploy to one region first — say us-west-2 — using a canary deployment: 5% of traffic for 15 minutes while we monitor error rates and latency. If all metrics are green, we ramp to 25%, then 50%, then 100% in that region. Then we roll to the next region. Each stage has automatic rollback triggers: if error rate exceeds 0.1% or p99 latency exceeds 80ms, we automatically roll back. The entire deployment takes about 4 hours across all regions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["deployment_strategy", "canary_deployment", "rollback", "monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "It's 3 AM and you get paged. The redirect error rate in us-east-1 just spiked to 5%. Walk me through your runbook.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "incident_response" }
+    },
+    {
+      "role": "candidate",
+      "content": "First 5 minutes: assess severity. 5% error rate on redirects is a SEV-1. I check the dashboard to see if it's correlated with a deployment — if yes, immediately roll back. If no recent deployment, I check the error type: are these 5xx from our servers, timeouts to DynamoDB, or Redis failures? Next, I check if it's isolated to one availability zone — if so, I mark that AZ unhealthy in the load balancer to shift traffic. Meanwhile, I page the secondary on-call and the team lead. If DynamoDB is the issue, I check the throttling metrics and increase provisioned capacity or switch to on-demand. If Redis is down, the system should degrade gracefully to DynamoDB-only mode. Within 15 minutes, I should have mitigated the impact. After the incident, I write a COE — correction of errors document — covering the timeline, root cause, and action items to prevent recurrence.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["incident_response", "runbook", "severity_classification", "post_mortem"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good operational thinking. How do you handle the encoding — generating short codes — and ensure no collisions?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "base62_encoding" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a counter-based approach with DynamoDB's atomic counter. A central counter item gets atomically incremented for each new URL. The counter value is then base62 encoded to produce the short code. This guarantees uniqueness with no collisions. The bottleneck is the single counter — DynamoDB can handle about 25,000 atomic increments per second on a single item. If we need more, I'd pre-allocate ranges: each app server claims a range of 50,000 IDs with a single atomic operation, then generates locally. That scales to millions of writes per second.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["base62_encoding", "atomic_counter", "id_generation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if the counter service becomes a single point of failure? How does that affect your SLA?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "single_point_of_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good catch. If the counter is down, we can't create new URLs, which violates our creation path SLA. Mitigations: first, the range pre-allocation means each server has a buffer of tens of thousands of IDs. Even if the counter is down for minutes, existing servers keep creating URLs. Second, I'd have a fallback ID generation strategy — switch to UUID-based random codes with collision checking on DynamoDB's conditional write. It's slower but functional. Third, the DynamoDB item is replicated across three AZs, so a single AZ failure doesn't affect it. Full DynamoDB outages are extremely rare — it's the backbone of AWS.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["single_point_of_failure", "fallback_strategy", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle abuse? Someone scripting millions of URL creations to exhaust your keyspace or host phishing links.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multiple layers. Rate limiting: per-API-key and per-IP limits. Anonymous users get 100 URLs per hour, authenticated users get 10,000. Rate limiting uses a token bucket algorithm implemented in Redis. For phishing detection: we check destination URLs against Google's Safe Browsing API at creation time and periodically re-scan existing URLs. We also monitor for patterns — many URLs pointing to the same domain created in a burst. If flagged, the URLs are disabled and we require the creator to verify. For keyspace exhaustion, the 7-character base62 space gives us 3.5 trillion codes — even at 1 billion per day, it takes 9.5 years. But I'd monitor the consumption rate and alert if it accelerates unexpectedly.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "abuse_detection", "url_safety"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "If you had to build this service from scratch on AWS, what's your cost estimate for running it at 100 million URLs per day?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "cost_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rough estimates: DynamoDB with on-demand pricing at 100M writes/day is about 125 dollars per day for writes, reads are much cheaper since most are cached. Redis ElastiCache for caching — a cluster of r6g.xlarge nodes, maybe 6 nodes, about 2,500 per month. EC2 or Fargate for the redirect fleet — with 115K QPS, maybe 20 c6g.large instances, about 3,000 per month. ALB costs for handling 10 billion requests per month, about 2,000 per month. Kinesis for the analytics stream, about 1,500 per month. Total: roughly 15,000 to 20,000 per month. That's surprisingly affordable for a service handling 10 billion redirects a month.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cost_estimation", "cloud_infrastructure"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good operational and customer-focused thinking throughout. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add a few things for production readiness. A chaos engineering program — regularly inject failures like AZ outages and cache failures to validate our resilience. A data retention policy aligned with customer expectations and compliance. And most importantly, a customer feedback loop — instrument the error pages with a way for users to report issues, and track the top customer complaints weekly to prioritize improvements.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["chaos_engineering", "compliance", "customer_feedback"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great. Thanks for the thorough walkthrough.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 73,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Outstanding operational excellence mindset — SLA/SLO, runbooks, deployment strategy all well-covered",
+      "Excellent incident response walkthrough with clear prioritization",
+      "Strong customer segmentation and customer-obsession framing"
+    ],
+    "weaknesses": [
+      "API design and endpoint contracts were never discussed",
+      "Capacity estimation was not done upfront — numbers came up only when prompted",
+      "Database schema and data modeling were underexplored"
+    ]
+  }
+}

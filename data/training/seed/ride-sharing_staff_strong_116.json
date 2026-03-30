@@ -1,0 +1,159 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 22,
+    "generation_id": "seed_116"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing service like Uber or Lyft. Users request rides, drivers accept them. What do you want to clarify?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several questions. What's the geographic scope — one city, one country, or global? What's the expected scale — concurrent ride requests and active drivers? Do we need pooled rides (shared with strangers) or just individual rides? What about surge pricing? And what's the latency requirement for matching a rider with a driver?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geographic_scope", "qps", "ride_pooling", "surge_pricing", "matching_latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Global but design for one region first. 1 million concurrent ride requests per minute in a large metro area. 500,000 active drivers. Individual rides only. Surge pricing is in scope. Matching should be under 10 seconds. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The matching algorithm is the heart of this system. This is fundamentally an optimization problem. We need to minimize total wait time across all pending riders while maximizing driver utilization. A naive approach — assign each rider to the nearest available driver — is locally optimal but globally suboptimal. If two riders are close together and there's one nearby driver and one far driver, the naive approach might assign the nearby driver to the first request, leaving the second rider with the far driver. A batch matching approach that considers all pending requests together produces better outcomes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["matching_algorithm", "optimization", "batch_matching", "global_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting. How would the batch matching work?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "matching_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "Every 2 seconds, the matching service runs a batch cycle. It collects all unmatched ride requests and all available drivers in a region. It constructs a bipartite graph: riders on one side, drivers on the other, with edges weighted by estimated pickup time (using real-time traffic data, not just straight-line distance). Then it solves an assignment problem to minimize total weighted cost — essentially a variant of the Hungarian algorithm. For scale, we don't solve it globally — we partition by geographic cells (like S2 cells or geohashes) and solve within each cell plus a buffer zone of adjacent cells to handle boundary cases. 1M requests per minute is about 33K per 2-second batch, partitioned across maybe 100 cells, so about 330 requests per cell per batch — very tractable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["batch_matching", "bipartite_graph", "hungarian_algorithm", "geohashing", "s2_cells", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if the optimal match for a rider is a driver in an adjacent cell?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "cell_boundary" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's the boundary problem. Each cell's matching considers drivers in a 'halo' — one ring of adjacent cells. So a rider in cell A might be matched with a driver in cell B if that driver is in cell A's halo. To avoid conflicts (cell A and cell B both trying to assign the same driver), the driver is 'claimed' atomically when assigned. If cell B's matching tries to assign a driver already claimed by cell A's matching, it skips that driver and finds the next best. We can also use a two-phase approach: first, each cell proposes matches, then a coordinator resolves conflicts and finalizes. The 2-second batch window gives us enough time for this coordination.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cell_boundary", "conflict_resolution", "two_phase_matching", "atomic_claim"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the full system architecture now.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Several services. The Rider Service handles ride requests and status tracking. The Driver Service manages driver availability and location updates. Drivers send location pings every 4 seconds via the Location Service, which stores current positions in a spatial index — I'd use Redis with geospatial commands (GEOADD/GEOSEARCH) for real-time lookups. The Matching Service runs the batch algorithm every 2 seconds. The Routing Service computes ETAs using map data (licensed from providers or OpenStreetMap) with real-time traffic overlays. The Pricing Service calculates fares and surge multipliers. A Trip Service tracks the ride lifecycle from request through completion to payment. All services communicate via a mix of synchronous RPCs (for the request flow) and Kafka (for events like trip-completed, location-updated).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["microservices", "spatial_index", "redis_geospatial", "routing_service", "pricing_service", "kafka", "location_tracking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500K drivers sending location pings every 4 seconds — that's 125K writes per second just for locations. How do you handle that?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "location_tracking" }
+    },
+    {
+      "role": "candidate",
+      "content": "125K location writes per second is significant. Redis GEOADD handles this well — a single Redis instance can do 200K+ operations per second. I'd shard by city or region, so each Redis instance handles one metro area's drivers. For a large metro like NYC with 50K drivers, that's only 12.5K writes per second — trivial for Redis. The spatial index needs to support the query: 'find all available drivers within 5km of this point.' Redis GEOSEARCH does this efficiently. We also keep a time-series of recent locations for ETA computation and for detecting drivers who stopped moving (GPS issues, driver fell asleep). This history goes to Kafka and then to a separate analytics store — not in the hot Redis path.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_geospatial", "sharding_strategy", "location_tracking", "capacity_estimation", "kafka"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does surge pricing work in your design?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing is driven by supply-demand imbalance. The Pricing Service computes a surge multiplier per geographic cell every 30 seconds. Input signals: number of pending unmatched requests (demand), number of available drivers (supply), historical patterns (rush hour, events), and recent match failure rates. When demand/supply ratio exceeds a threshold — say 1.5 — we apply a multiplier: 1.2x, 1.5x, 2.0x, etc., based on the severity. The multiplier is shown to the rider before they confirm. Surge pricing serves two purposes: it discourages marginal demand (some riders will wait) and attracts supply (drivers see surge zones and drive toward them). The feedback loop is important — we don't want surge to oscillate, so the multiplier changes gradually with dampening.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_pricing", "supply_demand", "feedback_loop", "dampening", "pricing_signals"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if the matching service goes down? Riders are waiting.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "matching_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The matching service is stateless — the state is in Redis (driver locations) and the request queue (Kafka or in-memory). If one instance goes down, other instances continue processing. The matching service runs as multiple replicas, each responsible for a subset of geographic cells. If a replica fails, a coordinator (backed by ZooKeeper or etcd) reassigns its cells to surviving replicas within one batch cycle — 2 seconds. During that cycle, requests for those cells buffer in the queue. As a fallback, if the batch matching is completely unavailable, the Rider Service can fall back to a simple nearest-driver algorithm — less optimal but functional. Riders see slightly longer wait times rather than complete failure.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["stateless_service", "cell_reassignment", "graceful_degradation", "fallback_algorithm", "zookeeper"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the real-time communication between the system and both riders and drivers?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "real_time_communication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Both riders and drivers maintain persistent connections — WebSockets or SSE on mobile. The driver app sends location updates and receives ride offers. The rider app sends ride requests and receives match notifications, driver location updates, and trip status changes. The WebSocket Gateway is a fleet of servers; a connection registry in Redis maps user IDs to gateway instances. When the matching service matches a rider and driver, it publishes a match event to Kafka. The notification consumer reads the event, looks up both users' gateway connections, and pushes the notification. The driver has 15 seconds to accept; if they decline or timeout, the request goes back to the matching pool for the next batch cycle.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket", "connection_registry", "redis_caching", "kafka", "driver_acceptance", "notification_service"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you measure the quality of your matching algorithm?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "matching_quality" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several metrics. Primary: median and p95 rider wait time — from request to driver arrival. Secondary: driver utilization rate — percentage of time a driver has a passenger (or is en route to one). Match rate — percentage of requests that result in a match within 2 minutes. And cancellation rate — a high cancellation rate means bad matches (ETA too long, driver too far). For the algorithm itself, I'd A/B test: run the batch matching for 50% of requests and a simpler nearest-driver approach for the other 50%, and compare the metrics. We should also track fairness — are some areas consistently underserved? Are new drivers getting a fair share of rides? These are business-critical metrics that feed back into algorithm tuning.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["matching_quality_metrics", "ab_testing", "driver_utilization", "fairness", "wait_time"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the data storage? Where do you store trip history, payments, etc.?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "data_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Different data, different stores. Trip data (active and historical) goes to a sharded PostgreSQL cluster, partitioned by city and time. This is the system of record for billing and disputes. Payment processing goes through a payment service that talks to Stripe or a bank — the payment records are in the trip database. Driver/rider profiles are in another Postgres cluster. Location history — the time-series of driver positions — goes to a time-series database like TimescaleDB or InfluxDB, used for analytics, ETA model training, and fraud detection. The real-time operational data (current driver positions, active trips, surge multipliers) lives in Redis. And all events flow through Kafka to a data lake (S3 + Spark) for offline analytics and ML model training.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["polyglot_persistence", "database_choice", "time_series_db", "data_lake", "kafka", "redis_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Final question: how would you scale this from one metro to global?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": "global_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Ride-sharing is naturally region-scoped — a rider in NYC never matches with a driver in London. This makes global scaling relatively clean. Each major metro or country gets its own deployment — its own matching service, Redis cluster, trip database. A global control plane handles user accounts (which are cross-region), driver onboarding, and global analytics. The matching algorithm, pricing models, and map data are region-specific configurations. When launching in a new city, we deploy a new instance from a template, configure the map data and pricing rules, and onboard local drivers. The challenge is operational: supporting hundreds of regions with different regulations, payment methods, and traffic patterns. I'd invest heavily in infrastructure-as-code and automated deployment pipelines.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_region", "region_isolation", "global_control_plane", "infrastructure_as_code", "operational_scaling"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. The matching algorithm focus was really distinctive and well-developed. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 78,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 8,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional depth on the matching algorithm — batch optimization, bipartite graphs, cell partitioning",
+      "Strong surge pricing design with dampening and feedback loop awareness",
+      "Clear global scaling strategy leveraging the natural region isolation of ride-sharing"
+    ],
+    "weaknesses": [
+      "API design was not explicitly discussed — no endpoint contracts for rider or driver apps",
+      "Caching strategy beyond Redis was minimal — no discussion of caching ride ETAs or fare estimates"
+    ]
+  }
+}

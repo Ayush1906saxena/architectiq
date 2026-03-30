@@ -1,0 +1,149 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "senior",
+    "candidate_profile": "matching-algorithm",
+    "total_exchanges": 20,
+    "generation_id": "seed_362"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design the ride-matching system for a ride-sharing platform like Uber. Specifically, how do you match riders with drivers optimally? What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Good problem. Questions: How many concurrent ride requests and available drivers are we dealing with? Is this a single city or multi-city? Do we match one-at-a-time (as requests arrive) or in batches? What optimization criteria — shortest ETA, driver rating, or a combination? Do we need to handle ride-sharing/pooling or just single rides? And is there a maximum acceptable wait time for the rider?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["concurrent_scale", "matching_mode", "optimization_criteria", "ride_pooling", "wait_time"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "50,000 ride requests per minute at peak in a major city. 20,000 available drivers. Start with single rides, discuss pooling later. Multiple optimization criteria. Maximum wait time: 5 minutes. I'd like you to go deep on the matching algorithm.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "matching_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "The naive approach is greedy matching: for each ride request, find the nearest available driver and assign them. This is simple and fast but suboptimal. Consider: rider A is 2 minutes from driver 1 and 5 minutes from driver 2. Rider B (arriving 1 second later) is 1 minute from driver 1 and 10 minutes from driver 2. Greedy assigns driver 1 to rider A (2 min ETA), leaving rider B with driver 2 (10 min ETA). Total wait: 12 minutes. Optimal would assign driver 1 to rider B (1 min) and driver 2 to rider A (5 min). Total wait: 6 minutes. The greedy approach produces 2x worse total wait time in this example. We need batch matching.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["greedy_matching", "suboptimality", "batch_matching", "total_wait_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good motivation. Design the batch matching system.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "batch_matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a batch matching cycle that runs every 2 seconds. Here's the design. Every 2 seconds, the matching engine collects all unmatched ride requests and all available drivers. At peak: ~1,667 new requests per 2-second window, plus any unmatched from previous cycles. Let's say 2,000 pending requests and 20,000 available drivers. Step 1: Build a scoring matrix. For each (rider, driver) pair that could be a match, compute a score. Not all pairs are feasible — we only consider drivers within a reasonable radius (say 5 km). On average, each rider has maybe 50 candidate drivers. So the matrix is sparse: 2,000 * 50 = 100,000 scores to compute, not 2,000 * 20,000 = 40 million.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["batch_matching", "scoring_matrix", "sparse_matrix", "matching_cycle"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about the scoring function. What goes into the score?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "scoring_function" }
+    },
+    {
+      "role": "candidate",
+      "content": "The scoring function combines multiple factors: score(driver, rider) = w1 * distance_score + w2 * eta_score + w3 * rating_score + w4 * acceptance_score + w5 * earnings_fairness_score. Let me define each: (1) distance_score: normalized straight-line distance. Closer is better. distance_score = 1 - (distance_km / max_radius_km). If driver is 1km away and max is 5km: score = 0.8. (2) eta_score: based on actual road ETA from the routing engine. eta_score = 1 - (eta_minutes / max_eta_minutes). ETA is better than distance because a driver 2km away across a river might have 15-minute ETA, while a driver 3km away on the highway has 4-minute ETA. (3) rating_score: driver's average rating normalized. rating_score = (driver_rating - 4.0) / 1.0. A 4.8 driver scores 0.8; a 4.5 driver scores 0.5. (4) acceptance_score: probability the driver will accept this ride, predicted by a logistic regression model trained on historical accept/decline data. Features: trip distance, destination direction, time of day, driver's current earnings. (5) earnings_fairness_score: drivers who haven't had a ride in a while get a boost. fairness_score = min(1.0, minutes_since_last_ride / 30). Typical weights: w1 = 0.0 (don't use raw distance), w2 = 0.4, w3 = 0.1, w4 = 0.3, w5 = 0.2.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["scoring_function", "eta_vs_distance", "driver_rating", "acceptance_probability", "earnings_fairness", "weighted_combination"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good scoring function. Now how do you optimize the global assignment?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "assignment_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "With the scoring matrix, we need to find the assignment that maximizes total score. This is the assignment problem — a classic in combinatorial optimization. The Hungarian algorithm (Kuhn-Munkres) solves it optimally in O(n^3) time. For our sparse matrix, n = max(riders, drivers) = 20,000. O(20,000^3) = 8 * 10^12 operations — way too slow for a 2-second cycle. Instead, I'd use a modified approach: since each rider only has ~50 candidate drivers (not 20,000), the problem is sparse. I'd use the auction algorithm (Bertsekas algorithm), which exploits sparsity. The auction algorithm iterates: each unmatched rider 'bids' on their best available driver. If multiple riders bid on the same driver, the highest bidder wins; the losers bid again on their next-best driver. Convergence: O(n * max_edges_per_node) = O(2,000 * 50) = 100,000 iterations. Each iteration is simple (compare scores), so total computation is ~1ms. Far within our 2-second budget.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hungarian_algorithm", "auction_algorithm", "computational_complexity", "sparse_assignment", "convergence"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens to riders who don't get matched in this batch cycle?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "unmatched_riders" }
+    },
+    {
+      "role": "candidate",
+      "content": "Unmatched riders carry over to the next batch cycle with increasing priority. I'd add a wait_time_penalty to their score: for each second they've been waiting, add a bonus of 0.02 to their score for all candidate drivers. After 30 seconds of waiting, they get a 0.6 bonus — enough to beat a just-arrived rider for the same driver. If a rider has been waiting for 2 minutes without a match (no drivers in range), we expand the search radius: 5km → 8km → 12km. We also notify the rider: 'Looking for drivers, estimated wait: 3-4 minutes.' If after 5 minutes no match is found, we offer alternatives: scheduled pickup (try again in 10 minutes when supply might increase), alternative pickup point (walk 2 blocks to a busier street), or a different ride type (shared ride might match faster). Tracking: I'd monitor the match rate (% of requests matched within 2 seconds), average wait time, and timeout rate (% of requests that hit 5-minute limit without a match). Target: 90% matched within 30 seconds, <2% timeout rate.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["wait_time_priority", "radius_expansion", "rider_fallback", "match_rate_monitoring", "timeout_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Once a match is found, the driver might decline. How do you handle that?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "driver_acceptance" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a match is found, we send an offer to the driver. The driver has 15 seconds to accept. Three outcomes: (a) Driver accepts: lock both driver and rider. Start the trip. (b) Driver declines: the rider goes back into the next batch cycle with their original wait time preserved (no penalty for driver decline). The driver's acceptance_score gets updated — a decline feeds back into the ML model that predicts acceptance probability. After 3 consecutive declines, the driver is given a cooldown — not offered rides for 2 minutes (they might be trying to go offline). (c) Driver doesn't respond (timeout at 15 seconds): treated as a decline. Likely the driver is distracted or has already started moving. To reduce decline rate, the acceptance_probability model is critical. If we predict that a driver has only a 20% chance of accepting a particular ride (e.g., it's going in the opposite direction of their home at 11 PM), we don't offer it to them — we skip to a driver with higher acceptance probability, even if they're slightly farther away. This reduces rider wait time due to declines.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["driver_offer", "acceptance_timeout", "decline_handling", "acceptance_prediction", "cooldown_mechanism"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss the acceptance probability model. What features does it use?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "acceptance_model" }
+    },
+    {
+      "role": "candidate",
+      "content": "The model is a gradient-boosted tree (LightGBM) trained on historical accept/decline data. Features: Trip features: estimated trip distance, estimated trip duration, estimated fare, trip direction relative to driver's heading, pickup distance (how far the driver has to drive to pick up). Driver features: hours driven today (fatigued drivers decline more after 8+ hours), current earnings today (drivers near their daily goal accept more), historical acceptance rate, home location (drivers decline trips going away from home late at night), current shift time. Context features: time of day, day of week, weather (rain increases demand and acceptance — drivers earn more), surge multiplier (higher surge = higher acceptance because earnings are higher). Rider features: rider rating (drivers avoid low-rated riders), ride type (standard vs premium). The model outputs P(accept) between 0 and 1. We filter out matches with P(accept) < 0.3 entirely — offering those rides wastes 15 seconds that the rider can't afford. Historical accuracy: AUC of 0.82, which means the model distinguishes acceptors from decliners well.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lgbm", "feature_engineering", "acceptance_prediction", "filtering_threshold", "model_accuracy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's briefly discuss pooling. How does matching change for shared rides?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ride_pooling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Ride pooling dramatically increases matching complexity. Instead of matching (rider, driver) pairs, we're matching (rider, existing_trip) or (rider1, rider2, driver). For an existing trip with a passenger going from A to B, we can add rider 2 going from C to D if: (1) C is near the existing route (within a detour_threshold, say 0.5 km off-route). (2) The detour adds at most 5 minutes to the original passenger's trip (detour_time_limit). (3) The destinations are in roughly the same direction. The scoring function changes: pool_score = base_match_score * (1 - detour_penalty) * price_discount_factor. detour_penalty = added_trip_time / max_detour_time. Each pooled rider gets a 25-40% fare discount, but we collect more total fare per trip. The optimization becomes a vehicle routing problem (VRP) — NP-hard in general. We approximate: for each pending rider, find the top 10 active trips that could pool them (using geospatial index on current trip routes), compute the detour cost for each, and greedily assign riders to the pool with the smallest detour. This is suboptimal but runs in O(riders * candidates) = O(2000 * 10) = 20K computations per batch — fast enough.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ride_pooling", "detour_threshold", "vehicle_routing", "np_hard", "greedy_approximation", "fare_discount"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the matching system's failure modes?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Key failure modes: (1) Matching engine crashes mid-cycle: ride requests are stored in a durable queue (Kafka). If the engine crashes, a standby engine takes over and reads from the queue. Requests already in the queue have timestamps, so the new engine knows how long each rider has been waiting. No rider is lost. (2) ETA service is slow/down: we fall back to straight-line distance * city_speed_factor (empirical: 1.5x to 2x straight-line). Less accurate but still functional. (3) Acceptance model is down: skip the acceptance_probability filter and use raw scoring without w4. Match quality degrades but matching continues. (4) Supply-demand imbalance (many riders, few drivers): trigger surge pricing (raises fares to attract more drivers and reduce demand). Also send push notifications to offline drivers: 'High demand in your area. Go online to earn 2.5x.' (5) Thundering herd after a concert or sports event: thousands of requests from the same location simultaneously. Our 2-second batch handles this well — all requests compete fairly. But we need to handle the ETA computation burst: 10,000 riders * 50 candidates = 500,000 ETA computations. At 1ms each, that's 500 seconds sequentially. We parallelize across 100 routing workers: 5 seconds. Acceptable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["engine_failover", "eta_fallback", "graceful_degradation", "surge_pricing", "parallel_computation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Anything to wrap up the matching algorithm discussion?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three additions. First, A/B testing the matching algorithm: run two matching strategies simultaneously on different traffic slices (by geo region or rider cohort). Compare metrics: average rider wait time, driver utilization (% of online time with a passenger), rider satisfaction (post-ride ratings), and revenue per trip. A 10% reduction in wait time directly impacts rider retention. Second, fairness constraints: the matching algorithm should not discriminate based on rider demographics. I'd audit match outcomes by rider demographic cohorts to detect any bias in wait times or match quality. Third, the matching engine's 2-second cycle time is tunable. In low-demand periods (2 AM), extend to 5 seconds — fewer requests mean less benefit from batching, and the added latency doesn't matter. In ultra-high-demand periods (New Year's Eve), shrink to 1 second — many requests benefit from frequent optimization. The batch window itself is a parameter we can optimize.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ab_testing", "matching_metrics", "fairness_audit", "dynamic_batch_window", "rider_retention"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent matching algorithm design. Very strong optimization thinking. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 4,
+      "database_design": 5,
+      "caching_strategy": 4,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Strong algorithmic design — batch matching with auction algorithm is the right choice for sparse assignment",
+      "Excellent multi-factor scoring function with concrete weights and justifications",
+      "Good ML integration with acceptance probability model including feature engineering"
+    ],
+    "weaknesses": [
+      "API design was not discussed — no endpoints for ride requests or driver operations",
+      "Database and caching design were absent — no mention of how match data is stored or cached"
+    ]
+  }
+}

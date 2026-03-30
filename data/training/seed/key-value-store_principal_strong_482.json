@@ -1,0 +1,130 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "principal",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_482"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a distributed key-value store. At the principal level, I expect you to drive this conversation — architecture spanning teams, trade-off matrices, and real operational considerations.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll structure this as: requirements → architecture → deep dives on the hardest parts → operational model. First, requirements: are we building a general-purpose KV store or optimized for a specific access pattern? What's the consistency model — strict CP or tunable AP? What's the latency budget and throughput target? And is this replacing an existing system or greenfield?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["structured_approach", "access_pattern", "cap_theorem", "latency_budget", "migration_context"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "General-purpose: session storage, feature flags, caching, and user preferences. Tunable consistency. Sub-5ms p99 reads, sub-10ms p99 writes. 2M operations per second. This is replacing a mix of Redis clusters and DynamoDB tables — we want to consolidate.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Consolidation from Redis + DynamoDB is the key context. We need to match DynamoDB's durability and Redis's latency. Let me do the math: 2M ops/sec, assuming 60% reads and 40% writes — 1.2M reads/sec and 800K writes/sec. At 1KB average value size, that's 800MB/s write throughput before replication. With 3x replication, 2.4GB/s of actual disk writes. That requires at least 24 NVMe drives if each sustains 100MB/s sequential writes — so roughly 8-12 storage nodes minimum, each with 2-3 drives. Reads at sub-5ms p99 mean we need most reads served from memory. If the working set is 500GB (reasonable for session + feature flag data), we need enough aggregate RAM across nodes to hold it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "read_write_ratio", "disk_throughput", "nvme", "node_sizing", "working_set", "memory_requirement"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thorough estimation. Walk me through the architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three-layer architecture. Routing layer: stateless, horizontally scalable. Receives client requests, resolves the partition for the key via consistent hashing with virtual nodes, and routes to the correct storage node. Clients can also cache the partition map and route directly to storage nodes for lower latency. Storage layer: the stateful tier. Each node owns a set of hash ring partitions. Within each node, the storage engine is LSM-tree based — writes go to an in-memory memtable backed by a WAL, then flush to sorted SSTables on disk. Reads check the memtable first, then a bloom filter to skip irrelevant SSTables, then the SSTable hierarchy. This gives us O(log N) reads and O(1) amortized writes. Metadata layer: a small Raft cluster (3 or 5 nodes) that maintains the partition map — which nodes own which hash ranges — and orchestrates rebalancing when nodes join or leave. This is the brain of the cluster but handles very low traffic.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["routing_layer", "consistent_hashing", "virtual_nodes", "lsm_tree", "memtable", "wal", "sstable", "bloom_filter", "raft_metadata", "partition_map"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You chose LSM trees. How do you handle the compaction overhead? It can cause latency spikes.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Compaction is the LSM tree's Achilles heel — it creates I/O spikes that can blow p99 latency. Three mitigations. Rate-limited compaction: cap the I/O bandwidth compaction can use — say 30% of disk throughput. This slows compaction but prevents it from starving read/write traffic. Leveled compaction over size-tiered: leveled compaction limits space amplification and provides more predictable read performance at the cost of higher write amplification. For our workload (sub-5ms reads are critical), leveled is the right trade-off. Dedicated compaction threads on separate CPU cores: isolate compaction from the request-serving path. On modern multi-core machines, we can pin compaction to specific cores and I/O channels. Additionally, I'd monitor compaction debt — the ratio of L0 files to the compaction rate. If debt grows, it means compaction can't keep up and reads will slow down. This is a key operational metric to alert on.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["compaction_overhead", "rate_limiting", "leveled_compaction", "size_tiered_compaction", "write_amplification", "cpu_pinning", "compaction_debt"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the consistency model work? You said tunable consistency.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Quorum-based with configurable W and R per request. With N=3 replicas: strong consistency uses W=2, R=2 (overlap guarantees latest value). Eventual consistency uses W=1, R=1 (fastest, but may read stale). The client sets the consistency level per operation. Session storage with feature flags: eventually consistent is fine — a session read that's 100ms stale is acceptable. For feature flags that control billing: strong consistency. For writes: we always write to the leader replica first, then replicate. With W=2, we wait for one follower to ack before responding. The interesting edge case: what happens when two clients write the same key concurrently to different replicas under eventual consistency? We need conflict resolution. I'd use last-write-wins with hybrid logical clocks (HLC). HLCs combine wall-clock time with a logical counter to provide causal ordering without requiring perfectly synchronized clocks. LWW is lossy — concurrent writes can lose data — but for our use cases (session updates, feature flag toggles), the last write is almost always the correct one.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["quorum", "w_r_n", "consistency_levels", "conflict_resolution", "last_write_wins", "hybrid_logical_clocks", "causal_ordering"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle node failure and data recovery?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three failure modes. Transient failure (node restart): the node recovers from its WAL and SSTables on disk. No data loss. Replays the WAL to rebuild the memtable, then resumes normal operation. Recovery time: seconds to minutes depending on WAL size. Permanent node loss (disk failure): the metadata layer detects the node is gone (missed heartbeats), removes it from the ring, and assigns its partitions to remaining nodes. The remaining replicas serve reads immediately (N-1 replicas still have the data). A repair process copies data from the remaining replicas to new partition owners. The repair uses Merkle trees — each replica maintains a hash tree of its data. By comparing trees, we identify exactly which key ranges differ and only transfer the deltas. This makes repair bandwidth-efficient. Cascading failure (multiple node failures in a replication group): if all 3 replicas of a partition are down, that partition is unavailable. With careful rack-awareness — replicas placed on different racks or availability zones — this requires a rack-level failure, which is rare. For this scenario, we accept unavailability rather than risk data loss.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["wal_recovery", "node_replacement", "merkle_tree_repair", "rack_awareness", "availability_zones", "cascading_failure", "unavailability_vs_data_loss"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the migration from Redis + DynamoDB to this new system? That's the hardest organizational challenge.",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "migration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Migration is where most KV store projects fail — not the technology. My approach: Phase 0 — Compatibility layer: build a DynamoDB-compatible API and a Redis-compatible protocol adapter on top of our KV store. Teams can switch with a config change, not a code rewrite. This is the most important investment. Phase 1 — Shadow traffic: pick 3 low-risk use cases (maybe internal feature flags, a non-critical cache, and a dev environment session store). Run dual-writes: every write goes to both the old and new system. Reads still from the old system. Compare results for correctness. Phase 2 — Canary reads: shift 1% of reads to the new system. Monitor latency, error rates, and data consistency. Gradually increase to 100%. Phase 3 — Cutover writes: once reads are fully migrated, stop dual-writing and direct all writes to the new system. Keep the old system warm for 30 days as rollback insurance. Phase 4 — Repeat for each use case. Each migration takes 4-8 weeks. With 20+ use cases, we'd run 3-4 migrations in parallel with a dedicated migration engineering team of 4-6 people. The whole program takes 6-9 months.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["compatibility_layer", "dual_write", "shadow_traffic", "canary_reads", "phased_migration", "rollback_insurance", "migration_team", "parallel_migrations"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you structure the engineering organization to build and operate this?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "team_structure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three teams, phased over time. Initially (months 1-6): one team of 12-15 engineers builds the core system. Split into storage engine (5 engineers — LSM tree, WAL, compaction), distributed systems (4 engineers — replication, consistency, Raft metadata), and platform (3-4 engineers — routing layer, client SDKs, compatibility shims). At launch (months 6-12): add a migration team (4-6 engineers) focused on customer onboarding and dual-write tooling. The core team shifts to reliability hardening and performance optimization. Steady state (year 2+): reorganize into a 'build' squad and an 'operate' squad. Build owns new features (secondary indexes, cross-region replication, TTL). Operate owns oncall, capacity planning, customer support, and incident response. Rotate people between squads quarterly for knowledge sharing. Total headcount: 20-25 engineers at steady state. Key hire: a technical lead with production experience running a distributed storage system. This is not a project you can staff with generalists.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["phased_team_growth", "specialization", "migration_team", "build_vs_operate", "rotation", "key_hire", "headcount_planning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're out of time. Closing thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The success metric isn't 'we shipped a KV store.' It's cost per operation compared to DynamoDB, p99 latency compared to Redis, and customer adoption rate. If after 18 months we haven't migrated 80% of use cases off the old systems, the project has failed regardless of technical quality. I'd set quarterly OKRs tied to these business metrics and be willing to pivot or even shut down if the ROI doesn't materialize. The sunk cost fallacy kills more infrastructure projects than technical problems do.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["success_metrics", "cost_comparison", "adoption_rate", "okrs", "sunk_cost_awareness", "kill_criteria"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Outstanding interview. Deep technical understanding, practical organizational thinking, and mature judgment about success and failure. Strong hire.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 86,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 9,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Outstanding capacity estimation — calculated disk throughput, node count, and memory requirements upfront",
+      "Deep storage engine knowledge — compaction trade-offs, leveled vs size-tiered, bloom filters, and I/O isolation",
+      "Excellent migration strategy — compatibility layer, phased rollout, and realistic timeline with parallel execution",
+      "Mature organizational thinking — phased team growth, key hire identification, and quarterly rotation"
+    ],
+    "weaknesses": [
+      "API design was implicit — didn't define the client API surface or discuss SDK ergonomics",
+      "Cross-region replication was mentioned as a future feature but not designed — at principal level could have gone deeper"
+    ]
+  }
+}

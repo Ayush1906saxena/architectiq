@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "senior",
+    "candidate_profile": "perfect",
+    "total_exchanges": 22,
+    "generation_id": "seed_322"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Today we'll design a real-time chat system like WhatsApp or Slack. It should support one-on-one messaging and group chats. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me clarify the scope. What's the scale — how many concurrent users and messages per second? Do we need to support message delivery guarantees — at-least-once, or exactly-once? What about media messages (images, files) or just text? Do we need features like read receipts, typing indicators, and online presence? And what's the maximum group size?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "delivery_guarantees", "presence", "group_size"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "50 million concurrent users, 500,000 messages per second. Text only for now. We need at-least-once delivery, read receipts, typing indicators, and online presence. Groups up to 500 members. Latency target: messages delivered within 200ms for online recipients.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do some quick capacity math. 50M concurrent users means 50M open WebSocket connections. If we estimate each connection uses about 10KB of memory on the server (socket buffers, user state), that's 500GB of memory just for connections. If each server can handle 50K concurrent WebSocket connections, we need about 1,000 WebSocket gateway servers. For messages, 500K/sec at an average of 200 bytes per message is 100MB/sec raw throughput, or about 8.6TB per day of message data. That's manageable for storage, but the fan-out for group messages is the hard part — a message to a 500-person group becomes 500 delivery events.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "websocket_connections", "memory_estimation", "fan_out"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. Walk me through the high-level architecture — how does a message get from sender to recipient?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "message_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "The architecture has four main layers. First, the WebSocket Gateway layer — these are stateful servers that maintain long-lived WebSocket connections with clients. Each gateway server tracks which users are connected to it. When a client sends a message, it goes to the gateway over WebSocket. Second, the Message Service — the gateway forwards the message here via gRPC. The message service assigns a unique message ID, validates the sender's permissions, persists the message to the datastore, and determines the recipients. Third, the Routing layer — this is the key challenge. We need to know which gateway server each recipient is connected to. I'd use a Connection Registry backed by Redis — when a user connects, their gateway registers the mapping (user_id -> gateway_id). The message service looks up each recipient's gateway and forwards the message. Fourth, the Delivery layer — the target gateway receives the message via an internal channel and pushes it down the recipient's WebSocket. For offline users, the message is stored in a pending delivery queue.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket_gateway", "message_service", "connection_registry", "routing", "offline_delivery"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the Connection Registry at scale? 50 million entries that are constantly changing as users connect and disconnect.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "connection_registry" }
+    },
+    {
+      "role": "candidate",
+      "content": "Redis Cluster is ideal for this. Each entry is a simple key-value: user:{user_id} -> gateway_id, with a TTL of 30 seconds. The gateway sends a heartbeat every 10 seconds to refresh the TTL. If a gateway crashes, its users' entries naturally expire within 30 seconds. For routing efficiency, I'd also use consistent hashing on user_id to assign users to gateways. This way, when the message service needs to route to multiple recipients in a group, recipients on the same gateway are batched into a single RPC call. With 50M entries at about 100 bytes each, that's 5GB — fits in a small Redis cluster. Lookups are O(1) and we need about 500K lookups per second for message routing, well within Redis capabilities.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_cluster", "consistent_hashing", "ttl", "heartbeat", "batch_routing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about message ordering? How do you ensure messages appear in the correct order within a conversation?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Message ordering is per-conversation, not global. I'd assign each conversation a monotonically increasing sequence number. When the message service receives a message for conversation C, it atomically increments C's sequence counter and assigns it to the message. I'd use Redis INCR on a per-conversation key for this — it's atomic and fast. The client displays messages sorted by sequence number. If a message arrives out of order (sequence 5 arrives before sequence 4), the client buffers it and waits briefly for the gap to fill. After a timeout (say 2 seconds), it requests the missing message from the server. For group messages, the sequence number is assigned at the server, not the client, because multiple senders are producing messages concurrently. The server is the single sequencer for each conversation, which serializes ordering. At 500K messages/sec across millions of conversations, the per-conversation rate is low, so this isn't a bottleneck.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sequence_numbers", "message_ordering", "atomic_increment", "client_buffering", "gap_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great. What database do you use for message storage, and what's the data model?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "message_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Cassandra is the natural fit for chat messages. The access pattern is almost exclusively: 'get the last N messages for conversation C' — a time-range query on a partition. My data model: partition key is conversation_id, clustering key is sequence_number (descending). Columns: message_id, sender_id, content, created_at, message_type. This means all messages for a conversation are co-located on the same partition, and fetching recent messages is a single sequential disk read. Cassandra's write performance is excellent at our scale — 500K writes/sec is routine for a moderate cluster. For the conversation metadata (participants, settings, last_message_at), I'd use a separate table partitioned by user_id so we can efficiently query 'all conversations for user X' sorted by most recent activity. One concern: hot partitions for viral group chats. If a 500-person group has very high message velocity, that partition could become a hotspot. I'd set a message rate limit per conversation to mitigate this.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cassandra", "partition_key", "clustering_key", "data_model", "hot_partition", "rate_limiting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does presence work? Showing who's online in real time.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "presence" }
+    },
+    {
+      "role": "candidate",
+      "content": "Presence is implemented via heartbeats with TTL. Each connected client sends a heartbeat to its gateway every 15 seconds. The gateway writes a key to Redis: presence:{user_id} with a 30-second TTL. If the client disconnects or crashes, the key expires and the user appears offline. For querying presence — when you open a chat, the client asks 'is user X online?' which is a simple Redis GET. For group chats with 500 members, we'd batch the presence check — MGET all 500 keys in one Redis round trip. The tricky part is presence change notifications. You don't want to broadcast 'user X went offline' to every contact. Instead, I'd use lazy presence: when you open a conversation, you subscribe to presence updates for that specific user via a Redis pub-sub channel. The gateway publishes presence changes to user-specific channels. Only clients actively viewing that conversation receive updates. This avoids the O(N*M) fan-out problem where N users each have M contacts.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["heartbeat", "ttl", "presence", "redis_pubsub", "lazy_presence", "fan_out_optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a gateway server crashes? 50,000 users suddenly lose their connections.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "gateway_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a gateway crashes, 50K users disconnect. The clients detect the broken WebSocket and reconnect — to a different gateway, selected by the load balancer. The reconnection flow: the client reconnects, authenticates, and sends its last known sequence number for each active conversation. The new gateway registers the user in the Connection Registry (overwriting the stale entry for the dead gateway). The message service delivers any messages that were queued while the user was disconnected — it queries Cassandra for messages with sequence numbers greater than the client's last known. For messages that were in-flight on the dead gateway (received by the gateway but not yet pushed to the client), the sender would have received an ACK from the message service, so the message is persisted. The client just needs to catch up. I'd implement exponential backoff with jitter on the client reconnect to prevent a thundering herd — 50K clients reconnecting simultaneously could overwhelm the remaining gateways. A 0-5 second random jitter spreads the reconnections over a few seconds.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gateway_failure", "reconnection", "sequence_recovery", "thundering_herd", "exponential_backoff", "jitter"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle delivering messages between gateway servers efficiently? If 500 group members are spread across 200 gateways, that's 200 internal RPCs per message.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "inter_gateway_routing" }
+    },
+    {
+      "role": "candidate",
+      "content": "For inter-gateway communication, I'd use Redis pub-sub as the message bus. Each gateway subscribes to a channel named after itself: gateway:{gateway_id}. When the message service needs to deliver to users on gateway G, it publishes to gateway:G with the message and list of recipient user_ids on that gateway. This batches delivery — one pub-sub message per gateway, not per user. The gateway receives the message and pushes it to each connected user's WebSocket. For the 500-person group across 200 gateways, that's 200 pub-sub publishes instead of 500 individual RPCs. Redis pub-sub is fire-and-forget though, which is a concern. If the gateway misses a pub-sub message, the user doesn't get it. To handle this, the client-side gap detection I mentioned earlier kicks in — the client notices a sequence gap and fetches the missing message directly from Cassandra. The pub-sub is the fast path; Cassandra is the reliable fallback.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_pubsub", "batch_delivery", "reliable_delivery", "gap_detection", "fast_path_slow_path"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do read receipts work technically?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "read_receipts" }
+    },
+    {
+      "role": "candidate",
+      "content": "Read receipts are essentially lightweight messages flowing in the reverse direction. When a client renders a message on screen, it sends a read acknowledgment to the server: {conversation_id, last_read_sequence_number, user_id}. Notice I use last_read_sequence_number, not individual message IDs — this is more efficient because reading message 50 implies you've read 1 through 49. The server stores this in a lightweight table: conversation_id, user_id, last_read_seq. For 1:1 chats, we route the read receipt to the other participant just like a regular message but without persisting it to the message store — it's ephemeral. For group chats, we aggregate: 'message 47 read by 15 of 20 members.' We don't send individual read receipts for every member in large groups — instead, we send a periodic summary. Typing indicators are similar but even more ephemeral — they're only sent via WebSocket, never persisted, and have a 3-second client-side timeout.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_receipts", "sequence_optimization", "ephemeral_events", "typing_indicators", "aggregation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost out of time. How would you handle push notifications for offline users?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "push_notifications" }
+    },
+    {
+      "role": "candidate",
+      "content": "When the message service looks up a recipient in the Connection Registry and finds no entry (user is offline), it routes the message to a Push Notification Service instead. This service maintains a mapping of user_id to device tokens (APNs for iOS, FCM for Android). It sends a push notification with a preview of the message. To avoid notification spam, I'd implement batching — if 10 messages arrive for an offline user within 5 seconds, send one notification saying '10 new messages from Alice' rather than 10 individual notifications. The push notification service also respects user preferences (muted conversations, quiet hours). When the user comes online and reconnects, they fetch all missed messages from Cassandra using the sequence number catch-up mechanism, and we suppress any pending push notifications for messages that are about to be delivered via WebSocket.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["push_notifications", "notification_batching", "device_tokens", "user_preferences", "deduplication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Anything else you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. End-to-end encryption — for 1:1 chats, I'd implement the Signal Protocol where the server never sees plaintext messages. For group chats, sender keys with periodic rotation. Second, message search — since Cassandra isn't great for full-text search, I'd asynchronously index messages into Elasticsearch. Third, abuse detection — a content moderation pipeline that scans messages for spam, harassment, and illegal content using ML classifiers, without breaking E2E encryption (this is a genuine tension — you'd need client-side reporting or perceptual hashing for media). Finally, geographic distribution — deploy gateway clusters in multiple regions and route users to the nearest one via DNS-based load balancing.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["e2e_encryption", "signal_protocol", "full_text_search", "content_moderation", "geographic_distribution"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. Your understanding of WebSocket architecture, message ordering with sequence numbers, and the layered delivery mechanism was very strong. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 86,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 9,
+      "api_design": 8,
+      "database_design": 9,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Precise capacity estimation — calculated WebSocket memory, gateway count, and storage requirements",
+      "Elegant message ordering with per-conversation sequence numbers and client-side gap detection",
+      "Thoughtful presence design with lazy subscriptions to avoid O(N*M) fan-out",
+      "Strong failure handling with reconnection jitter and dual-path delivery (pub-sub fast path, Cassandra fallback)"
+    ],
+    "weaknesses": [
+      "Could have discussed message encryption's impact on search and moderation earlier",
+      "Didn't elaborate on Cassandra compaction strategy or partition size management"
+    ]
+  }
+}

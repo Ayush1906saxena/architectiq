@@ -1,0 +1,130 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "vp",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_529"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's discuss building a distributed key-value store. At VP level, I want build-vs-buy reasoning, cost modeling, organizational strategy, and compliance considerations.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Before anything technical, the first question is: should we build this at all? DynamoDB, Cloud Bigtable, and managed Cassandra exist. Building a distributed database is one of the hardest infrastructure investments — it's a 3-year, 25+ engineer commitment with significant execution risk. The only time I'd build is when three conditions are met simultaneously: the managed service bill exceeds $20M+/year, our latency or feature requirements are unmet, and the KV store is on the critical path for our core product. If even one condition is missing, buy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["build_vs_buy", "managed_services", "cost_threshold", "execution_risk", "three_conditions"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "All three conditions are met. DynamoDB is $25M/year, we need sub-2ms P99 reads that DynamoDB can't guarantee, and the KV store backs our ad-serving pipeline which generates $500M in revenue. You've got budget for 30 engineers. What's the plan?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "business_context" }
+    },
+    {
+      "role": "candidate",
+      "content": "The financial case: $25M/year on DynamoDB. A 30-person team costs roughly $8-10M/year fully loaded (salary, benefits, infra). Hardware for a custom KV store at this scale: maybe $3-5M/year for servers, NVMe, network. Total custom: $11-15M/year versus $25M — we save $10-14M annually after the first year. Payback on the initial investment happens in year 2. But there's a hidden cost: opportunity cost. Those 30 engineers could be building product features instead. At $500M revenue, if the KV store project delays a product launch that drives 2% revenue growth ($10M), the economics shift. I'd mitigate by ensuring the team is infrastructure-specialized — people who wouldn't be building product features anyway.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["financial_modeling", "total_cost_of_ownership", "team_cost", "hardware_cost", "payback_period", "opportunity_cost", "talent_specialization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Rigorous financial analysis. What's the technical architecture?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three-tier architecture optimized for our ad-serving use case. The routing tier: thin, stateless, horizontally scalable. Clients can bypass it entirely by caching the partition map and sending requests directly to storage nodes — critical for sub-2ms P99 because it eliminates one network hop. The storage tier: stateful nodes, each owning a set of hash-ring partitions. Storage engine is LSM-tree based (RocksDB or a custom engine). Data is replicated 3x across failure domains (different racks in the same datacenter). The metadata tier: a 5-node Raft cluster that maintains the partition map. Low-traffic, high-availability. For sub-2ms reads: the working set must fit in memory. At our scale — let's say 500TB total data but the ad-serving hot set is 50TB (the active campaigns and user profiles) — we need enough aggregate RAM. With 100 storage nodes, that's 500GB RAM per node dedicated to block cache. Modern servers have 256-512GB RAM, so this works with 200-250 nodes if we use 200GB per node for the block cache.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["three_tier", "client_direct_routing", "network_hop_elimination", "lsm_tree", "rocksdb", "failure_domains", "raft_metadata", "working_set_sizing", "block_cache", "node_sizing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "200-250 nodes is a significant fleet. How does the consistency model work for ad serving?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "consistency_model" }
+    },
+    {
+      "role": "candidate",
+      "content": "Ad serving is overwhelmingly reads — read-to-write ratio is probably 1000:1. Reads must be fast (sub-2ms). Writes are bulk updates (campaign configuration changes, user profile enrichments) that can tolerate slightly higher latency. For reads: R=1 from any replica. We sacrifice read-after-write consistency for speed. A campaign change might take 100ms to propagate to all replicas — an ad might be served with slightly stale data for a fraction of a second. At $500M revenue across billions of ad decisions, the revenue impact of 100ms staleness is negligible. For writes: W=2 out of 3. Durable enough that a single node failure doesn't lose data. The leader processes the write, waits for one follower, returns success. Async replication to the third replica. For critical operations — like budget exhaustion (stop serving ads for a campaign that's overspent) — we use W=3 with read-your-writes consistency on the client side. Overspending is worse than briefly under-serving.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_heavy_ratio", "r1_fast_reads", "staleness_tolerance", "w2_durable_writes", "critical_path_strong_consistency", "budget_exhaustion", "business_driven_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Business-driven consistency tuning — exactly the right framing. What about data residency and GDPR?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "compliance" }
+    },
+    {
+      "role": "candidate",
+      "content": "Ad serving stores user profiles — behavioral data, interests, device info. Under GDPR, this is personal data. Three compliance requirements. Data residency: EU user data must be processable within the EU. We need EU-based storage nodes. The partition scheme must be residency-aware — EU users' data is replicated only to EU nodes. The routing layer checks the user's residency flag and routes to the correct regional cluster. Right to deletion: a user requests data deletion. We must purge their profile from all replicas and backups within 30 days. With LSM trees, deletion creates a tombstone that's eventually compacted away. We need to ensure the compaction runs within the deletion deadline and that tombstones are propagated to all replicas. This means regular anti-entropy jobs must complete within 30 days. Consent management: we can only store and use data that the user consented to. The KV store itself doesn't enforce consent — but it must integrate with the consent management platform. On a consent withdrawal event, we trigger the same deletion path. Organizationally: I'd hire a dedicated privacy engineer on the KV store team who understands both the data regulations and the storage internals. Privacy can't be an afterthought bolted on later.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_residency", "residency_aware_partitioning", "right_to_deletion", "tombstone_compaction", "deletion_deadline", "consent_management", "privacy_engineer"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thorough compliance answer. How do you migrate from DynamoDB to this new system without risking the $500M ad pipeline?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "migration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Zero-risk migration is a fantasy — any migration has risk. The goal is to make the risk measurable and reversible at every step. Phase 0 — API compatibility: build a DynamoDB-compatible API on our KV store. The ad serving code doesn't change — just the connection endpoint. This is the most important investment because it makes rollback trivial. Phase 1 — Shadow reads (4 weeks): route all reads to DynamoDB (primary) AND our KV store (shadow). Compare results for correctness and latency. If our system returns the wrong result or is slower, we catch it without affecting production. Phase 2 — Canary reads (4 weeks): shift 1% of read traffic to our KV store as primary, DynamoDB as fallback. If our P99 exceeds 2ms or error rate exceeds 0.01%, automatic rollback to DynamoDB within 30 seconds. Gradually increase to 10%, 50%, 100%. Phase 3 — Dual writes (2 weeks): all writes go to both systems. Verify consistency continuously. Phase 4 — Cutover (1 week): stop writing to DynamoDB. Our system is primary for everything. Keep DynamoDB data for 30 days as safety net. Total timeline: 12-16 weeks per major workload. The ad serving pipeline is the highest-stakes migration — I'd do lower-stakes workloads first (logging, analytics) to build confidence.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_compatibility", "shadow_reads", "canary_reads", "automatic_rollback", "dual_writes", "phased_migration", "lower_stakes_first"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you structure the 30-person team?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "team_structure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Four sub-teams phased over 18 months. Storage Core (8-10 engineers): LSM-tree engine, WAL, compaction, bloom filters, block cache. This is the hardest team to staff — needs systems programming experts comfortable with C++ or Rust. Distributed Systems (6-8 engineers): replication protocol, consistency modes, partition management, Raft metadata cluster, failure detection and recovery. Client & Platform (5-7 engineers): DynamoDB compatibility layer, client SDKs (Java, Python, Go), routing layer, and the migration tooling (shadow reads, dual writes). Operations & Reliability (5-7 engineers): monitoring dashboards, alerting, capacity planning, chaos testing, and oncall. They also own the self-service portal for tenant onboarding. Phasing: months 1-6 — Storage Core + Distributed Systems build the core. Month 6-9 — Client & Platform builds the compatibility layer and migration tools. Month 9-12 — Operations & Reliability hardens for production. Month 12-18 — first production workloads migrate. Key organizational principle: the oncall rotation includes engineers from all sub-teams. Everyone who builds it also runs it. No 'throw it over the wall to ops.'",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sub_teams", "phased_staffing", "language_requirements", "migration_tooling", "self_service", "you_build_it_you_run_it", "shared_oncall"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's your 3-year roadmap beyond replacing DynamoDB?",
+      "annotation": { "action": "redirect", "phase": "wrap_up", "target_concept": "roadmap" }
+    },
+    {
+      "role": "candidate",
+      "content": "Year 1: core KV store, DynamoDB migration, stability. Year 2: secondary indexes (needed for ad targeting queries that DynamoDB handles with GSIs), cross-region replication for disaster recovery (the $500M pipeline can't be single-region), and tiered storage (hot NVMe for active data, warm S3 for historical — reduces storage costs by 60-70%). Year 3: real-time change data capture (CDC) so downstream systems can subscribe to KV mutations — this enables event-driven architectures without Kafka. And multi-model support: add document query capability so teams using MongoDB for ad creative storage can also consolidate onto our platform. The strategic vision: the KV store becomes the unified data layer for all low-latency workloads, replacing a zoo of DynamoDB, Redis, MongoDB, and Cassandra deployments. Fewer systems means lower operational overhead and better talent utilization.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["secondary_indexes", "cross_region_replication", "tiered_storage", "cdc", "multi_model", "platform_consolidation", "operational_efficiency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the biggest risk?",
+      "annotation": { "action": "challenge", "phase": "wrap_up", "target_concept": "risk" }
+    },
+    {
+      "role": "candidate",
+      "content": "A production outage that takes down ad serving. At $500M annual revenue, every hour of downtime costs ~$57K. A multi-hour outage during peak (Black Friday) could cost millions and damage advertiser trust — which affects revenue for quarters afterward. Mitigation: the migration phases have automatic rollback. We maintain DynamoDB as hot standby for 6 months after migration — we can switch back in minutes. Chaos engineering from day one — we simulate node failures, network partitions, and disk corruptions weekly. And the most important mitigation: culture. The team must have an operational excellence mindset from day one. Every design decision is evaluated through the lens of 'what happens when this fails at 3AM?'",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["outage_cost", "downtime_per_hour", "advertiser_trust", "hot_standby", "chaos_engineering", "operational_culture", "design_for_failure"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Outstanding interview. Deep financial modeling, strong compliance thinking, practical migration strategy, and mature organizational design. The business-driven consistency model and privacy engineer recommendation were particularly impressive. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 91,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 9,
+      "api_design": 8,
+      "database_design": 9,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional financial modeling — TCO comparison with opportunity cost analysis and payback period",
+      "Business-driven consistency design — different consistency levels for different ad-serving operations based on revenue impact",
+      "Thorough GDPR compliance — data residency, right to deletion with tombstone compaction deadline, and dedicated privacy engineer",
+      "Risk-aware migration strategy with automatic rollback and hot standby for 6 months"
+    ],
+    "weaknesses": [
+      "Could have discussed competitive analysis — how does a custom KV store compare to emerging alternatives like FoundationDB or TiKV?",
+      "Multi-model roadmap (adding document queries) is ambitious and may dilute focus — could have acknowledged this trade-off"
+    ]
+  }
+}

@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "celebrity-storm",
+    "total_exchanges": 22,
+    "generation_id": "seed_365"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like feed system. I want to focus on a very specific scenario — handling a celebrity tweet storm — but first, give me a quick overview of how you'd design the fan-out system.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "For Twitter's feed, I'd use a hybrid fan-out approach. For normal users with modest follower counts, I'd use fan-out-on-write: when they tweet, we push the tweet ID into each follower's timeline cache in Redis. For celebrities with millions of followers, fan-out-on-write is too expensive, so I'd use fan-out-on-read: when a user opens their timeline, we merge their precomputed timeline with recent tweets from celebrities they follow.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out_on_write", "fan_out_on_read", "hybrid_fan_out", "redis_caching"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now the scenario: it's Super Bowl halftime. Taylor Swift tweets. She has 90 million followers. Walk me through what happens in your system.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "celebrity_fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Since Taylor Swift is classified as a celebrity in our system, we don't do fan-out-on-write for her tweets. Instead, her tweet is written to the tweets table and her tweet ID is appended to her celebrity tweet list in Redis. No immediate fan-out happens. But here's the problem: 90 million followers, and a huge percentage of them are actively on Twitter during the Super Bowl. When they refresh their timelines, each read request now needs to fetch Taylor's latest tweets and merge them. We might see 10-20 million timeline reads per minute, each hitting the celebrity tweet list.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["celebrity_fan_out", "read_amplification", "hot_key_problem"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right, that's a lot of reads against her tweet list. But here's what I really want to explore: while your system is processing that load, Taylor tweets AGAIN. And then a third time. What happens to your queues and processing pipeline?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "queue_backpressure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each tweet creates a storm of downstream activity. Even though we skip fan-out-on-write, there's still work: updating her tweet list, invalidating caches, processing engagement signals, sending push notifications to users who have her notifications enabled. If she tweets three times in rapid succession, we have three waves of this work queued up. The notification queue alone could be brutal — if even 1% of her followers have notifications enabled, that's 900,000 push notifications per tweet, 2.7 million total across three tweets. The notification worker pool could fall behind.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["notification_queue", "queue_backpressure", "worker_saturation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly. And what about the timeline read path? Users are requesting their timelines, which means merging her tweets. With three tweets now, what changes?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "read_path_amplification" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each timeline read for a Taylor Swift follower needs to fetch her recent tweets. If a user follows 10 celebrities and 500 normal users, the read request first fetches the precomputed timeline from Redis (the fan-out-on-write portion), then fetches the recent tweet lists for each of the 10 celebrities, then merges and sorts. That's 11 Redis reads per timeline request minimum. Now multiply that by 10-20 million concurrent users. We're talking about potentially 100-200 million Redis operations per minute just for celebrity tweet merges. If Taylor's tweet list is a hot key, the single Redis shard holding it becomes the bottleneck.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_path_amplification", "hot_key_problem", "redis_throughput"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You identified the hot key problem. How do you solve a single Redis key getting 100 million reads per minute?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "hot_key_mitigation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several strategies. First, replicate the hot key across multiple Redis replicas and distribute reads across them. Instead of one shard owning Taylor's tweet list, we maintain copies on, say, 10 read replicas and round-robin the reads. Second, add a local in-process cache on each app server. Taylor's recent tweets change infrequently — at most every few minutes even during a tweet storm. A 5-second TTL local cache on 100 app servers means each server only hits Redis once every 5 seconds instead of thousands of times. Third, for truly extreme cases, we could use a CDN or edge cache to serve pre-rendered timeline fragments for the most popular celebrity combinations.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["hot_key_mitigation", "read_replicas", "local_cache", "cdn_caching"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's talk about the notification queue. 2.7 million push notifications across three tweets. But the third tweet's notifications are still queued while users are seeing the first tweet on their timeline. Is there a smarter approach?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "notification_coalescing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes — notification coalescing. If Taylor tweets three times within, say, a 5-minute window, we shouldn't send three separate push notifications. Instead, we coalesce them into one: 'Taylor Swift posted 3 new tweets.' Implementation: when we enqueue a notification, we first check if there's already a pending notification for the same source. If so, we update the existing notification's content and reset its delivery timer. We'd use a delay queue — a notification isn't sent until a 30-60 second debounce period expires. This reduces 2.7 million pushes to 900,000.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["notification_coalescing", "debounce", "delay_queue"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Smart. What about back-pressure in the notification queue itself? If the queue depth keeps growing faster than workers can process, what do you do?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "backpressure_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Back-pressure needs to be handled at multiple levels. First, the queue should have a depth limit — if it exceeds, say, 10 million messages, we stop accepting new notification enqueue requests and return a back-pressure signal to the tweet processing pipeline. Second, priority tiers: notifications for users who have recently been active get higher priority than dormant users. If we're backed up, we process active users first and may drop notifications for users who haven't opened the app in 30 days. Third, autoscaling: the notification worker fleet should scale based on queue depth. If depth exceeds a threshold, spin up additional workers.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["backpressure_management", "priority_queuing", "autoscaling", "load_shedding"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned dropping notifications for dormant users. That feels like a product decision. How do you frame that trade-off?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "product_tradeoffs" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fair point — it is a product decision. The trade-off is: deliver all notifications with high latency, or deliver most notifications with low latency. A notification delivered 3 hours late is arguably worse than no notification at all — the user already saw the tweet by then. I'd present this to the product team as: during extreme load events, we prioritize notification delivery to engaged users (active in the last 24 hours) within 2 minutes, and best-effort delivery to others within 30 minutes. We'd track the delivery SLA and report on it. The product team might also decide that celebrity tweets don't need push notifications at all — just badge the app.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["product_tradeoffs", "sla_definition", "notification_strategy"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's shift to the engagement system. When Taylor tweets during the Super Bowl, that tweet is going to get millions of likes and retweets in minutes. How does your like counter handle that?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "counter_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "A single counter in a database row would create extreme write contention — millions of concurrent increment operations. I'd use a distributed counter approach. Shard the counter across multiple Redis keys — say 100 shards. When a user likes the tweet, we hash their user ID to pick one of the 100 counter shards and increment that. To read the total like count, we sum all 100 shards. But we don't need real-time accuracy — a user doesn't care if the count shows 4.2M or 4.3M. So we can cache the sum with a 10-second TTL and display approximate counts.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_counter", "counter_sharding", "approximate_counting", "write_contention"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if the engagement queue for this specific tweet gets so large that it affects processing for other tweets? A celebrity shouldn't block everyone else.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "queue_isolation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Queue isolation is critical here. I'd separate queues by tweet popularity tier. Tweets that cross a certain engagement velocity — say more than 1,000 actions per second — get routed to a dedicated high-volume queue with its own worker pool. Regular tweets use the standard queue. This prevents Taylor's tweet from consuming all the workers and starving engagement processing for normal users' tweets. We can also have different processing semantics: the high-volume queue might batch writes and use the sharded counter approach, while the normal queue processes individual increments.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["queue_isolation", "traffic_tiering", "batch_processing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now here's a tricky one. Taylor's tweet triggers trending topic algorithms. The trending computation itself is expensive. With multiple celebrity tweets happening during the Super Bowl, how do you prevent the trending system from falling over?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "trending_computation" }
+    },
+    {
+      "role": "candidate",
+      "content": "The trending system shouldn't be on the hot path. I'd compute trends asynchronously in batch windows — every 30-60 seconds, aggregate tweet volumes and engagement rates. Use a streaming framework like Flink or Spark Streaming. The key insight: trending doesn't need to be real-time. A 1-minute lag is perfectly acceptable. For the computation itself, I'd use a Count-Min Sketch or HyperLogLog to estimate topic frequencies without tracking every individual event. If the computation falls behind, it can skip windows — showing a trend 2 minutes late is fine. I'd also set a processing budget: if the trending job hasn't finished in 30 seconds, output partial results and start the next window.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["batch_processing", "streaming_computation", "approximate_counting", "partial_results"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last question. How would you load test this celebrity tweet storm scenario before the actual Super Bowl?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "load_testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd create a synthetic load test that mimics the exact scenario. Create a test celebrity account with 90 million fake follower relationships. Generate synthetic timeline read traffic ramping up to Super Bowl levels — maybe 20 million requests per minute. Then trigger 3 tweets in rapid succession and observe the system. Key metrics to watch: timeline render latency at p50/p99, notification queue depth and drain rate, Redis hot key throughput, like counter accuracy, and trending computation lag. I'd run this in a production-scale staging environment, not a scaled-down version — the failure modes at scale are different from small-scale tests. We could also shadow production traffic and inject the celebrity tweets into the shadow environment.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["load_testing", "synthetic_traffic", "shadow_testing", "observability"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You showed solid understanding of the fan-out architecture and the cascading effects of celebrity activity. I would have liked deeper exploration of the back-pressure mechanisms and more concrete numbers on queue sizing. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 72,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Strong understanding of hybrid fan-out and its behavior under celebrity load",
+      "Good identification of notification coalescing as an optimization",
+      "Solid approach to distributed counters for engagement tracking"
+    ],
+    "weaknesses": [
+      "Back-pressure mechanisms were described at a high level without concrete implementation details",
+      "Queue sizing and capacity numbers were vague in several places",
+      "Didn't discuss the read path degradation when multiple celebrities tweet simultaneously"
+    ]
+  }
+}

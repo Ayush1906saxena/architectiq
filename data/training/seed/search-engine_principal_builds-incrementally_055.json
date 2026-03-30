@@ -1,0 +1,171 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "principal",
+    "candidate_profile": "builds-incrementally",
+    "total_exchanges": 24,
+    "generation_id": "seed_055"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a web search engine — something like Google. I know it's a massive system, so feel free to scope it how you see fit. What's your approach?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A search engine is a huge system, so rather than try to present the final architecture upfront, I'd like to build it incrementally — start with the simplest version that works and then layer on complexity. This mirrors how you'd actually build it in practice and lets us discuss trade-offs at each step. Can I start with a single-machine search engine and evolve from there?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["incremental_design"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "I love that approach. Go ahead.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Layer 1: single-machine search. We have a corpus of documents. We build an inverted index — for each word, store a list of document IDs that contain it. When a query comes in, we look up each query term in the index, intersect the posting lists, and return matching documents. Storage: the index for 1 million web pages might be 5-10 GB — fits in memory on one machine. Serving: a single query takes microseconds for the index lookup. This handles maybe 10,000 QPS on one machine. It works. It just doesn't have enough documents or any ranking.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["inverted_index", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good start. What's missing?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "search_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three things: we need more documents (the web has billions of pages), we need ranking (not all matching documents are equally relevant), and we need a crawler to discover and fetch pages. Let me add ranking first since it transforms the search quality without changing the architecture. Layer 2: adding TF-IDF ranking. For each posting in the inverted index, we store not just the document ID but also the term frequency. At query time, we compute a TF-IDF score for each matching document — how often the term appears in this document weighted by how rare the term is across all documents. We sort results by score. This is still single-machine, still fast, but now results are meaningfully ranked.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["search_ranking", "tf_idf", "inverted_index"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you improve ranking beyond TF-IDF?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "search_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "TF-IDF only uses the text content. The key insight of Google's original breakthrough was using link structure. Layer 2b: PageRank. Each page has a score based on how many other pages link to it, weighted by those pages' own importance. It's a recursive definition solved iteratively — initialize all pages with equal rank, then repeatedly propagate rank through the link graph until convergence. PageRank is computed offline as a batch job over the entire link graph. The score is stored alongside each document and used as a signal in the ranking function. Now we have: TF-IDF for query-document relevance plus PageRank for document authority. The final score is a weighted combination.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pagerank", "search_ranking"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now we need more than one million pages. How do we scale the index?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Layer 3: distributing the index. We need to index billions of pages. Two sharding strategies for an inverted index: document-partitioned and term-partitioned. With document-partitioning, each shard holds the complete inverted index for a subset of documents. A query goes to every shard, each returns its top-K results, and a coordinator merges them. With term-partitioning, each shard holds the complete posting list for a subset of terms. A query only hits the shards that own the query terms. I'd go with document-partitioning. It's simpler — each shard is independent and self-contained. Term-partitioning creates hot spots (common terms have massive posting lists) and requires coordination between shards for multi-term queries.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_strategy", "inverted_index"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "With document-partitioning, every query hits every shard. How does that scale?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "sharding_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good question. Let's say we have 10 billion pages. At 10KB per document's index entry, that's 100TB of index data. With 100 shards, each has 1TB — fits in memory with the right hardware. Each shard handles the query independently and returns its local top-50. The coordinator merges 100 lists of 50 — that's fast, just a priority queue merge. The bottleneck is the fan-out: 100 shard queries per user query. At 100K QPS from users, that's 10 million shard queries per second. Each shard sees 100K QPS — manageable with replication. If we replicate each shard 3x, each replica handles 33K QPS. That's well within what an in-memory index can handle.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "sharding_strategy", "replication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now let's talk about crawling. How do you discover and fetch web pages?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "web_crawler" }
+    },
+    {
+      "role": "candidate",
+      "content": "Layer 4: the crawler. It starts with a seed set of URLs — maybe a few thousand known sites. It fetches a page, extracts all the links from the HTML, and adds new URLs to a frontier queue. The crawler is inherently parallel — hundreds of machines each fetching pages concurrently. Key design constraints: politeness (don't hit the same domain too frequently — respect robots.txt and impose a per-domain rate limit of maybe 1 request per second), URL deduplication (the frontier grows fast — we need a bloom filter or a distributed set to avoid re-crawling the same URL), and prioritization (fresh content from important sites should be re-crawled more frequently than stale content from obscure sites).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["web_crawler", "bloom_filter", "rate_limiting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you keep the index fresh? The web changes constantly.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "web_crawler" }
+    },
+    {
+      "role": "candidate",
+      "content": "Layer 5: freshness. The crawler needs to revisit pages. The question is how often. We can't re-crawl the entire web every day — that would require fetching 10 billion pages per day, about 115,000 pages per second. Instead, we prioritize: pages that change frequently (news sites, social media) get re-crawled hourly. Stable pages (Wikipedia articles, documentation) get re-crawled weekly or monthly. We estimate change frequency by tracking the diff between consecutive crawls. For freshness-sensitive queries (like searching for today's news), we can maintain a separate 'real-time' index that's smaller but updated within minutes. The main index is rebuilt periodically — say every few hours — from the latest crawl data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["web_crawler", "index_freshness"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's come back to query serving. How do you handle latency? Users expect results in under 200ms.",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "query_serving" }
+    },
+    {
+      "role": "candidate",
+      "content": "Layer 6: latency optimization. Several techniques. First, the index lives in memory — no disk I/O for the hot path. Second, for common queries, we cache the complete result page. The top 10,000 most common queries probably account for 30% of all traffic. Third, index compression — posting lists are sorted by document ID, so we can delta-encode and varint-compress them, reducing memory footprint and improving cache locality. Fourth, early termination — if we've already found 1,000 highly relevant results, we can stop scanning the remaining posting list entries. Fifth, geographic routing — serve queries from the nearest data center to minimize network RTT. The latency budget is roughly: 5ms network to data center, 50ms for shard queries in parallel, 10ms for merge and ranking, 5ms for serialization. Total ~70ms, well under 200ms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["query_serving", "redis_caching", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the modern aspect — ML-based ranking? Where does that fit in your incremental model?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "search_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Layer 7: learning to rank. TF-IDF and PageRank are static signals. Modern search uses hundreds of features in an ML model: query-document textual similarity (BM25, which generalizes TF-IDF), click-through rate data (which results users actually click for this query), freshness, domain authority, page load speed, mobile-friendliness, and semantic understanding via embeddings. The ranking pipeline is multi-stage to manage cost: first, a cheap retrieval stage using the inverted index returns maybe 10,000 candidates. Then a lightweight ranker (like a gradient-boosted tree) scores and prunes to 500. Finally, an expensive neural model (like a BERT cross-encoder) re-ranks the top 500 to produce the final top 10. Each stage is more expensive but operates on fewer documents.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["search_ranking", "ml_ranking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "This incremental approach is excellent. How do you handle spam and abuse in the index?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "spam_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multiple layers of defense. At crawl time: detect and filter content farms, link farms, and keyword-stuffed pages using heuristics (unnatural keyword density, hidden text, cloaking — showing different content to the crawler than to users). At index time: demote pages with suspicious link profiles — if a page suddenly gets 10,000 links from newly created domains, that's a link scheme. At query time: the ranking model implicitly handles this — spam pages tend to have low click-through rates and high bounce rates, so the ML model learns to rank them low. We also have a manual review team for high-impact cases. It's an arms race — spammers adapt, so the system needs continuous updates.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["spam_detection", "search_ranking"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about failure handling. A shard goes down during a query — what happens?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "single_point_of_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Since each shard is replicated, the query coordinator routes to a replica instead. If all replicas of a shard are down — which is rare — we have a choice: return partial results (missing that shard's documents) or fail the query. I'd return partial results with slightly degraded quality. The user won't notice that 1% of the web is missing from results. The coordinator sets a timeout — if a shard doesn't respond within 30ms, skip it and merge the results from the responding shards. This is the same approach Google uses — they call it 'good enough' serving. Better to return slightly incomplete results fast than to make users wait for a slow shard.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["single_point_of_failure", "replication", "partial_results"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running out of time. Can you summarize the layers you built?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Layer 1: single-machine inverted index for basic keyword search. Layer 2: TF-IDF and PageRank for ranking quality. Layer 3: document-partitioned sharding across 100+ nodes for scale. Layer 4: distributed web crawler with politeness and deduplication. Layer 5: freshness management with adaptive re-crawling and a real-time index for breaking content. Layer 6: latency optimization through caching, compression, early termination, and geographic distribution. Layer 7: multi-stage ML ranking for relevance quality. Each layer can be designed, built, and validated independently before adding the next. That's how I'd approach building this in practice — ship value early and iterate.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["incremental_design", "inverted_index", "search_ranking", "sharding_strategy", "web_crawler"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That was one of the best-structured system design answers I've heard. The incremental approach made a complex system feel approachable, and you maintained depth at every layer. Excellent interview.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 80,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 8,
+      "api_design": 5,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 10
+    },
+    "strengths": [
+      "Exceptional communication structure — incremental layered approach made a massive system tractable",
+      "Deep knowledge at every layer — inverted index internals, sharding strategies, crawling, ML ranking pipeline",
+      "Strong capacity estimation with realistic numbers at each layer",
+      "Practical failure handling with partial results and timeout-based degradation"
+    ],
+    "weaknesses": [
+      "Minimal requirements gathering — jumped straight to building without clarifying scale expectations",
+      "API design was never discussed — no search API specification, pagination, or query syntax",
+      "Didn't discuss indexing pipeline details — how documents flow from crawler to the searchable index"
+    ]
+  }
+}

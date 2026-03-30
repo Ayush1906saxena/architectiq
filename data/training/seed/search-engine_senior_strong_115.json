@@ -1,0 +1,159 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "senior",
+    "candidate_profile": "strong",
+    "total_exchanges": 20,
+    "generation_id": "seed_115"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a web search engine — something like Google Search. It needs to crawl the web, index pages, and serve search queries. Where would you like to start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me clarify scope first. Are we designing the full pipeline — crawling, indexing, and serving — or focusing on one part? What scale — how many pages indexed and queries per second? Do we need personalization, ads, or just organic results? And what's the latency target for queries?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pipeline_scope", "qps", "personalization", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Full pipeline but focus on the serving side. 10 billion pages indexed. 100,000 queries per second. Organic results only. Sub-500ms latency for results. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd like to build this from the user query backwards. The user types a query. What has to happen? Step 1: Query Parsing — understand what the user means. Step 2: Index Lookup — find documents that match. Step 3: Scoring — rank those documents by relevance. Step 4: Result Assembly — build the response with titles, snippets, URLs. Let me design each step working backwards from what the user sees.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["query_parsing", "index_lookup", "scoring", "result_assembly"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good framework. Start with query parsing.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "query_parsing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Query parsing has several sub-steps. Tokenization: split the query into terms, handle punctuation, normalize case. Spell correction: 'teh' becomes 'the' — we use a dictionary built from query logs and the index itself, with edit-distance algorithms. Query expansion: synonyms and related terms — 'cheap flights' might also match 'affordable flights.' For multi-word queries, we identify phrases — 'New York' should be treated as a unit, not two separate words. Finally, intent classification: is the user looking for a specific site (navigational), information (informational), or to buy something (transactional)? This affects ranking. All of this needs to complete in under 20ms to leave room for the rest of the pipeline.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tokenization", "spell_correction", "query_expansion", "phrase_detection", "intent_classification"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now index lookup — how does the inverted index work?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "inverted_index" }
+    },
+    {
+      "role": "candidate",
+      "content": "The inverted index is the core data structure. For each term in our vocabulary, we store a posting list — a sorted list of document IDs that contain that term. Each posting also stores metadata: term frequency in the document, positions (for phrase matching), and the field it appeared in (title vs body). For the query 'fast cars', we look up the posting lists for 'fast' and 'cars' and intersect them — documents in both lists match the query. The intersection of sorted lists is efficient — O(n+m) with a merge join. For phrase queries, we check that the positions of the terms are adjacent. 10 billion pages might have a vocabulary of 10 million unique terms. The posting lists are the expensive part — stored on disk with memory-mapped access.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["inverted_index", "posting_list", "term_frequency", "phrase_matching", "merge_join"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "With 10 billion documents, how big is the index and how do you partition it?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "index_partitioning" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rough estimation: the average web page is about 100KB of text, producing maybe 500 unique terms. Each posting entry is about 12 bytes (doc_id + frequency + position offset). With 10 billion documents, the total index size is roughly: 10B docs * 500 terms/doc * 12 bytes = 60 TB for just the postings. Plus the term dictionary, document metadata store, etc. — call it 100 TB total. For partitioning, two approaches: document-partitioned or term-partitioned. I'd go document-partitioned: each shard holds the complete index for a subset of documents. A query goes to all shards in parallel, each returns its top-K results, and a coordinator merges them. This is more balanced than term-partitioned, where common terms like 'the' create hot shards.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "storage_estimation", "document_partitioning", "term_partitioning", "scatter_gather"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How many shards and how does a query fan out?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "query_fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "If each shard has 2TB of index (fits on a single SSD with good performance), we need about 50 shards for the primary index. Each shard is replicated 3x for availability and read throughput, so 150 index servers total. A query fans out to one replica of each shard — 50 parallel requests. Each shard runs the query against its local index, scores the results, and returns the top 20. The coordinator collects 50 * 20 = 1000 candidate results, re-ranks them globally, and returns the final top 10. At 100K QPS, each shard handles about 2K QPS (100K / 50), which is comfortable for a well-optimized index server.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_strategy", "replication", "scatter_gather", "capacity_estimation", "qps_calculation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now scoring — how do you rank results?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "scoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Ranking is multi-layered. The first pass uses a fast, lightweight scoring function on all matching documents. BM25 is the baseline — it scores based on term frequency, inverse document frequency, and document length normalization. BM25 is efficient because it only needs data already in the posting list. This narrows millions of matches to the top few thousand. The second pass applies a more expensive model — a learned ranking model (LambdaMART or a lightweight neural model) that considers additional signals: PageRank (link authority), freshness (when was the page last updated), click-through rate from historical query logs, domain authority, and content quality signals. This re-ranks the top candidates and produces the final ordered list.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["bm25", "pagerank", "learning_to_rank", "two_phase_ranking", "freshness", "click_through_rate"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does PageRank fit into this architecture? Where is it computed?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "pagerank" }
+    },
+    {
+      "role": "candidate",
+      "content": "PageRank is computed offline in a batch pipeline. The crawler discovers pages and their links, building a link graph stored in something like HDFS. A MapReduce or Spark job runs the PageRank iterative computation — typically 20-50 iterations until convergence. With 10 billion pages, this is a massive graph computation, taking hours on a large cluster. The resulting PageRank scores are stored alongside each document's metadata in the index. They're updated periodically — maybe weekly — since the web graph changes slowly relative to individual page content. At query time, PageRank is just a pre-computed float looked up by doc_id.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pagerank", "batch_processing", "mapreduce", "spark", "link_graph", "offline_computation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now result assembly — what does the user actually get back?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "result_assembly" }
+    },
+    {
+      "role": "candidate",
+      "content": "For each result we return: the page title, the URL, and a snippet — a relevant excerpt of the page content highlighting the query terms. Snippet generation is interesting: we need to find the passage in the document that best matches the query. This requires access to the original document content, which is stored in a Document Store — a separate storage system from the index. Each index server stores the documents for its shard locally. When returning top results, the server reads the document, scans for the best passage containing the query terms with surrounding context, and highlights the terms. For latency, snippet generation only happens for the top 10-20 results, not all matches.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["snippet_generation", "document_store", "passage_extraction", "query_highlighting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the crawling side briefly. How do you keep 10 billion pages fresh?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "crawling" }
+    },
+    {
+      "role": "candidate",
+      "content": "The crawler is a distributed system of its own. A URL Frontier maintains the queue of URLs to crawl, prioritized by importance (PageRank) and freshness (time since last crawl). High-value pages like news sites are re-crawled hourly; the long tail of static pages maybe monthly. Politeness constraints are critical — we respect robots.txt and rate-limit requests per domain to avoid overwhelming sites. I'd use a fleet of crawler workers that pull URLs from the frontier, fetch the page, extract new links (for the frontier) and content (for the indexer). The indexer updates the inverted index incrementally — no need to rebuild from scratch. At 10 billion pages, re-crawling the whole web takes weeks even with thousands of crawlers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["web_crawler", "url_frontier", "crawl_priority", "politeness", "incremental_indexing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about caching at the query level? Many queries are repeated.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "query_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Absolutely. Query caching is one of the biggest performance wins. The query distribution follows a power law — the top 1000 queries account for a significant fraction of traffic. I'd implement a two-level cache. First, a result cache: for exact query strings, cache the full result page (top 10 results with snippets). A Redis cluster with 100GB of memory could cache millions of query results. Second, a posting list cache: frequently accessed posting lists (for common terms) are cached in memory on the index servers. The result cache has a short TTL — maybe 15 minutes — since index freshness matters. The posting list cache is longer-lived. With a good result cache, maybe 30-40% of queries never hit the index at all.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["query_caching", "result_cache", "posting_list_cache", "redis_caching", "power_law", "cache_hit_ratio"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're wrapping up. What are the hardest operational challenges running this system?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three main challenges. First, tail latency: the scatter-gather across 50 shards means the query is only as fast as the slowest shard. One slow shard ruins the p99. Mitigation: send queries to two replicas of each shard and take the first response (hedged requests). Second, index freshness: there's a tension between keeping the index up-to-date (users want recent results) and the cost of continuous indexing. A tiered approach — a small 'real-time' index for the last hour's content merged with the main index — helps. Third, spam and SEO manipulation: adversaries constantly try to game the ranking. The scoring model needs regular retraining and the crawling pipeline needs to detect and penalize spam farms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tail_latency", "hedged_requests", "index_freshness", "real_time_index", "spam_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great interview. The backwards-from-the-query approach gave a really coherent design. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 72,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 9
+    },
+    "strengths": [
+      "Clear reverse-engineering approach from user query to system components gave excellent structure",
+      "Strong inverted index and ranking knowledge — BM25, two-phase ranking, PageRank integration",
+      "Good capacity estimation for index size and shard count with concrete numbers"
+    ],
+    "weaknesses": [
+      "API design was not discussed — no mention of the search API contract, pagination, or filtering",
+      "Failure handling was limited — didn't discuss what happens when index shards are unavailable"
+    ]
+  }
+}

@@ -1,0 +1,159 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "staff",
+    "candidate_profile": "ranking-deep",
+    "total_exchanges": 22,
+    "generation_id": "seed_355"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a search engine — specifically the ranking and relevance pipeline. Think of a system that handles web search or product search at scale. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few key questions. What type of search — web search, e-commerce product search, or document search? What's the corpus size? What's the QPS and latency requirement? Do we need personalization? And do we need to support real-time indexing or is batch indexing sufficient?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["search_type", "corpus_size", "qps", "personalization", "indexing_mode"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Web search. 10 billion documents. 100K queries per second. P99 latency under 200ms. Yes to personalization. Near-real-time indexing for fresh content. Focus on the ranking pipeline.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "ranking_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ranking pipeline has multiple stages, each progressively more expensive and more precise. This is the telescoping or funnel architecture: we start with billions of documents and narrow down to the top 10 results. Let me walk through each stage. Stage 0: Query understanding. Before ranking, we parse and enrich the query. This includes: tokenization, spell correction, synonym expansion (e.g., 'NYC' → 'New York City'), intent classification (navigational, informational, transactional), and entity recognition ('iPhone 15 Pro Max' is a product entity). This stage runs in < 10ms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ranking_pipeline", "funnel_architecture", "query_understanding", "intent_classification", "entity_recognition"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now walk me through the retrieval stage.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "retrieval" }
+    },
+    {
+      "role": "candidate",
+      "content": "Stage 1: Retrieval (candidate generation). Goal: from 10 billion documents, retrieve the top ~10,000 candidates. This must be extremely fast — we can't score every document. Two parallel retrieval paths: (a) Inverted index retrieval: classic BM25. The inverted index maps each term to a posting list of document IDs with term frequencies. For multi-term queries, we intersect posting lists. BM25 scores: score(q, d) = sum over terms [ IDF(t) * (tf(t,d) * (k1 + 1)) / (tf(t,d) + k1 * (1 - b + b * dl/avgdl)) ]. IDF = inverse document frequency (rarer terms score higher). tf = term frequency in the document. dl/avgdl = document length normalization. Typical k1 = 1.2, b = 0.75. (b) Embedding retrieval: encode the query with a bi-encoder model into a 768-dimensional vector. Use approximate nearest neighbor (ANN) search with HNSW index to find documents with similar embeddings. This captures semantic similarity — 'automobile' matches 'car' even without exact term match. Merge results from both paths, deduplicate, and take the top 10,000.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["inverted_index", "bm25", "idf", "term_frequency", "embedding_retrieval", "ann_search", "hnsw"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good dual retrieval. Now what happens to those 10,000 candidates?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "first_stage_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Stage 2: First-stage ranking (lightweight scoring). Goal: narrow 10,000 to 500. We compute a feature vector per document and run it through a lightweight model — a gradient-boosted tree (LambdaMART or XGBoost). Features include: BM25 score, embedding similarity score, document authority (PageRank-like score), freshness (days since last update, decayed), document quality signals (spam score, content length, readability), click-through rate for this query-document pair (historical), and URL features (domain authority, URL depth). This model is fast — computing 10,000 feature vectors and scoring with a tree ensemble takes ~20ms. The model is trained on click data: queries where users clicked result A over result B provide pairwise training signal (Learning to Rank).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lambdamart", "feature_engineering", "pagerank", "freshness_decay", "learning_to_rank", "click_data"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now tell me about personalization. How does it factor in?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "personalization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Personalization features are injected at Stage 2 and amplified at Stage 3. User features: search history topics (encoded as a topic vector using an embedding of past 100 queries), preferred domains (sites the user frequently clicks), language preference, location, device type. Query-user interaction features: has_previous_click (did this user previously click this result for a similar query?), topic_affinity (cosine similarity between user topic vector and document topic vector), domain_familiarity (how often the user visits this domain). The personalization signal is weighted carefully — typically 10-20% of the total score. More than that and the results become a filter bubble. I'd also implement a 'serendipity' factor: for 10% of result slots, intentionally diversify beyond the user's typical topics to expose them to new content. Privacy consideration: all personalization features are computed from anonymized behavioral data, never PII. Users can opt out, in which case the personalization features are zeroed out.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["personalization", "user_embedding", "topic_affinity", "filter_bubble", "serendipity", "privacy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What about the freshness boost? How does that work precisely?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "freshness" }
+    },
+    {
+      "role": "candidate",
+      "content": "Freshness scoring depends on the query's temporal intent. Step 1: Classify the query's freshness need. 'weather today' is highly time-sensitive — results from yesterday are useless. 'How to tie a tie' is evergreen — a 10-year-old article is fine. 'iPhone 15 review' was time-sensitive at launch but decays. I classify queries into three buckets: breaking (boost recency aggressively), recent (moderate recency boost), and evergreen (no recency boost). Step 2: Apply time decay. For breaking queries: freshness_score = exp(-lambda * hours_since_published), where lambda = 0.1 (half-life of ~7 hours). A document from 24 hours ago gets score 0.09. For recent queries: lambda = 0.005 (half-life of ~6 days). For evergreen: freshness_score = 1.0 (constant). Step 3: The freshness_score is one feature in the LambdaMART model — the model learns the appropriate weight during training. For breaking news, I'd also integrate a real-time signal: if a URL is suddenly getting shared widely on social media (velocity signal), boost it even before it's fully indexed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["freshness", "temporal_intent", "time_decay", "exponential_decay", "velocity_signal", "query_classification"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice. Now the second-stage ranking with the heavy model. Walk me through that.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "second_stage_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Stage 3: Second-stage ranking (neural re-ranking). Goal: re-rank the top 500 to determine final top 50. This is where we use a cross-encoder BERT model. Unlike the bi-encoder in retrieval (which encodes query and document separately), the cross-encoder takes the query and document as a single input: [CLS] query [SEP] document [SEP]. The model attends across both, capturing deep semantic interactions — it understands that 'bank' in 'river bank' is different from 'investment bank'. Model: a fine-tuned 12-layer BERT with ~110M parameters. Input: query (up to 64 tokens) + document snippet (up to 256 tokens). Output: relevance score [0, 1]. Inference time per document: ~2ms on a GPU. For 500 documents: ~1 second on a single GPU. Too slow. We batch across 8 GPUs: 500/8 = ~63 documents per GPU, ~125ms. That fits our budget. We use ONNX Runtime with FP16 quantization to halve the model size and double throughput with minimal quality loss.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cross_encoder", "bert", "semantic_understanding", "gpu_inference", "quantization", "onnx_runtime"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the diversity of results? You don't want all top results from the same domain.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "diversity" }
+    },
+    {
+      "role": "candidate",
+      "content": "Stage 4: Diversity re-ranking. After the BERT scores, we apply Maximal Marginal Relevance (MMR): score_final(d) = lambda * relevance(d) - (1-lambda) * max_similarity(d, already_selected). Lambda = 0.7 (favor relevance over diversity). For each result slot, we pick the document that maximizes score_final, then add it to the 'already selected' set. This naturally promotes diverse results — once we select one result from domain X, other results from domain X get penalized by the similarity term. Beyond domain diversity, we also apply: (a) Intent diversity: if the query is ambiguous ('Apple' could be the company or the fruit), show results for both interpretations. (b) Format diversity: mix result types — web pages, images, videos, knowledge panels, news. (c) Host-level deduplication: maximum 2 results per domain to prevent any single site from dominating. I'd apply a hard cap rather than just a soft penalty for this.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["mmr", "diversity_reranking", "intent_diversity", "format_diversity", "host_deduplication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you debug ranking issues? A user complains that a relevant page isn't showing up.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "ranking_debugging" }
+    },
+    {
+      "role": "candidate",
+      "content": "Debugging search ranking is one of the hardest operational challenges. I'd build an explain API: GET /search/explain?q=query&url=url. It returns a breakdown for that query-document pair at each pipeline stage: (1) Was the document in the inverted index for these terms? If not, it was never a candidate — indexing issue. (2) BM25 score: show term-by-term contribution. Low IDF means the term is too common to differentiate. (3) Embedding retrieval: cosine similarity score. Low score means the document's topic doesn't match semantically. (4) First-stage features: show all 50+ features with their values and the model's learned weight for each. Which features are dragging the score down? (5) BERT re-ranker score: attention visualization showing which tokens the model focused on. (6) Diversity penalty: was the document penalized because a similar result ranked higher? This explain mode is expensive (runs the full pipeline for one document) but invaluable for debugging. We'd also log the top 100 results with all feature values for a random sample of queries, enabling offline analysis of ranking drift.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["explain_api", "ranking_debugging", "feature_attribution", "attention_visualization", "ranking_drift"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you evaluate that your ranking is actually good? How do you measure quality?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "ranking_evaluation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multiple evaluation methods at different stages. Offline metrics: NDCG@10 (Normalized Discounted Cumulative Gain) — measures how well the top 10 results match human-labeled relevance judgments. We maintain a dataset of 50K query-document pairs with 5-level relevance ratings from human judges. MAP (Mean Average Precision) — measures precision across all recall levels. MRR (Mean Reciprocal Rank) — position of the first relevant result. Online metrics (A/B testing): click-through rate (CTR) on first page, abandonment rate (user searched but clicked nothing — bad), time-to-first-click (shorter is better), pogo-sticking rate (user clicks result, immediately returns to search — the result was bad). Long-term metrics: query reformulation rate (user had to rephrase — original results weren't satisfactory), sessions per task (fewer is better). I'd run every ranking model change as an A/B test on 1% of traffic for a week before full rollout. The primary metric is a composite: search quality score = 0.4*NDCG@10 + 0.3*(1-abandonment_rate) + 0.2*(1-pogo_stick_rate) + 0.1*CTR.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ndcg", "map", "mrr", "ab_testing", "click_metrics", "pogo_sticking", "search_quality_score"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good evaluation framework. How do you handle the latency budget across all these stages at 100K QPS?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "latency_budget" }
+    },
+    {
+      "role": "candidate",
+      "content": "Total budget: 200ms at P99. Allocation: query understanding: 10ms, retrieval (inverted index + ANN): 30ms, first-stage ranking (10K documents through LambdaMART): 20ms, second-stage ranking (500 documents through BERT): 130ms, diversity re-ranking + result assembly: 10ms. The BERT stage consumes 65% of the latency budget — that's the bottleneck. To scale BERT inference for 100K QPS: each query needs 8 GPU-milliseconds (shared across 8 GPUs for 125ms wall time). Total GPU-seconds per second: 100K * 8 * 0.125 = 100K GPU-seconds... wait, let me recalculate. Each query uses 8 GPUs for 125ms = 1 GPU-second. At 100K QPS: 100K GPU-seconds per second, meaning we need 100K GPUs. That's unrealistic. We need to optimize: (1) Distill BERT to a 4-layer model — 3x faster with 95% quality. (2) Use speculative execution — for the top 50 candidates, use full BERT; for 50-500, use the distilled model. (3) Early termination — if the top result has a very high score, skip re-ranking the lower candidates. With these optimizations, we'd need ~10K GPUs, which is feasible for a large search engine.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["latency_budget", "gpu_scaling", "model_distillation", "speculative_execution", "early_termination"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good that you caught the scaling issue. Anything to wrap up?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three additions. First, safety: the ranking pipeline needs a content quality filter that demotes or removes results with misinformation, hate speech, or harmful content. This runs as a parallel classifier alongside the ranking stages and can override ranking decisions. Second, for popular queries (top 1% of query volume, which account for ~30% of traffic), I'd pre-compute and cache the ranked results in Redis. Cache invalidation triggers when the underlying index changes significantly for those queries. This offloads a huge amount of GPU inference. Third, feedback loops: every click/skip signal goes back to retrain the LambdaMART and BERT models weekly, creating a continuous improvement cycle. But we need to be careful about position bias — users tend to click higher-ranked results regardless of relevance, so training data needs position debiasing.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["content_safety", "result_caching", "feedback_loops", "position_bias", "continuous_training"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent ranking pipeline design. Very thorough from retrieval to evaluation. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 80,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 5,
+      "caching_strategy": 7,
+      "scalability": 9,
+      "failure_handling": 6,
+      "communication": 10
+    },
+    "strengths": [
+      "Comprehensive multi-stage ranking pipeline with clear latency budgets per stage",
+      "Deep understanding of ranking algorithms from BM25 to BERT cross-encoders with concrete math",
+      "Excellent evaluation framework combining offline metrics (NDCG) with online A/B testing signals"
+    ],
+    "weaknesses": [
+      "Database and indexing design were not detailed — no discussion of inverted index storage or sharding",
+      "Failure handling was minimal — no discussion of what happens when the GPU cluster is degraded"
+    ]
+  }
+}

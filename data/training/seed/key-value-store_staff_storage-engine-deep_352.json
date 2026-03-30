@@ -1,0 +1,189 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "staff",
+    "candidate_profile": "storage-engine-deep",
+    "total_exchanges": 22,
+    "generation_id": "seed_352"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed key-value store, something like DynamoDB or Redis with persistence. I'd especially like you to go deep on the storage engine — how data is written and read at the lowest level. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Key questions: What's the expected data size — total keys and average value size? What's the read-to-write ratio? Do we need strong consistency or is eventual consistency acceptable? What about range queries — do we need to scan keys in sorted order, or just point lookups? And what's the durability requirement — can we lose the last second of writes?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_size", "read_write_ratio", "consistency_model", "range_queries", "durability"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10 billion keys, average value 1KB. Write-heavy: 60% writes, 40% reads. Strong consistency per partition. Support both point lookups and range scans. Zero data loss — every acknowledged write must survive a server crash. Now design the storage engine.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "storage_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "For a write-heavy workload with range scan support, I'll design an LSM-tree (Log-Structured Merge-tree) based storage engine. This is the same architecture used by LevelDB, RocksDB, and Cassandra. The core idea: writes go to an in-memory sorted structure first, then get flushed to sorted files on disk. Reads merge results from memory and disk. Let me walk through each component.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lsm_tree", "write_optimized", "rocksdb"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Start with the write path.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "write_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step 1: Write-Ahead Log (WAL). Before anything touches memory, the key-value pair is appended to the WAL — a sequential, append-only file on disk. Format: [CRC32: 4 bytes][key_length: 4 bytes][value_length: 4 bytes][key: variable][value: variable][timestamp: 8 bytes][operation: 1 byte (PUT/DELETE)]. We fsync the WAL after each write (or batch of writes) for durability. Sequential writes to the WAL are fast — modern SSDs can do 500K sequential writes per second. If the server crashes, we replay the WAL on startup to recover the memtable. Step 2: Memtable. After the WAL append, the key-value pair is inserted into the memtable — an in-memory red-black tree (or skip list). I prefer a skip list because it offers O(log n) insert and lookup like a red-black tree but is simpler to implement concurrently. The skip list maintains keys in sorted order, which is essential for range scans. Memory budget for the memtable: 64 MB is typical.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["wal", "fsync", "memtable", "red_black_tree", "skip_list", "crash_recovery"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Why skip list over red-black tree? Be specific.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "memtable_implementation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three reasons. First, concurrency: a skip list can be made lock-free using CAS (compare-and-swap) operations for inserts. A red-black tree requires rebalancing rotations that affect multiple nodes, making lock-free implementation extremely complex. RocksDB uses a lock-free skip list for exactly this reason. Second, range scans are natural: a skip list's bottom level is a sorted linked list — iterating from key A to key B is a simple forward traversal. In a red-black tree, in-order traversal requires navigating parent pointers, which has worse cache locality. Third, memory allocation: skip list nodes are independently allocated, so you can use a simple arena allocator — allocate from a contiguous block, free the entire block when the memtable is flushed. No individual free() calls needed. The downside: skip lists use more memory due to multiple levels of pointers — roughly 1.33x overhead per node versus red-black tree's 2 pointers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["skip_list", "lock_free", "cas", "cache_locality", "arena_allocator"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What happens when the memtable is full?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "sstable_flush" }
+    },
+    {
+      "role": "candidate",
+      "content": "When the memtable reaches the 64 MB threshold, it becomes immutable — no more writes go to it. A new empty memtable is created for incoming writes (along with a new WAL file). The immutable memtable is flushed to disk as an SSTable (Sorted String Table). The flush process: iterate through the skip list in order, writing key-value pairs sequentially to a file. SSTable file format: [Data Block 0][Data Block 1]...[Data Block N][Index Block][Bloom Filter Block][Footer]. Each data block is 4-64 KB (I'd use 16 KB). Keys within a block are delta-encoded — only store the prefix difference from the previous key, saving 30-50% space for keys with common prefixes. The index block maps the last key of each data block to its file offset. For a 64 MB SSTable with 16 KB blocks, the index has 4,096 entries — fits in ~100 KB. After the SSTable is written and fsynced, the old WAL file is deleted since its data is now safely on disk.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sstable", "immutable_memtable", "data_blocks", "index_block", "delta_encoding", "wal_cleanup"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now explain the read path — how do you find a key?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "read_path" }
+    },
+    {
+      "role": "candidate",
+      "content": "The read path checks multiple locations in order, returning the first match (most recent version). Step 1: Check the active memtable. O(log n) skip list lookup, entirely in memory — sub-microsecond. Step 2: Check the immutable memtable (if one exists during flush). Same O(log n) lookup. Step 3: Check SSTables on disk, from newest to oldest. For each SSTable: (a) Check the bloom filter — if it says the key is definitely not present, skip this SSTable entirely. (b) Binary search the index block to find which data block might contain the key. (c) Read that data block from disk and scan it for the key. The bloom filter is the key optimization. With a 10-bit-per-key bloom filter, the false positive rate is ~1%. For a read of a non-existent key, instead of reading all SSTables (potentially hundreds of disk reads), we only do about 1 unnecessary disk read per 100 SSTables checked. For our 10 billion keys at 1KB each, that's 10 TB of data across thousands of SSTables, so bloom filters save massive I/O.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_path", "memtable_lookup", "bloom_filter", "binary_search", "false_positive_rate"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me more about the bloom filter implementation. How does it work and how do you size it?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "bloom_filter" }
+    },
+    {
+      "role": "candidate",
+      "content": "A bloom filter is a bit array with k hash functions. To add a key: hash it k times, set those k bits. To check a key: hash it k times, check if all k bits are set. False positives are possible (all bits set by coincidence), but false negatives never occur. Sizing math: for a false positive rate p, optimal bits per key m/n = -ln(p) / (ln(2))^2. For p = 1%: m/n = 9.6, so ~10 bits per key. Optimal number of hash functions: k = (m/n) * ln(2) = 10 * 0.693 = ~7 hash functions. For an SSTable with 65,536 keys (64 MB / 1 KB): bloom filter size = 65,536 * 10 bits = 81,920 bytes = 80 KB. That's tiny compared to the 64 MB of data. We store the bloom filter at the end of the SSTable file and load it into memory when the SSTable is opened. For all SSTables in memory: 10 billion keys * 10 bits = 12.5 GB of bloom filter memory. That's significant — we might use a more aggressive 5 bits per key (3.1% false positive) to halve it to 6.25 GB.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["bloom_filter", "hash_functions", "false_positive_rate", "memory_sizing", "bits_per_key"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now the critical part — compaction. SSTables pile up over time. How do you manage that?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Compaction merges multiple SSTables to reduce the number of files and reclaim space from deleted/overwritten keys. I'll use leveled compaction, which is what RocksDB defaults to. The structure: Level 0 (L0) contains SSTables flushed directly from the memtable — they can have overlapping key ranges. Levels 1 through N have non-overlapping key ranges (each level is a sorted run). Size grows 10x per level: L1 = 100 MB, L2 = 1 GB, L3 = 10 GB, L4 = 100 GB, L5 = 1 TB, L6 = 10 TB. For our 10 TB dataset, we need 6 levels.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["compaction", "leveled_compaction", "level_sizing", "sorted_run"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through exactly how a leveled compaction works step by step.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Here's the compaction process step by step. When L0 accumulates 4 SSTables (configurable threshold), compaction triggers. Step 1: Pick the oldest SSTable from L0. Say it covers key range [A, M]. Step 2: Find all SSTables in L1 that overlap with [A, M]. Say there are 3 SSTables in L1 covering [A, D], [E, K], [L, P]. Step 3: Merge-sort all 4 SSTables (1 from L0 + 3 from L1) using a multi-way merge. For duplicate keys, keep only the newest version (highest timestamp). For tombstones (delete markers), keep the tombstone unless we're compacting the deepest level. Step 4: Write the merged output as new SSTables in L1, each exactly the target SSTable size (64 MB). Step 5: Atomically swap: add new SSTables to L1, remove old SSTables from L0 and L1. Update the manifest file (which tracks all active SSTables). Step 6: Delete the old SSTable files. The same process repeats when L1 exceeds its size limit (100 MB) — compact from L1 into L2, and so on down. Write amplification: each key is written once to L0, then compacted through ~6 levels. Worst case write amplification = 10 * 6 = 60x (each level is 10x larger, so a key is rewritten ~10 times per level). In practice, with optimizations, it's closer to 10-30x.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["merge_sort", "multi_way_merge", "tombstones", "manifest", "write_amplification", "atomic_swap"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "60x write amplification sounds expensive. How does this affect our system?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "write_amplification" }
+    },
+    {
+      "role": "candidate",
+      "content": "It's the fundamental trade-off of LSM-trees: write amplification buys read performance. Let me quantify the impact. If our write throughput is 600K writes/sec (60% of total QPS), each write is 1 KB. Raw write bandwidth: 600 MB/s. With 30x write amplification: 18 GB/s of actual disk I/O for compaction. A modern NVMe SSD does about 3 GB/s sequential write. So we need 6 SSDs per node just for compaction I/O. Mitigations: (1) Use size-tiered compaction for L0 → L1 transition (lower write amp at the cost of more read amp). (2) Increase memtable size to 256 MB to reduce flush frequency. (3) Use direct I/O to bypass OS page cache for compaction reads/writes, preserving the page cache for user reads. (4) Rate-limit compaction I/O to prevent it from starving foreground reads — RocksDB has rate_limiter configuration for this.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["write_amplification", "ssd_throughput", "size_tiered_compaction", "direct_io", "rate_limiter"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the read path perform with leveled compaction? What's the worst case?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "read_performance" }
+    },
+    {
+      "role": "candidate",
+      "content": "The beauty of leveled compaction is bounded read amplification. For a point lookup: L0 has at most 4 overlapping SSTables — check all 4. L1 through L6 each have non-overlapping ranges — at most 1 SSTable per level. Total: 4 + 6 = 10 SSTables to check in the worst case. With bloom filters (1% false positive), expected disk reads = 4 * 0.01 + 6 * 0.01 = 0.1 disk reads for a key that doesn't exist. For a key that exists, the bloom filter confirms it, and we do 1 disk read from the level where the key lives. Actual latency: bloom filter checks are in-memory (~1 microsecond each). One 16 KB data block read from NVMe SSD: ~100 microseconds. So a typical read is 1 disk read = ~100 microseconds. Worst case (key in the deepest level, all bloom filters false-positive): 10 disk reads = ~1 millisecond. For range scans, we merge iterators from all levels — this is more expensive, proportional to the scan range.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_amplification", "bloom_filter", "disk_io_latency", "range_scan_cost"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you add a block cache to speed up reads further?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "block_cache" }
+    },
+    {
+      "role": "candidate",
+      "content": "The block cache stores recently read data blocks in memory. When reading a data block from an SSTable, we first check the block cache (keyed by SSTable file ID + block offset). On hit, we avoid the disk read entirely. Sizing: I'd allocate 50% of available RAM to the block cache. On a 64 GB node, that's 32 GB. With 16 KB blocks, that holds 2 million blocks. With 10 TB of data across all SSTables, the cache holds 32 GB / 10 TB = 0.32% of data. That sounds small, but access patterns are highly skewed — the hot 0.3% of data might serve 80% of reads. I'd use a clock-based eviction algorithm (similar to LRU but more efficient for concurrent access — no need to update a linked list on every access). I'd also separately cache the index blocks and bloom filter blocks with higher priority — they're accessed on every read and losing them to eviction is costly. RocksDB uses a partitioned index cache for exactly this reason.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["block_cache", "cache_sizing", "clock_eviction", "index_caching", "cache_priority"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's zoom out — how do you distribute this across multiple nodes?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "distribution" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each node runs the storage engine I just described. We partition the key space using consistent hashing with virtual nodes. 10 billion keys at 1 KB each = 10 TB total. With 30 nodes, each holds ~333 GB. With replication factor 3, each node stores ~1 TB (its own partitions + replicas). For the replication protocol, the leader for each partition handles writes: it appends to its local WAL, then sends the write to 2 followers. Once the leader + 1 follower have fsynced (quorum = 2 out of 3), the write is acknowledged to the client. This gives us strong consistency per partition with the ability to survive 1 node failure. Reads go to the leader for strong consistency, or to any replica for eventual consistency (configurable per request).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing", "virtual_nodes", "replication_protocol", "quorum_writes", "leader_based_replication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens during compaction when a node is also handling writes and reads?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "compaction_impact" }
+    },
+    {
+      "role": "candidate",
+      "content": "Compaction competes with foreground I/O — this is the biggest operational challenge of LSM-trees. Mitigations: (1) Dedicate separate I/O threads for compaction with lower priority (Linux ionice). (2) Rate-limit compaction writes to 50% of SSD bandwidth — foreground operations get guaranteed bandwidth. (3) Use separate SSD for WAL vs data: WAL writes are small and latency-sensitive, compaction is large and throughput-sensitive. Splitting them prevents compaction I/O from blocking WAL fsync. (4) Monitor compaction debt — if pending compaction bytes exceed a threshold (say 10x the L0 size limit), throttle incoming writes to let compaction catch up. This is called write stalling and it's a last resort. (5) For range scans during compaction, use snapshot isolation: the scan sees a consistent view of the SSTables that existed when the scan started, even as compaction adds/removes files.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["io_priority", "rate_limiting", "wal_separation", "write_stalling", "snapshot_isolation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent depth on the storage engine. Anything to wrap up?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few additions. For crash recovery: on startup, read the manifest file to discover all active SSTables, then replay the WAL to reconstruct the memtable. WAL replay is bounded by the memtable size — at most 64 MB of data to replay, which takes under a second. For deletions, tombstones occupy space until they're compacted through the deepest level. I'd set a tombstone TTL (e.g., 7 days) after which they're guaranteed to be purged. For monitoring: track read/write latency percentiles, compaction throughput, write amplification factor, bloom filter false positive rate, and block cache hit rate. These metrics directly map to storage engine health. Finally, I'd consider using io_uring on Linux for async I/O — it reduces system call overhead by ~40% compared to traditional read/write calls, which matters at high IOPS.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["crash_recovery", "tombstone_ttl", "monitoring", "io_uring", "manifest_file"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Outstanding storage engine design. Very deep understanding of LSM-trees. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 82,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 8,
+      "api_design": 5,
+      "database_design": 10,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional depth on LSM-tree internals — explained every component from WAL to compaction with real math",
+      "Strong quantitative analysis of write amplification and bloom filter sizing",
+      "Excellent understanding of systems-level concerns: io_uring, direct I/O, arena allocators"
+    ],
+    "weaknesses": [
+      "API design was not discussed — no mention of client-facing interface or protocol",
+      "Could have discussed alternative storage engine designs (B-tree) for comparison"
+    ]
+  }
+}

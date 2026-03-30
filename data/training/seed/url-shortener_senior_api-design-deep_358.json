@@ -1,0 +1,159 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "senior",
+    "candidate_profile": "api-design-deep",
+    "total_exchanges": 20,
+    "generation_id": "seed_358"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a URL shortening service. I'd like you to focus heavily on the API design — endpoints, request/response formats, error handling, and HTTP semantics. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Let me clarify the requirements. Who are the API consumers — internal services, third-party developers, or both? Do we need API versioning from day one? What authentication model — API keys, OAuth, or both? Do we need bulk operations (shorten many URLs at once)? And what analytics do we expose through the API?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_consumers", "versioning", "authentication", "bulk_operations", "analytics_api"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Third-party developer API (like bit.ly's API). API versioning required. API key authentication. Support bulk operations. Analytics: click counts and time-series data per URL. Scale: 50 million URLs/day, 100:1 read ratio. Design the API.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me start with the URL creation endpoint. POST /api/v1/urls. Request body: {\"long_url\": \"https://example.com/very/long/path\", \"custom_alias\": \"my-brand\" (optional), \"expires_at\": \"2027-01-01T00:00:00Z\" (optional), \"tags\": [\"marketing\", \"q1-campaign\"] (optional)}. Content-Type: application/json. Authentication: Authorization: Bearer <api_key>. Success response (201 Created): {\"id\": \"abc123x\", \"short_url\": \"https://sho.rt/abc123x\", \"long_url\": \"https://example.com/very/long/path\", \"custom_alias\": null, \"expires_at\": \"2027-01-01T00:00:00Z\", \"created_at\": \"2026-03-28T10:00:00Z\", \"tags\": [\"marketing\", \"q1-campaign\"]}. I return 201 (not 200) because we created a new resource. The response includes the Location header: Location: /api/v1/urls/abc123x, following REST conventions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rest_design", "http_201", "location_header", "request_response_format"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What error cases do you handle on the create endpoint?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "error_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several error responses. 400 Bad Request — invalid input: {\"error\": {\"code\": \"INVALID_URL\", \"message\": \"The provided URL is not a valid HTTP/HTTPS URL\", \"field\": \"long_url\"}}. Also for URLs that exceed 2,048 characters, or invalid expires_at (in the past). 409 Conflict — custom alias taken: {\"error\": {\"code\": \"ALIAS_ALREADY_EXISTS\", \"message\": \"The custom alias 'my-brand' is already in use\", \"field\": \"custom_alias\"}}. 422 Unprocessable Entity — URL is blocked (malware, spam): {\"error\": {\"code\": \"URL_BLOCKED\", \"message\": \"This URL has been flagged as potentially harmful\"}}. 429 Too Many Requests — rate limited: {\"error\": {\"code\": \"RATE_LIMIT_EXCEEDED\", \"message\": \"Rate limit exceeded. Retry after 30 seconds\", \"retry_after\": 30}}. With headers: X-RateLimit-Limit: 100, X-RateLimit-Remaining: 0, X-RateLimit-Reset: 1711620030, Retry-After: 30. 401 Unauthorized — missing or invalid API key. 403 Forbidden — API key valid but insufficient permissions (e.g., free tier trying to use custom aliases).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["error_codes", "http_status_codes", "rate_limit_headers", "structured_errors", "validation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good error handling. Now the redirect endpoint — how does that work?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "redirect_endpoint" }
+    },
+    {
+      "role": "candidate",
+      "content": "GET /:code — this is the redirect endpoint. It's on the root path (not /api/v1/) for the shortest possible URLs. When a user visits https://sho.rt/abc123x, the server returns an HTTP redirect. The key decision: 301 vs 302. I'd use 302 Found by default. Here's why: 301 (Moved Permanently) tells the browser to cache the redirect — subsequent visits skip our server entirely. We lose analytics data on repeat visits and can never change the destination URL. 302 (Found/Temporary) means every visit hits our server — we get full analytics and can update the destination. For users who prioritize speed over analytics (configurable per URL), we offer 301 via a flag: POST /api/v1/urls with \"redirect_type\": \"permanent\". Response headers for 302: HTTP/1.1 302 Found, Location: https://example.com/very/long/path, Cache-Control: no-store, no-cache, must-revalidate (prevents intermediate caches from caching the redirect), X-Robots-Tag: noindex (prevent search engines from indexing the short URL). For 301: Cache-Control: public, max-age=31536000 (cache for 1 year).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["http_redirect", "301_vs_302", "cache_control", "analytics_tradeoff", "robots_tag"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if the short code doesn't exist or is expired?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "redirect_errors" }
+    },
+    {
+      "role": "candidate",
+      "content": "For a non-existent code: 404 Not Found. But we shouldn't return a JSON error here — this is a user-facing endpoint, not an API endpoint. Instead, redirect to a branded 404 page: HTTP/1.1 302 Found, Location: https://sho.rt/404. The 404 page explains the link doesn't exist and provides a search box. For an expired URL: also redirect to a custom page, but with a different message: 'This link has expired.' I'd use 410 Gone for expired URLs when accessed via the API (it signals permanent removal), but for browser requests, redirect to the expiry page. How to distinguish API vs browser requests: check the Accept header. Accept: application/json → return JSON error. Accept: text/html or no Accept header → redirect to error page. For URLs flagged as malicious (phishing, malware): don't redirect. Show an interstitial warning page: 'This link has been flagged as potentially unsafe. Proceed at your own risk.' with a confirmation button. This protects users while not silently breaking links.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["404_handling", "410_gone", "content_negotiation", "accept_header", "malware_interstitial"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice content negotiation. Now tell me about the delete endpoint.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "delete_endpoint" }
+    },
+    {
+      "role": "candidate",
+      "content": "DELETE /api/v1/urls/:code. Authentication required — only the creator can delete their URL. Success response: 204 No Content (no body — the resource is gone). Idempotent: deleting an already-deleted URL also returns 204 (not 404). This follows HTTP semantics — DELETE should be idempotent, meaning calling it multiple times has the same effect as calling it once. If the URL doesn't exist at all (never created): 404 Not Found. If the authenticated user isn't the owner: 403 Forbidden: {\"error\": {\"code\": \"NOT_OWNER\", \"message\": \"You don't have permission to delete this URL\"}}. Implementation: I'd do a soft delete — set is_deleted = true and deleted_at = NOW(). The redirect endpoint returns 404 for soft-deleted URLs. Hard delete happens after 30 days (giving time for accidental deletion recovery). I'd also add an undo endpoint: POST /api/v1/urls/:code/restore within 30 days of deletion. Returns 200 with the restored URL object.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["http_delete", "idempotency", "soft_delete", "authorization", "undo_restore"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now the analytics endpoint.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "analytics_api" }
+    },
+    {
+      "role": "candidate",
+      "content": "GET /api/v1/urls/:code/stats. Query parameters: from=2026-03-01T00:00:00Z, to=2026-03-28T23:59:59Z, granularity=day (options: hour, day, week, month). Success response (200 OK): {\"url_id\": \"abc123x\", \"total_clicks\": 15234, \"unique_visitors\": 8901, \"time_series\": [{\"timestamp\": \"2026-03-01T00:00:00Z\", \"clicks\": 523, \"unique_visitors\": 312}, {\"timestamp\": \"2026-03-02T00:00:00Z\", \"clicks\": 489, \"unique_visitors\": 298}], \"referrers\": [{\"domain\": \"twitter.com\", \"clicks\": 5023}, {\"domain\": \"linkedin.com\", \"clicks\": 3201}, {\"domain\": \"direct\", \"clicks\": 7010}], \"countries\": [{\"code\": \"US\", \"clicks\": 8901}, {\"code\": \"GB\", \"clicks\": 2134}], \"devices\": {\"mobile\": 9140, \"desktop\": 5201, \"tablet\": 893}}. The response is structured to support dashboard rendering without additional API calls. For large time ranges with hourly granularity, the response can be large. I'd paginate the time_series array: add page and per_page parameters, with Link headers for pagination: Link: </api/v1/urls/abc123x/stats?page=2>; rel=\"next\".",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["analytics_api", "time_series", "granularity", "pagination", "link_headers", "referrer_tracking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How about the bulk creation endpoint?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "bulk_api" }
+    },
+    {
+      "role": "candidate",
+      "content": "POST /api/v1/urls/bulk. Request: {\"urls\": [{\"long_url\": \"https://example.com/page1\", \"custom_alias\": \"p1\"}, {\"long_url\": \"https://example.com/page2\"}, {\"long_url\": \"invalid-url\"}]}. Maximum batch size: 100 URLs per request. Response (207 Multi-Status): {\"results\": [{\"status\": 201, \"data\": {\"id\": \"abc123x\", \"short_url\": \"https://sho.rt/p1\", \"long_url\": \"https://example.com/page1\"}}, {\"status\": 201, \"data\": {\"id\": \"def456y\", \"short_url\": \"https://sho.rt/def456y\", \"long_url\": \"https://example.com/page2\"}}, {\"status\": 400, \"error\": {\"code\": \"INVALID_URL\", \"message\": \"The provided URL is not valid\", \"index\": 2}}], \"summary\": {\"total\": 3, \"succeeded\": 2, \"failed\": 1}}. I use 207 Multi-Status because some items might succeed while others fail — a single 200 or 400 wouldn't accurately represent the mixed result. The summary field lets the client quickly check if everything succeeded without iterating. Each result includes the index of the original request item for correlation. The operation is not atomic — partial success is by design. If the client wants all-or-nothing, they should use individual POST requests wrapped in their own transaction logic.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["bulk_api", "multi_status_207", "partial_success", "batch_size_limit", "error_correlation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about API versioning strategy. You used /v1/ in the path. Why, and what's your migration plan?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "api_versioning" }
+    },
+    {
+      "role": "candidate",
+      "content": "I chose URL path versioning (/api/v1/) over header versioning (Accept: application/vnd.shortener.v1+json) or query param versioning (?version=1). The reason: path versioning is the most visible and debuggable. Developers see the version in every URL. It's easy to route at the load balancer level. The downside is it makes version transitions more disruptive — every client URL changes. Migration strategy: when we release v2, we run both /api/v1/ and /api/v2/ simultaneously. V1 enters a deprecation period: we add a Sunset header to all v1 responses: Sunset: Sat, 01 Jan 2028 00:00:00 GMT, and a Deprecation header: Deprecation: true. We also add a Link header: Link: </api/v2/urls>; rel=\"successor-version\". V1 continues working for 12 months after v2 launches. During this period, we log v1 usage per API key and proactively reach out to high-volume v1 users. After sunset, v1 returns 410 Gone with a body explaining the migration path. Breaking changes go in v2; non-breaking additions (new optional fields, new endpoints) go into v1 without version bump.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_versioning", "url_path_versioning", "sunset_header", "deprecation_strategy", "backward_compatibility"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How do you handle idempotency for the create endpoint? A client's request might timeout and they retry.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "idempotency" }
+    },
+    {
+      "role": "candidate",
+      "content": "The client includes an Idempotency-Key header: Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000 (UUID generated by the client). On first request: we process normally, create the URL, and store the response keyed by (api_key, idempotency_key) in Redis with a 24-hour TTL. Return the response with the header: Idempotency-Key-Status: created. On duplicate request (same idempotency key): we return the stored response with Idempotency-Key-Status: replayed. The response is byte-identical to the first response — same status code, same body, same URL ID. Edge cases: if the first request is still processing when the retry arrives, we return 409 Conflict: {\"error\": {\"code\": \"IDEMPOTENCY_KEY_IN_PROGRESS\", \"message\": \"A request with this idempotency key is currently being processed\"}}. The client should wait and retry. If the idempotency key is reused with different parameters (same key but different long_url), we return 422: {\"error\": {\"code\": \"IDEMPOTENCY_KEY_MISMATCH\", \"message\": \"This idempotency key was already used with different parameters\"}}. This prevents accidental misuse.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency_key", "response_caching", "duplicate_detection", "in_progress_handling", "parameter_mismatch"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you document and test this API?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "api_documentation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Documentation: I'd use OpenAPI 3.0 specification (Swagger). Every endpoint, parameter, request/response schema, and error code is defined in the spec file. This auto-generates: interactive API documentation (Swagger UI), client SDKs in Python/JavaScript/Go/Java (using openapi-generator), and request validation middleware (the server validates incoming requests against the schema automatically). For testing: contract tests validate that the server implementation matches the OpenAPI spec. Integration tests cover every endpoint with both success and error paths. I'd also build a public sandbox environment at https://sandbox.sho.rt/api/v1/ where developers can test with fake data — sandbox URLs redirect to a placeholder page. Rate limits are lower in sandbox. For monitoring: track per-endpoint latency percentiles (P50, P95, P99), error rates by status code, and request volume per API key. Alert if error rate exceeds 5% or P99 latency exceeds 500ms on any endpoint.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["openapi", "swagger", "sdk_generation", "contract_testing", "sandbox_environment", "api_monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong API design throughout. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few additions. First, I'd add a PATCH /api/v1/urls/:code endpoint for updating mutable fields: long_url (change destination), expires_at, and tags. Returns 200 with the updated resource. Second, I'd implement webhook support: POST /api/v1/webhooks to register a callback URL. We send POST events when a URL reaches a click milestone (1K, 10K, 100K), when a URL expires, or when a URL is flagged for abuse. Webhook payloads include an HMAC signature for verification. Third, for the list endpoint GET /api/v1/urls, I'd use cursor-based pagination rather than offset-based: ?cursor=abc123&limit=20. Cursor pagination is stable under insertions/deletions and more efficient for the database (no OFFSET scan). The cursor is an opaque, base64-encoded token containing the last item's sort key.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["patch_endpoint", "webhooks", "hmac_signature", "cursor_pagination"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent API design. Very thorough HTTP semantics and error handling. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 4,
+      "api_design": 10,
+      "database_design": 5,
+      "caching_strategy": 5,
+      "scalability": 5,
+      "failure_handling": 7,
+      "communication": 9
+    },
+    "strengths": [
+      "Comprehensive API design with proper HTTP semantics — correct status codes, headers, and content negotiation",
+      "Excellent error handling with structured error codes and rate limit headers",
+      "Strong idempotency implementation covering edge cases like in-progress requests and parameter mismatches"
+    ],
+    "weaknesses": [
+      "Capacity estimation was not done — no QPS, storage, or bandwidth calculations",
+      "Database and caching design were not discussed — no mention of schema or Redis"
+    ]
+  }
+}

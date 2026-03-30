@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "senior",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_467"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a video streaming service like YouTube. Users upload videos and viewers watch them with adaptive quality. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. What's the scale — daily active viewers and uploads? Do we support live streaming or just video-on-demand? What's the target for playback start time? And what regions are we serving?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["scale", "live_vs_vod", "playback_latency", "geography"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "100 million DAU viewers, 500K uploads per day. VOD only. Playback start under 2 seconds. Global — US, EU, Asia, South America. Anything else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "What's the average video length? And do we need to support multiple qualities — 360p through 4K — or is 1080p max okay?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["video_length", "resolution_range"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Average 7 minutes, support up to 4K. Let's design it.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll split this into the upload path and the viewing path. Upload path: user uploads a raw video file. We store the original in blob storage, then kick off an async transcoding pipeline that produces multiple renditions — 360p, 720p, 1080p, 4K — in formats like HLS. Each rendition is split into small segments, typically 2-6 seconds each. A manifest file lists all available quality levels. Viewing path: when a viewer hits play, we serve the manifest file. The player picks a quality based on bandwidth, downloads segments one at a time, and adapts quality dynamically. Video segments are served through a CDN for low latency globally.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["upload_pipeline", "transcoding", "renditions", "hls", "segments", "manifest", "adaptive_bitrate", "cdn"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good overview. Let's dig into the upload side. 500K uploads per day, some videos could be several gigabytes in 4K. How does the upload mechanism work?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "upload_mechanism" }
+    },
+    {
+      "role": "candidate",
+      "content": "Resumable chunked upload. The client splits the file into chunks — maybe 5-10MB each — and uploads them sequentially. Each chunk is acknowledged. If the connection drops, the client resumes from the last acknowledged chunk rather than restarting. The server assembles chunks into the complete file. For 4K video that's 2-3GB, this is essential — nobody wants to restart a multi-hour upload. We'd upload directly to blob storage — something like S3 with multipart upload support. The application server just issues a pre-signed URL and tracks progress.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["resumable_upload", "chunked_upload", "multipart", "presigned_url"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Once the video is in S3, walk me through the transcoding pipeline in more detail.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "transcoding_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "The upload completion triggers a message to a task queue — SQS or Kafka. A pool of transcoding workers picks up jobs. Each worker downloads the source file, runs FFmpeg to produce each rendition, and uploads the output segments back to S3. For a 7-minute video, transcoding to all renditions might take 5-10 minutes on a decent instance with GPU acceleration. To speed things up, we can parallelize: split the source video into time-based chunks — say, 30-second segments — and transcode each chunk independently across multiple workers. Then stitch the outputs together. This scales linearly with worker count.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["task_queue", "worker_pool", "ffmpeg", "gpu_acceleration", "parallel_transcoding", "chunked_processing"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What codecs would you use, and why does that matter?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "codec_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "H.264 is the safe default — nearly universal device support, hardware decode everywhere. But it's not the most efficient. H.265 gives about 30-40% better compression at the same quality, which means lower bandwidth costs and faster loading for viewers. The trade-off is that H.265 has patent licensing costs and not all browsers support it natively. AV1 is the newer option — similar efficiency to H.265 but royalty-free. Device support is growing but not universal yet. I'd encode in H.264 as the base, and add H.265 or AV1 for capable devices. The CDN serves whichever codec the client negotiates in the manifest request.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["h264", "h265", "av1", "compression_efficiency", "patent_licensing", "codec_negotiation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about the CDN layer. 100M DAU globally — how does content get close to viewers?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "cdn_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "A CDN has edge servers in many geographic locations — major cities worldwide. When a viewer in Mumbai requests a video, the request is routed to the nearest edge server. If that edge has the video cached, it serves it directly — that's the fast path. If not, the edge fetches it from a regional mid-tier cache or the origin (our S3 bucket), caches it, and then serves it. Popular videos stay cached everywhere. The long tail — videos with very few views — only get cached on demand in specific regions. We'd use a CDN provider like CloudFront, Akamai, or Fastly. Or at our scale, a multi-CDN approach where we route to whichever provider has the best performance for a given user.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["edge_servers", "geographic_routing", "cache_hierarchy", "origin_fetch", "multi_cdn", "long_tail"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned the long tail. At YouTube scale, most videos have very few views. What's the caching strategy for those?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "long_tail_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the long tail, the edge cache won't have the video — it'll be a cache miss on the first request. To mitigate cold-start latency, we can use an origin shield — a mid-tier caching layer between the edges and S3. Multiple edges in a region share one origin shield. So the first edge miss goes to the origin shield (hopefully a hit there if another edge in the region already requested it). Only if the origin shield also misses do we go to S3. This reduces origin load and improves latency for the second viewer of a cold video. For truly unpopular videos — maybe viewed once a month — we accept the S3 latency for the first request. The viewer might experience a slightly longer startup time, but subsequent segments should be faster once the edge cache is warm.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["origin_shield", "mid_tier_cache", "cold_start", "cache_warming", "graceful_degradation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about the database side. What metadata do we store and how?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Video metadata: video_id, uploader_id, title, description, tags, category, upload_time, duration, status (processing/ready/failed), thumbnail_urls, and a list of available renditions with their S3 paths. User data: profile, subscriptions, watch history. I'd use PostgreSQL for the core metadata — it's structured, we need consistency for status tracking, and the query patterns (lookup by video_id, list by uploader, search by tags) are well-suited. For view counts, I'd separate that out — it's a high-write counter that would create hot rows in Postgres. Use Redis for real-time counting and periodically flush to the database.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["video_metadata", "postgresql", "view_counting", "redis_counters", "hot_rows"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when a transcoding job fails halfway through? The user uploaded a video and is waiting.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "transcoding_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The job stays in the queue until explicitly deleted. If a worker crashes mid-transcode, the queue's visibility timeout kicks in — after, say, 30 minutes, the message reappears and another worker picks it up. Since transcoding is idempotent (same input always produces same output), retries are safe. If a job fails 3 times — maybe the video file is corrupt or uses an unsupported codec — we move it to a dead letter queue and mark the video status as 'failed' in the database. The user sees an error with a suggestion to re-upload in a different format. We should also alert the on-call team when DLQ depth increases, as it might indicate a systemic issue rather than individual bad files.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["visibility_timeout", "idempotent_retry", "dead_letter_queue", "error_handling", "monitoring", "alerting"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if an entire AWS region goes down? Half your users can't stream.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "regional_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The CDN edge servers are distributed globally and don't depend on a single region, so cached content keeps flowing. But the control plane — authentication, entitlements, metadata — might be in one region. To handle region failure, we'd run the control plane in at least two regions with cross-region replication. DNS-based failover switches traffic to the healthy region within minutes. The video content itself in S3 can be cross-region replicated. The tradeoff is cost — running active-active in multiple regions roughly doubles infrastructure cost. An alternative is active-passive with automated failover, accepting a few minutes of degraded service during the switch.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["cdn_independence", "multi_region", "cross_region_replication", "dns_failover", "active_active", "active_passive"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Almost out of time. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Content moderation is critical — we need to scan uploads for prohibited content before making them public. An ML pipeline flags potentially harmful content, and human reviewers handle edge cases. Also, search with Elasticsearch on video metadata and auto-generated transcripts. And copyright detection — a system like YouTube's Content ID that fingerprints uploaded videos against a database of copyrighted material.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["content_moderation", "ml_moderation", "search", "copyright_detection", "content_id"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong interview. You covered the full stack from upload to playback with good depth on the CDN and transcoding layers. Thanks!",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 70,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 5,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Clear end-to-end architecture covering both upload and playback paths",
+      "Good CDN depth — origin shield, multi-CDN, and long-tail caching strategy",
+      "Solid codec comparison with practical trade-off reasoning"
+    ],
+    "weaknesses": [
+      "No capacity estimation — didn't calculate bandwidth, storage, or transcoding compute needs",
+      "Didn't discuss adaptive bitrate algorithm internals — how the client decides when to switch quality",
+      "Regional failure discussion was sound but could have been deeper on RTO/RPO targets"
+    ]
+  }
+}

@@ -1,0 +1,180 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "staff",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_139"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter. This will be used as a shared service across multiple microservices in our platform. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. A few key questions: What kind of rate limiting do we need — per-user, per-API-key, per-IP, or per-service? What's the granularity — requests per second, per minute, per hour? Do we need to support different rate limits for different tiers of users? And what's the expected scale — how many services and how many requests per second across the platform?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_scope", "granularity", "tiered_limits", "qps"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good questions. Per-API-key primarily, but we also need per-IP for unauthenticated endpoints. Multiple time windows — per second and per minute. Three tiers: free (10 req/s), standard (100 req/s), premium (1000 req/s). We have about 50 microservices generating a combined 500K requests per second. What algorithm would you use?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "rate_limiting_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the algorithm, I'd use the token bucket. It handles both sustained rate and burst naturally. Let me walk through the implementation. Each API key gets a bucket with a capacity equal to the burst size and a refill rate equal to the sustained limit. For the free tier: capacity of 10 tokens, refill rate of 10 tokens per second. Here's the pseudocode in Go since it's common for infrastructure services:\n\n```go\ntype TokenBucket struct {\n    Tokens     float64\n    MaxTokens  float64\n    RefillRate float64 // tokens per second\n    LastRefill time.Time\n}\n\nfunc (b *TokenBucket) Allow() bool {\n    now := time.Now()\n    elapsed := now.Sub(b.LastRefill).Seconds()\n    b.Tokens = math.Min(b.MaxTokens, b.Tokens + elapsed * b.RefillRate)\n    b.LastRefill = now\n    if b.Tokens >= 1 {\n        b.Tokens -= 1\n        return true\n    }\n    return false\n}\n```\n\nThe beauty of token bucket is that it allows short bursts up to the bucket capacity while enforcing the long-term average rate.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "burst_handling", "algorithm_implementation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice implementation. But this is in-memory on a single server. How do you make this distributed across our 50 microservices?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, we need a centralized store for the token state. Redis is the natural choice — it's fast, supports atomic operations, and can handle the throughput. The architecture: each microservice has a thin client library that, on every request, makes a call to Redis to check and decrement the token bucket. The token bucket logic moves to a Lua script executed atomically in Redis:\n\n```lua\nlocal key = KEYS[1]\nlocal max_tokens = tonumber(ARGV[1])\nlocal refill_rate = tonumber(ARGV[2])\nlocal now = tonumber(ARGV[3])\n\nlocal bucket = redis.call('HMGET', key, 'tokens', 'last_refill')\nlocal tokens = tonumber(bucket[1]) or max_tokens\nlocal last_refill = tonumber(bucket[2]) or now\n\nlocal elapsed = now - last_refill\ntokens = math.min(max_tokens, tokens + elapsed * refill_rate)\n\nif tokens >= 1 then\n    tokens = tokens - 1\n    redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now)\n    redis.call('EXPIRE', key, math.ceil(max_tokens / refill_rate) * 2)\n    return 1\nelse\n    redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now)\n    redis.call('EXPIRE', key, math.ceil(max_tokens / refill_rate) * 2)\n    return 0\nend\n```\n\nThe Lua script is atomic in Redis, so no race conditions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_rate_limiting", "redis", "lua_scripting", "atomicity"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good approach with Lua scripts. But at 500K requests per second, every request makes a Redis call. What's the impact?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "performance_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "500K Redis calls per second is high but feasible. A single Redis instance handles about 100-200K operations per second. So we'd need a Redis Cluster with 3-5 shards, partitioned by API key hash. But I'd also add a local optimization: the client library can maintain a local token bucket that syncs with Redis periodically rather than on every request. For the premium tier doing 1000 req/s, we could check Redis every 100ms and fetch a batch of tokens — say, fetch 100 tokens at once. This reduces Redis calls by 100x while introducing at most 100ms of staleness, which means the rate limit might be exceeded by up to 10% in a burst. For most use cases, that's acceptable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["performance_optimization", "local_cache", "batching", "staleness_tradeoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting trade-off. Let's talk about the high-level architecture. How does a request flow through the system?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "The rate limiter sits at the API gateway level — before the request reaches the microservice. Flow: client sends a request, it hits the API gateway (like Kong or Envoy). The gateway extracts the API key from the header, calls the rate limiter client library. The client checks the local token cache first. If tokens are available locally, it allows the request and decrements locally. If the local cache is depleted, it synchronously checks Redis. If allowed, the request proceeds to the downstream service. If denied, the gateway returns 429 Too Many Requests with headers: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, and Retry-After.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_gateway", "api_design", "http_status_codes", "rate_limit_headers"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. You mentioned multiple time windows — per second and per minute. How do you handle both simultaneously?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "sliding_window" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each API key gets two token buckets — one for per-second limits and one for per-minute limits. A request must pass both to be allowed. For the free tier: bucket 1 has 10 tokens/sec refill with capacity 10, and bucket 2 has 600 tokens/min refill with capacity maybe 200 to allow some bursting within the minute. The Lua script checks both buckets atomically. If either is empty, the request is denied. This handles cases like a user sending 10 requests every second for a full minute — allowed by the per-second limit but the per-minute limit could throttle them if we set it below 600.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["sliding_window", "multi_window_rate_limiting", "token_bucket"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle configuration management? Different services might need different limits, and limits might change dynamically.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "configuration_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd store rate limit configurations in a separate config store — could be a database table or a service like etcd/Consul. The schema: API key -> tier, tier -> list of rate limit rules (each with scope, window, limit, burst). The client library caches this config locally with a TTL of, say, 30 seconds, and refreshes in the background. For dynamic updates — like when an admin wants to throttle an abusive user immediately — we publish an invalidation event via Redis pub/sub. All client libraries subscribe and refresh their cached config. This way config changes propagate within seconds without requiring a redeploy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["configuration_management", "pub_sub", "dynamic_updates"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's talk about failure scenarios. What happens if Redis goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Critical question. We have two options: fail-open or fail-closed. Fail-closed means rejecting all requests when Redis is down — safe from abuse but causes a total outage. Fail-open means allowing all requests — the service stays up but rate limits aren't enforced. For most services, I'd default to fail-open because the primary concern is availability. A few minutes without rate limiting is usually less damaging than a full outage. But for payment endpoints or auth endpoints, we'd configure fail-closed to prevent abuse. The client library tracks Redis health and switches to the configured fallback policy. We'd also have a circuit breaker — if Redis fails 5 consecutive health checks, stop trying and fall back immediately rather than adding latency to every request.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["failure_handling", "fail_open", "fail_closed", "circuit_breaker"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about testing this system? How do you verify correctness?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "testing_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd have several testing layers. Unit tests: test the token bucket algorithm with a mock clock — verify that tokens refill correctly, bursts are bounded, and concurrent access is safe. I'd test edge cases like time going backwards (NTP corrections) and very long gaps between requests. Integration tests: spin up a real Redis and verify the Lua script handles concurrent requests correctly. I'd use a test harness that fires N goroutines simultaneously and verify the total allowed requests matches the expected rate. Load tests: deploy to a staging environment, generate traffic at 2x expected load, verify that rate limits hold and latency stays under 5ms at p99. I'd also run chaos tests — kill Redis mid-test and verify the failover behavior. One important test: verify that the rate limiter doesn't become a bottleneck itself. If the rate limiter adds more than 1ms of latency, it's a problem since it's on every request path.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["testing_strategy", "unit_testing", "integration_testing", "load_testing", "chaos_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good testing strategy. How would you handle rate limiting in a multi-region deployment?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "multi_region" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two approaches. Option 1: global rate limiting — all regions talk to a single Redis cluster. Problem: cross-region latency adds 100-200ms per request, which is unacceptable. Option 2: local rate limiting per region with eventual consistency. Each region has its own Redis cluster. We split the global rate limit across regions proportionally to their traffic. If US-East gets 60% of traffic and EU-West gets 40%, US-East gets 60% of the token allocation. Periodically, a background sync adjusts allocations based on actual traffic patterns. The downside is that a user could potentially exceed the global limit by hitting both regions simultaneously, but by at most 2x. For tighter enforcement, we can use a gossip protocol between regions to share usage data with a few hundred milliseconds of delay.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["multi_region", "eventual_consistency", "gossip_protocol", "latency_tradeoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you monitor the rate limiter's health and effectiveness?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "monitoring" }
+    },
+    {
+      "role": "candidate",
+      "content": "Key metrics I'd track: rate limiter latency (p50, p95, p99) — this is on the critical path so it must stay low. Total requests allowed vs denied per service and per tier — helps us understand if limits are set correctly. Redis cluster health — memory usage, operation latency, connection count. Client library cache hit rate — if local caching is effective, Redis load should be much lower than total request volume. I'd also track 429 response rate per API key to identify customers hitting limits frequently — they might need a tier upgrade. Alerts on: rate limiter latency exceeding 5ms, Redis failover events, sudden spikes in 429 rates that could indicate a DDoS or misconfigured limit.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "observability", "alerting"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle DDoS scenarios where the rate limiter itself is the target?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "ddos_protection" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the rate limiter is overwhelmed, we need defense in depth. First line: IP-based rate limiting at the network edge — in the load balancer or CDN like Cloudflare, before requests even reach our infrastructure. This is a coarse filter. Second: connection limits per source IP at the gateway level. Third: the local token bucket cache helps because even if Redis is overwhelmed, the local cache can enforce approximate limits without external calls. Fourth: if we detect a DDoS — sudden spike in unique IPs or request volume — we can dynamically tighten the global rate limits or switch to a more aggressive mode where unknown API keys get very low limits. The key principle: the rate limiter should degrade gracefully, not become the bottleneck.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["ddos_protection", "defense_in_depth", "graceful_degradation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the client library API design. How do services integrate with the rate limiter?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd provide it as a middleware/interceptor that services plug into their HTTP or gRPC stack. For Go:\n\n```go\n// Simple middleware usage\nrouter.Use(ratelimiter.Middleware(\n    ratelimiter.WithRedis(redisClient),\n    ratelimiter.WithKeyFunc(func(r *http.Request) string {\n        return r.Header.Get(\"X-API-Key\")\n    }),\n    ratelimiter.WithFailOpen(true),\n))\n```\n\nThe middleware handles extraction of the rate limit key, checking the limit, setting response headers, and returning 429 if denied. Services don't need to know about token buckets or Redis — they just add the middleware. For custom behavior, we also expose a lower-level API: `limiter.Allow(ctx, key, rule)` that returns an `AllowResult` with remaining tokens and reset time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "middleware_pattern", "developer_experience"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Almost out of time. What would you prioritize if you had to ship this in two weeks?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Week 1: Core token bucket with Redis Lua script, basic client library middleware for HTTP, single-window rate limiting per API key, fail-open on Redis failure. That's the MVP — it handles the 80% case. Week 2: add per-minute window support, response headers, basic monitoring dashboard, load testing at target scale. I'd defer multi-region support, the local caching optimization, and the dynamic config system to a follow-up iteration. Ship simple, measure, then optimize based on real data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["prioritization", "mvp", "iterative_development"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good prioritization sense. Solid interview — you showed strong practical implementation skills and good testing mindset. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 72,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 7,
+      "api_design": 8,
+      "database_design": 7,
+      "caching_strategy": 8,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent implementation detail with Go pseudocode and Lua scripts for Redis",
+      "Strong testing strategy covering unit, integration, load, and chaos testing",
+      "Good practical prioritization for shipping an MVP"
+    ],
+    "weaknesses": [
+      "Multi-region approach was somewhat surface-level — gossip protocol mention lacked detail",
+      "DDoS protection discussion stayed at a high level without concrete implementation",
+      "Could have explored alternative algorithms (sliding window log, fixed window counter) for comparison"
+    ]
+  }
+}

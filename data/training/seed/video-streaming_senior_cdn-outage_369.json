@@ -1,0 +1,130 @@
+{
+  "metadata": {
+    "problem_id": "video-streaming",
+    "level": "senior",
+    "candidate_profile": "cdn-outage",
+    "total_exchanges": 20,
+    "generation_id": "seed_369"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a video streaming service at Netflix scale. I want to focus on CDN resilience — specifically, what happens when your CDN has a major outage. First, give me the basic video delivery architecture.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "video_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "The video delivery pipeline starts with encoding: each video is transcoded into multiple bitrates and resolutions — say 480p, 720p, 1080p, 4K — and each is segmented into small chunks, typically 2-6 seconds each, using HLS or DASH. These segments are stored in origin storage — S3 or a distributed file system. From there, they're distributed to CDN edge nodes worldwide. When a user plays a video, the player fetches a manifest file listing the available segments and bitrates, then requests segments from the nearest CDN edge node. Adaptive bitrate streaming adjusts quality based on network conditions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["transcoding", "adaptive_bitrate", "hls", "cdn_edge", "origin_storage"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good overview. Now the scenario: your primary CDN provider — the one serving 60% of your traffic — has a 30-minute outage affecting 40% of their edge nodes. You have 500 million active users. That's roughly 300 million users affected. What happens?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cdn_outage" }
+    },
+    {
+      "role": "candidate",
+      "content": "At T+0, 300 million users experience buffering. Their players are requesting video segments from CDN edge nodes that are now unreachable. The first thing that happens is client-side retry — the player retries the segment request, typically 2-3 times with exponential backoff. That buys us maybe 5-10 seconds. If the retries fail, the player starts degrading: it drops bitrate to reduce segment sizes and tries lower quality streams, hoping those are cached on different (still-healthy) edge nodes. But if the edge node itself is down, lower bitrate won't help — all segments on that node are unreachable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["client_retry", "exponential_backoff", "bitrate_degradation", "edge_node_failure"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "So retries and bitrate drops don't help because the nodes themselves are down. What's your failover strategy?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "cdn_failover" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multi-CDN is the answer. We should never rely on a single CDN provider. I'd contract with at least three CDN providers — say Akamai, CloudFront, and Fastly. Normally, we use DNS-based routing to direct users to the optimal CDN based on geography and performance. When a CDN has an outage, we need to redirect affected users to an alternate CDN. The question is how fast we can detect and reroute. DNS-based failover is slow — DNS TTLs might be 60-300 seconds. By the time DNS propagates, users have been buffering for minutes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_cdn", "dns_routing", "dns_ttl", "failover_speed"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right, DNS is too slow for a 30-minute outage. What's faster?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "fast_failover" }
+    },
+    {
+      "role": "candidate",
+      "content": "Client-side multi-CDN logic. Instead of the manifest pointing to a single CDN, include multiple CDN base URLs in priority order. The player has a built-in failover: if a segment request to CDN-A fails after 2 retries, immediately try CDN-B. No DNS change needed — the player switches at the application layer. This gives us failover in under 10 seconds per user. Netflix actually does something similar with their Open Connect appliances — they have a steering service that tells the player which CDN/server to use, and the player can switch mid-stream. The manifest would look like: primary=cdn-a.example.com, fallback=[cdn-b.example.com, cdn-c.example.com].",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["client_side_failover", "manifest_multi_cdn", "steering_service", "application_layer_routing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. But now 300 million users suddenly hit CDN-B and CDN-C. They're only provisioned for 40% of traffic each. Can they handle the surge?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "capacity_surge" }
+    },
+    {
+      "role": "candidate",
+      "content": "Almost certainly not at full quality. The secondary CDNs would see a 3-4x traffic spike on the affected regions. They'd quickly exhaust their edge cache capacity and start seeing cache misses, falling back to their origin or our origin servers. We need a layered degradation strategy. First: during the failover, automatically reduce max bitrate for affected users — serve 720p instead of 4K. A 4K stream is ~25 Mbps, 720p is ~5 Mbps. That's an 80% reduction in bandwidth demand. Second: prioritize content that's already cached on the secondary CDNs. Popular content that's warm in CDN-B's cache can be served immediately. Long-tail content with cold caches might get a 'loading' experience. Third: if origin fallback is needed, rate-limit it to prevent origin from being overwhelmed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_surge", "bitrate_reduction", "cache_warming", "origin_protection", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about origin fallback? If both secondary CDNs are overwhelmed, can you serve directly from origin?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "origin_fallback" }
+    },
+    {
+      "role": "candidate",
+      "content": "Origin can handle some traffic but not 300 million users. Our origin — say S3 behind a load balancer — might handle 1-2 million concurrent streams. For origin protection: place a shield layer in front of origin — a set of mid-tier caches that aggregate requests. If 10,000 users request the same segment, the shield fetches it once from S3 and serves all 10,000. This is the origin shield pattern. Additionally, I'd have pre-provisioned burst capacity with the secondary CDNs — contractual agreements that allow temporary 2-3x burst above our committed traffic. CDN providers expect this for failover scenarios.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["origin_shield", "request_coalescing", "burst_capacity", "contractual_capacity"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you detect the CDN outage quickly? You can't wait for users to complain.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "outage_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multiple detection layers. First, active probing: we have synthetic monitors in every major region that continuously request test segments from every CDN endpoint. If a probe fails 3 times in 30 seconds, flag that endpoint as degraded. Second, client-side telemetry: the video player reports segment fetch latency and errors to our analytics pipeline. A spike in error rates from a specific CDN provider in a specific region is a strong signal. We process this stream with Flink and trigger alerts within 60 seconds of an anomaly. Third, the CDN provider's own status API and webhook notifications. But we don't rely solely on the provider — they often report outages slower than we can detect them.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["synthetic_monitoring", "client_telemetry", "anomaly_detection", "multi_signal_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "When the primary CDN recovers, how do you shift traffic back without causing another disruption?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "traffic_restoration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Gradual ramp-up. Don't move all traffic back at once — the CDN's caches are cold after a 30-minute outage. All those edge nodes lost their cached segments during the restart. If we send 300 million users back immediately, they'd all cache-miss and hammer the CDN's origin tier. Instead: start at 5% of traffic, monitor cache hit rates and latency. If healthy, ramp to 10%, 25%, 50%, 75%, 100% over 15-20 minutes. The steering service or DNS weight controls this. Each step lets the edge caches warm up with popular content before adding more traffic. We should also run the synthetic probes against the CDN for at least 5 minutes before starting the ramp.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gradual_ramp", "cache_warming", "traffic_steering", "monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if the outage happens during a major live event — say a World Cup final? Live streaming makes this worse, doesn't it?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "live_streaming_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Much worse. Live streaming can't prefetch or pre-cache content — segments are generated in real time. Every viewer needs the same segment at roughly the same time, creating massive thundering herd on every new segment. For live events, I'd pre-provision all three CDNs to handle the full load independently — true multi-CDN active-active, not active-passive. Route users across all CDNs from the start, so no single CDN failure affects all users. Also, live content is highly cacheable at the edge because every viewer requests the same segment. Even a 2-second cache at the edge collapses millions of requests into one origin fetch. The key for live is: short segments (2 seconds), aggressive edge caching, and pre-warmed multi-CDN from the beginning of the event.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["live_streaming", "active_active_cdn", "thundering_herd", "edge_caching"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. You covered the multi-CDN failover well and had solid ideas about detection and recovery. I would have liked more depth on the origin shield architecture and cost implications of multi-CDN contracts. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 71,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 7,
+      "api_design": 6,
+      "database_design": 5,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Strong multi-CDN failover strategy with client-side switching",
+      "Good capacity math on bitrate reduction during degradation",
+      "Practical approach to traffic restoration with gradual ramp-up"
+    ],
+    "weaknesses": [
+      "Origin shield architecture was described but not fully designed",
+      "Cost analysis of multi-CDN strategy was not discussed",
+      "Live streaming failure handling was surface-level — didn't address segment gap recovery"
+    ]
+  }
+}

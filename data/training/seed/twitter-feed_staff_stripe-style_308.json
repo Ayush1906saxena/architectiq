@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "staff",
+    "candidate_profile": "stripe-style",
+    "total_exchanges": 22,
+    "generation_id": "seed_308"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We're designing a social media news feed. I want to focus on reliability. What's the SLA you'd commit to for feed availability, and how do you define 'available'?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "sla_slo" }
+    },
+    {
+      "role": "candidate",
+      "content": "Feed availability means a user can load their feed and see relevant, fresh content. I'd define an SLI as: percentage of feed requests that return at least 10 posts within 800ms. The SLO would be 99.95% — about 22 minutes of downtime per month. I'd distinguish between full outage and degraded experience. Degraded means the feed loads but might show stale content or fewer posts. Full outage means the feed fails to render. We'd have separate SLOs: 99.99% for degraded-or-better, 99.95% for fully functional.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sla_slo", "sli_definition", "degraded_mode"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good distinction. What does degraded mode actually look like? If your ranking service is down, what does the user see?",
+      "annotation": { "action": "deepen", "phase": "requirements", "target_concept": "degraded_mode" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd define a hierarchy of fallback modes. Level 0 — normal: full ML-ranked feed with all features. Level 1 — ranking degraded: if the ML scoring service is down, fall back to a simpler heuristic ranking: recency * author_affinity_score. The affinity scores are pre-computed and cached, so this works even without the ML service. Level 2 — candidate sourcing degraded: if the social graph service is slow, serve the user's cached feed from their last session, with a 'showing recent results' banner. Level 3 — emergency mode: if the feed cache is also empty, show trending/popular content that's globally cached. Level 4 — total failure: show a static error page with retry. Each level has a circuit breaker that triggers the fallback.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["degraded_mode", "fallback_hierarchy", "circuit_breaker", "graceful_degradation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the architecture with an eye on reliability at every layer.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture_reliability" }
+    },
+    {
+      "role": "candidate",
+      "content": "Starting from the edge: CDN serves static assets and can serve cached feed responses for repeat requests. Behind it, a global load balancer routes to the nearest healthy region. Each region has: a feed orchestrator service that coordinates the pipeline, a social graph service for followee lookups, a post store for tweet content, a ranking service for ML scoring, and a feed cache that stores pre-computed feeds. Every service runs in at least 3 availability zones. The feed orchestrator implements the fallback hierarchy I described. Each dependency call has a timeout, retry with exponential backoff, and a circuit breaker. If a dependency is slow, we shed it rather than letting it slow down the entire feed response.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["architecture_reliability", "multi_az", "circuit_breaker", "timeout_management"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's say the post store is experiencing elevated latency — p99 goes from 10ms to 500ms. How do you prevent this from cascading?",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "cascade_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several defenses. First, the feed orchestrator sets a hard timeout of 50ms on the post store call. If it doesn't respond, we serve the feed with whatever posts we already have cached — maybe the user sees 8 posts instead of 20, but the feed loads. Second, a circuit breaker: if 30% of post store calls fail or timeout in a 10-second window, the circuit opens. Now we skip the post store entirely and serve from the feed cache. Third, we use bulkhead isolation: the post store client has its own thread pool with a bounded queue. If the queue fills up, new requests are rejected immediately rather than blocking threads. This prevents the slow post store from exhausting the feed orchestrator's resources. Fourth, adaptive load shedding: if overall feed latency creeps above 400ms, we start dropping the least critical parts of the pipeline — like recommendation candidates — to stay within our SLO.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cascade_failure", "circuit_breaker", "bulkhead_pattern", "load_shedding", "timeout_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you detect this kind of degradation before it becomes user-facing? What's your observability stack?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "observability" }
+    },
+    {
+      "role": "candidate",
+      "content": "Observability has three pillars. Metrics: every service emits latency histograms, error rates, and throughput to a time-series database like Prometheus. We use percentile-based alerting — not just averages. A p99 spike from 10ms to 100ms triggers a warning; 10ms to 500ms triggers a page. Distributed tracing: every feed request gets a trace ID that propagates through all services. We sample 1% of traces and 100% of error traces. When latency spikes, we look at trace waterfalls to identify the slow component. Structured logging: every service logs key events with correlation IDs. We use anomaly detection on metrics: if the derivative of p99 latency exceeds a threshold, alert before the absolute value crosses the SLO. This gives us 2-5 minutes of early warning.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["observability", "distributed_tracing", "metrics", "anomaly_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "It's 2 AM, and your monitoring shows a sudden 50% drop in feed requests globally. What do you do?",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "incident_response" }
+    },
+    {
+      "role": "candidate",
+      "content": "A 50% drop in requests — not errors, but requests — is unusual. It likely means users can't reach us at all. My first check: is this a DNS issue? If our DNS provider is down, clients can't resolve our domain. Second check: is the mobile app crashing on launch? A bad app update could prevent users from making feed requests. Third: is the CDN or load balancer dropping connections? I'd check our edge layer health. Fourth: is there an internet backbone issue affecting a major ISP or region? I'd check downstream connectivity from multiple vantage points using synthetic monitoring. Immediate mitigation: if DNS, switch to backup DNS provider. If app crash, trigger an emergency app rollback via remote config. If load balancer, fail over to the backup ingress path. Throughout this, I'm communicating on the incident channel, updating the status page, and ensuring the incident commander role is filled.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["incident_response", "dns_failure", "root_cause_analysis"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the feed cache. This is your primary defense against backend issues. How do you architect it for reliability?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "feed_cache_reliability" }
+    },
+    {
+      "role": "candidate",
+      "content": "The feed cache is the most critical data store for reliability, so it needs special treatment. I'd use Redis Cluster with 3 replicas per shard, spread across AZs. Each user's cached feed is stored in two independent Redis clusters — a primary and a shadow. Writes go to both. Reads go to the primary; if it fails, instantly fall back to the shadow. This gives us independent failure domains. Cache entries have a TTL of 24 hours, so even if the feed generation pipeline is completely broken, users see yesterday's feed. We also implement a local in-process cache on each feed orchestrator — an LRU of the last 10,000 feed responses. If both Redis clusters are unreachable, we can serve from the local cache for recently active users. Cache warm-up: when deploying new cache nodes, we pre-populate them from a snapshot rather than starting cold.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_cache_reliability", "redis_clustering", "shadow_cache", "local_cache", "cache_warmup"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about data consistency? If a user posts a tweet, they expect to see it in their own feed immediately. How do you guarantee that?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "read_your_writes" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the 'read your own writes' consistency requirement. For the posting user, we handle it client-side: the mobile app optimistically inserts the new post into the local feed view immediately. On the backend, the post write triggers a synchronous update to the user's own feed cache — not the fan-out to followers, which is async. So when they refresh, the post is there. For followers, we accept eventual consistency — the post might take a few seconds to appear. The fan-out pipeline has an SLO of 5 seconds for 99% of posts. If a follower checks immediately and the post isn't there, they just don't know it exists yet. We don't need to solve a consistency problem they can't observe.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["read_your_writes", "optimistic_ui", "eventual_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "A full region goes down. US-East is gone. What's the user impact and recovery process?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "region_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "User impact: feeds for US-East users are served from the next nearest region — likely US-West. Latency increases from 50ms to maybe 150ms. The feed cache in US-West doesn't have US-East users' personalized feeds, so the first load for those users falls back to Level 2 degraded mode — showing their last cached feed from the cross-region replicated store. Within 5-10 minutes, the feed generation pipeline in US-West starts building fresh feeds for these users. The auto-scaler in US-West detects the increased load and provisions additional capacity — we maintain 50% headroom for exactly this scenario. Recovery: when US-East comes back, we don't immediately shift traffic back. We warm the caches, validate the services with synthetic traffic, then gradually ramp traffic back over 30 minutes. The entire failover is automated; the on-call engineer monitors but doesn't need to take manual action.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["region_failure", "cross_region_replication", "automated_failover", "cache_warmup"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you test all of this? You can't wait for a real region failure to find out your failover doesn't work.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "chaos_engineering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Chaos engineering is essential. We run regular game days — quarterly, we simulate a region failure by redirecting all traffic away from one region and observing the behavior. Monthly, we kill random service instances and verify the circuit breakers and fallbacks work. Weekly, we inject latency into dependencies using a fault injection proxy. We also have continuous chaos: a bot that randomly terminates one instance per service per day in production, a la Netflix's Chaos Monkey. All these exercises have a runbook, an owner, and a post-game review. The results feed into a reliability scorecard for each service, which is reviewed in engineering leadership meetings.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chaos_engineering", "game_days", "fault_injection", "reliability_scorecard"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last question: what's the incident response process for a feed outage? Walk me through the roles and communication.",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "incident_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "When a SEV-1 feed outage is detected — either by automated alerts or user reports — the on-call engineer is paged. Within 5 minutes, they acknowledge and assess. If it's beyond their scope, they escalate. Roles: Incident Commander owns the response and makes decisions. Technical Lead drives the investigation and mitigation. Communications Lead updates the internal status page every 15 minutes and coordinates external communications. Scribe documents the timeline in real-time. The IC's first decision: mitigate or investigate? If there's an obvious mitigation like rollback, do it first. If not, investigate while keeping stakeholders informed. Post-incident: within 48 hours, a blameless postmortem with timeline, root cause, impact analysis, and action items. Action items are tracked with the same priority as feature work. We also run a quarterly incident retrospective to identify systemic patterns.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["incident_management", "incident_roles", "post_mortem", "blameless_culture"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong reliability focus throughout. You clearly understand how to keep critical systems running. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 75,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 5,
+      "api_design": 5,
+      "database_design": 6,
+      "caching_strategy": 9,
+      "scalability": 7,
+      "failure_handling": 10,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional failure handling with a detailed degradation hierarchy",
+      "Strong chaos engineering and testing practices",
+      "Thorough incident response process with clear roles and communication"
+    ],
+    "weaknesses": [
+      "Capacity estimation was completely absent — no QPS, storage, or bandwidth calculations",
+      "API design and data models were not discussed",
+      "The actual feed generation algorithm (fan-out strategy, ranking) was only briefly touched on"
+    ]
+  }
+}

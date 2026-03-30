@@ -1,0 +1,161 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "sde2",
+    "candidate_profile": "good",
+    "total_exchanges": 20,
+    "generation_id": "seed_202"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design the home feed for a social media app like Twitter. When a user opens the app, they see recent posts from people they follow. How would you approach this?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. First, some requirements questions. How many users are we designing for? How many posts per day? And is this a purely chronological feed or is there a ranking algorithm?",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["qps", "feed_ranking"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "10 million active users, 500K new posts per day. Keep it chronological for simplicity — show the most recent posts from people you follow. Average user follows 200 people.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Got it. So the core feature is: when a user opens their feed, show them the latest posts from the 200 people they follow, sorted by time. Let me think about the data model first.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["data_model"], "depth": "superficial", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Go ahead.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd have three main tables. A users table with user_id, name, etc. A posts table with post_id, author_id, content, and created_at. And a follows table with follower_id and followee_id. To generate the feed, I'd query: SELECT * FROM posts WHERE author_id IN (SELECT followee_id FROM follows WHERE follower_id = current_user) ORDER BY created_at DESC LIMIT 50.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["database_schema", "data_model", "sql_query"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That query would work. What's the performance concern?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "query_performance" }
+    },
+    {
+      "role": "candidate",
+      "content": "The IN subquery returns 200 author IDs, and then we have to search the posts table for all posts by those 200 authors and sort them. If the posts table has millions of rows, that could be slow even with an index on author_id and created_at. We'd be hitting 200 different ranges in the index and then merging and sorting.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["query_performance", "database_indexing"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right. How would you make this faster?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "caching_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "I could cache the feed. When the user opens the app, instead of running that query every time, I check a cache first. I could use Redis to store each user's feed as a sorted set — the key is user_id:feed, and the members are post IDs scored by timestamp. When they request their feed, I just do a ZREVRANGE to get the latest 50 post IDs, then fetch those posts from the database or another cache.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "feed_caching", "sorted_set"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "But how does the cache get populated? When does the feed get built?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two options I can think of. First, build it on-demand: when the user opens the app, if the cache is empty, run the SQL query, build the feed, cache it. Second, build it when a post is created: when someone posts, push the post ID into the feed cache of every follower. The second approach means the feed is already ready when the user opens the app.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fan_out", "fan_out_on_write", "fan_out_on_read"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Those are called fan-out-on-read and fan-out-on-write. Which would you pick for this system?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "For our scale — average of 200 followers — fan-out-on-write seems reasonable. When someone posts, we push to 200 followers' feed caches. That's not too many writes. The user experience is better because the feed is pre-built. Fan-out-on-read means every feed open triggers a heavy query, which would be slower.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["fan_out_on_write", "fan_out_on_read"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about a user with a million followers? Like a celebrity?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "hot_user_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh, that's a good point. If a celebrity posts, we'd have to push to a million feed caches — that would take a long time and create a burst of writes. I think for users with very large follower counts, we'd need a different approach. Maybe for celebrities, we do fan-out-on-read instead — when a user opens their feed, we check if they follow any celebrities and fetch those posts separately, then merge with the pre-built feed.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["hot_user_problem", "hybrid_fan_out"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a hybrid approach — Twitter actually does something similar. Let's talk about the high-level architecture. Walk me through the components.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "high_level_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "A user makes a request through a load balancer. For posting: the request goes to a Post Service, which saves the post to the database, then sends a message to a Fan-out Service (maybe through a queue). The Fan-out Service looks up the poster's followers and pushes the post ID into each follower's feed in Redis. For reading: the request goes to a Feed Service, which reads the user's feed from Redis (the sorted set of post IDs), fetches the actual post content, and returns it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["load_balancing", "microservices", "message_queue", "fan_out_on_write", "redis_caching"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What database would you use for the posts?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use MySQL or PostgreSQL. Posts are structured data — they have a clear schema with post_id, author_id, content, timestamp. The access pattern for individual posts is simple point lookups by post_id. At 500K posts per day, that's about 6 writes per second, very manageable. I'd index on post_id as primary key and have a secondary index on (author_id, created_at) for the fallback query case.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["database_choice", "database_schema", "database_indexing"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about pagination? Users scroll down for older posts.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "pagination" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use cursor-based pagination. The client sends the post_id of the last item they saw. In Redis, I'd use ZREVRANGEBYSCORE with the timestamp of that last post as the max score, and fetch the next batch. This is more reliable than offset-based pagination because new posts being added won't cause duplicates or missed items when scrolling.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pagination", "cursor_pagination"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add a cache for post content too — so when we fetch post IDs from the Redis feed, we can get the actual post text and author info from a separate cache rather than hitting the database every time. Also, I'd want monitoring on fan-out latency to make sure posts appear in feeds quickly. And I'd trim the Redis feed lists to maybe 500 entries per user to control memory usage.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["redis_caching", "monitoring", "memory_management"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice. Good job covering the fundamentals. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 52,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 5,
+      "api_design": 5,
+      "database_design": 6,
+      "caching_strategy": 7,
+      "scalability": 5,
+      "failure_handling": 3,
+      "communication": 7
+    },
+    "strengths": [
+      "Simple and correct initial approach — query from followed users sorted by time",
+      "Identified the fan-out trade-off between read and write strategies",
+      "Good cursor-based pagination reasoning"
+    ],
+    "weaknesses": [
+      "No discussion of failure scenarios — what if Redis goes down?",
+      "Didn't discuss API design endpoints explicitly",
+      "Celebrity/hot user solution was surface-level",
+      "No capacity estimation for Redis memory usage"
+    ]
+  }
+}

@@ -1,0 +1,140 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "senior",
+    "candidate_profile": "google-style",
+    "total_exchanges": 20,
+    "generation_id": "seed_313"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a distributed key-value store. I want to focus on consistency guarantees. Let's start with requirements, then I'll push hard on the theory.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Key questions: What consistency model do we need — strong consistency, eventual consistency, or tunable? What's the expected data size and operation throughput? What are the latency requirements? Do we need support for range queries or just point lookups? And is this an in-memory system or persistent?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistency_model", "scale", "latency", "storage_type"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tunable consistency — the user can choose per-request. 1 PB of data, 1 million operations per second, sub-10ms latency for reads at p99. Point lookups only. Persistent. Now, explain your replication strategy and prove the consistency guarantees of your quorum system.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "quorum_consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll use a quorum-based replication system with configurable consistency levels. Each key is replicated to N nodes. For a write, we require W acknowledgments. For a read, we require R responses. The key theorem: if R + W > N, then every read quorum overlaps with every write quorum by at least one node, guaranteeing the read sees the latest write. With N=3: strong consistency uses R=2, W=2. Eventual consistency uses R=1, W=1. The per-request tuning lets the caller choose. For our defaults, I'd set R=2, W=2 to favor consistency.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["quorum_consistency", "replication_factor", "tunable_consistency"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now prove to me: under what conditions can a read return stale data even with R + W > N?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "stale_reads" }
+    },
+    {
+      "role": "candidate",
+      "content": "Even with R + W > N, stale reads are possible in several scenarios. First: sloppy quorums. If a node is temporarily unreachable and we use a hinted handoff — writing to a substitute node — the quorum overlap guarantee breaks. The substitute node has the new data, but the original node has stale data. A read quorum hitting the original node and another non-participating node misses the write. Second: read repair lag. Even with strict quorums, the read coordinator receives responses from R nodes but returns the response from the fastest one. If it returns before comparing all R responses, it might return the stale value from the fastest responder. Proper implementation must wait for all R responses and return the one with the highest version. Third: concurrent writes with last-write-wins resolution. Two writes with the same logical timestamp but different values — the 'winner' depends on which write reaches which replica, and different read quorums might see different winners until anti-entropy reconciles.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sloppy_quorum", "hinted_handoff", "read_repair", "concurrent_writes", "last_write_wins"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How do you detect and resolve conflicts from concurrent writes? What's the version resolution strategy?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "conflict_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use vector clocks for conflict detection. Each node maintains a vector clock entry. When node A writes, it increments its entry: [A:2, B:1, C:1]. When node B writes concurrently, it produces [A:1, B:2, C:1]. Neither dominates the other — they're concurrent. The system detects this as a conflict. Resolution strategy depends on the use case. For a general KV store, I'd offer two modes. First, last-writer-wins using a physical timestamp as a tiebreaker — simple but can silently lose data. Second, multi-value: return both conflicting versions to the client and let the application resolve (like Amazon's shopping cart in the Dynamo paper). The client writes back the resolved value with a merged vector clock. For our default, I'd use LWW with a warning in the API docs that concurrent writes to the same key may lose updates.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["vector_clocks", "conflict_resolution", "last_write_wins", "multi_value_resolution"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Vector clocks grow unboundedly as more nodes participate. How do you handle that?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "vector_clock_pruning" }
+    },
+    {
+      "role": "candidate",
+      "content": "Vector clock growth is a real problem. With thousands of nodes, the clock becomes a significant per-key overhead. Solutions: First, limit vector clocks to the N replica nodes for each key, not all nodes in the cluster. Since only 3-5 nodes ever write a given key, the vector is bounded at N entries. Second, if we allow client-side writes through any coordinator, the coordinator's ID could appear in the vector. We solve this by having the coordinator proxy the write to one of the N replicas, which stamps it with its own ID. Third, pruning: if a vector clock entry hasn't been updated in more than a configurable period (say 10 days), we drop it with the assumption that the value has been reconciled via anti-entropy by then. This trades correctness for space — rare edge case where a very old conflict is silently resolved via LWW.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["vector_clock_pruning", "bounded_clocks", "anti_entropy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about data partitioning. How do you distribute 1 PB across the cluster?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "consistent_hashing" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use consistent hashing with virtual nodes. The hash ring maps each key to a position, and each physical node owns multiple virtual nodes (say 256 each) distributed around the ring. This ensures even data distribution even with heterogeneous hardware — a node with 2x storage gets 2x virtual nodes. For 1 PB with N=3 replication, that's 3 PB of raw storage. Using 4 TB SSD nodes, we need about 750 nodes. Each virtual node owns roughly 1 PB / (750 * 256) = ~5 GB of data. When a node is added, it takes ownership of some virtual nodes from existing nodes, and only the affected key ranges are transferred. When a node is removed, its ranges are distributed to the remaining nodes. The coordinator for a request hashes the key and walks the ring to find the N nodes responsible.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["consistent_hashing", "virtual_nodes", "capacity_estimation", "data_migration"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "With 750 nodes, what happens during a network partition? Say the cluster splits into two groups of 375 nodes each.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "network_partition" }
+    },
+    {
+      "role": "candidate",
+      "content": "With N=3, each key's replicas might be split across the partition — say 2 replicas in group A and 1 in group B. With strict quorum W=2, R=2: group A can still write (2 out of 3 replicas reachable) and read (2 out of 3 reachable). Group B cannot write or read with quorum — only 1 replica reachable. So from group B's perspective, keys whose majority replicas are in group A become unavailable. This is the CAP theorem in action — we're choosing consistency over availability for those keys. If the application prefers availability, they can use R=1, W=1, which allows both sides to operate independently — but they'll diverge and need conflict resolution when the partition heals. After the partition heals, we run anti-entropy (Merkle tree comparison) to reconcile any divergence.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["network_partition", "cap_theorem", "quorum_availability", "anti_entropy", "merkle_tree"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Explain the Merkle tree-based anti-entropy in more detail. What's the communication complexity?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "merkle_tree" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each node maintains a Merkle tree over the key ranges it owns. Leaf nodes are hashes of individual key-value pairs. Internal nodes are hashes of their children. To synchronize, two replicas of the same key range compare their Merkle trees top-down. If the root hashes match, the data is identical — O(1) comparison. If they differ, we recurse into children, narrowing down to the subtrees that differ. The communication complexity is O(log(K) * D) where K is the number of keys in the range and D is the number of differing keys. For a range with 1 million keys and 100 differences, we compare about 20 levels * a few nodes per level — maybe 200 hash comparisons instead of 1 million key comparisons. The Merkle tree must be rebuilt or incrementally updated on each write. Incremental update is O(log K) per write — update the leaf and recompute hashes up to the root.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["merkle_tree", "anti_entropy", "communication_complexity"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the storage engine? At 1 million ops per second, what data structure do you use on disk?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "storage_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "For a write-heavy key-value store, I'd use an LSM tree (Log-Structured Merge tree). Writes go to an in-memory sorted buffer (memtable). When the memtable reaches a threshold (say 64 MB), it's flushed to disk as an immutable sorted file (SSTable). Background compaction merges SSTables to reduce read amplification. Reads check the memtable first, then SSTables in order from newest to oldest. Bloom filters on each SSTable eliminate most unnecessary disk reads — a false positive rate of 1% with 10 bits per key means we rarely read an SSTable that doesn't contain the key. At 1M ops/sec across 750 nodes, each node handles about 1,333 ops/sec — very manageable for an LSM engine. Write throughput is excellent since writes are sequential I/O. Read latency is bounded by the number of SSTable levels — typically 4-5 levels with 10x size ratio.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["storage_engine", "lsm_tree", "sstable", "bloom_filter", "compaction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Wrap up with how clients discover and connect to this system.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": "client_routing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Clients can use two approaches. Fat client: the client library knows the hash ring topology and directly routes requests to the correct coordinator node. It gets the ring topology from a gossip-based membership protocol or a coordination service like ZooKeeper. This minimizes hops but requires updating the client library when the ring changes. Thin client: the client connects to any node, and that node acts as a coordinator, forwarding the request to the correct replicas. Simpler for the client but adds one network hop. I'd offer both. For latency-sensitive internal services, use the fat client. For external APIs, use the thin client behind a load balancer. The ring topology changes are propagated via a gossip protocol that converges within seconds.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["client_routing", "gossip_protocol", "fat_client", "thin_client"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong distributed systems depth. Thanks for the interview.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 72,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 5,
+      "database_design": 9,
+      "caching_strategy": 4,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional distributed systems theory — quorum analysis, stale read conditions, and vector clock trade-offs",
+      "Strong storage engine knowledge with LSM tree details and bloom filter analysis",
+      "Good Merkle tree explanation with concrete communication complexity"
+    ],
+    "weaknesses": [
+      "API design was not discussed — no client-facing interface details",
+      "Caching strategy was entirely absent — no discussion of read caching or hot key handling",
+      "Did not discuss monitoring, operational concerns, or deployment strategy"
+    ]
+  }
+}

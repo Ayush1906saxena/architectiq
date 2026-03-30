@@ -1,0 +1,151 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "vp",
+    "candidate_profile": "mediocre",
+    "total_exchanges": 22,
+    "generation_id": "seed_072"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design Twitter's home timeline — the feed that shows tweets from people you follow. You're interviewing at the VP level. What's your approach?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Great question. The timeline is really the core product of Twitter. Before I get into architecture, I want to understand the business context. What's our north star metric? Is it daily active users, time spent on timeline, or engagement rate? This drives the architectural priorities — for engagement, we need sophisticated ranking; for DAU, we need low latency and reliability above all.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["business_metrics", "product_strategy"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good framing. Let's say DAU is the primary metric, with engagement as secondary. We have 500 million DAU, each following an average of 300 accounts. Let's start with the technical design.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "At 500M DAU, we're in rarified air. I'd structure the organization around this: a dedicated Timeline team of 30-40 engineers, split into sub-teams — timeline infrastructure, ranking and ML, reliability, and client integration. Each sub-team has an EM and TL. The timeline org rolls up to a Director who reports to me. The ML ranking pipeline is critical — I'd want a partnership with the ML platform team for model training infrastructure.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["team_structure", "organizational_design", "ml_partnership"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a reasonable org structure. Now, technically — when a user opens Twitter, how does their timeline get assembled? What's the architecture?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, so the core decision is the timeline delivery strategy. There are basically two approaches. The fan-out-on-write approach, where when someone tweets, we immediately push that tweet into the timelines of all their followers. And the fan-out-on-read approach, where when a user opens their app, we fetch tweets from all accounts they follow in real-time. Each has trade-offs around write amplification versus read latency. I believe Twitter uses a hybrid approach.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fan_out_on_write", "fan_out_on_read", "hybrid_approach"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good, you know the concepts. Let's go deeper. With 500M DAU and fan-out-on-write, a celebrity with 50 million followers tweets. Walk me through exactly what happens — the data flow, the systems involved, the latency.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "So with fan-out-on-write... the tweet goes to the tweet storage service, then the fan-out service picks it up and needs to write it to 50 million timelines. Each timeline is a per-user sorted list in something like Redis. So that's 50 million Redis writes. At scale, this needs to be batched and distributed across many fan-out workers. The latency would be... significant. It might take minutes for all 50 million timelines to be updated. The key insight is that this is where the hybrid approach comes in — for high-follower accounts, you don't do fan-out-on-write.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["fan_out_on_write", "redis", "hybrid_approach"], "depth": "shallow", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You said 'minutes' and 'something like Redis.' Can you be more precise? How many fan-out workers would you need? What's the throughput of each worker? How much memory does the Redis cluster need to hold 500M user timelines?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Um, let me think about that. So 500M users... if each timeline stores the last 800 tweet IDs — each ID is 8 bytes — that's 6.4KB per user. Times 500M users is about 3.2TB of timeline data in Redis. For the fan-out workers... I'd want to target fan-out completion within 5 seconds for regular users. If a fan-out worker can do 10,000 Redis writes per second, and we need to write to... actually, the average user has maybe 300 followers, so most tweets only need 300 writes. It's only the celebrities that are expensive. Let me focus there — for a 50M follower account, at 10K writes per worker per second, one worker would take 5,000 seconds. So we'd need... 1,000 workers to do it in 5 seconds. That doesn't sound right — let me reconsider.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["capacity_estimation", "redis_sizing"], "depth": "shallow", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The math is actually right — 50M writes at 10K writes/worker/second = 5,000 worker-seconds. With 1,000 workers, that's 5 seconds. This is exactly why Twitter doesn't fan out for celebrities — it's too expensive. Let me ask a different question. As VP, how would you structure the SLA and reliability goals for the timeline?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "sla" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the timeline, I'd set a tiered SLA. Core availability: 99.99% — the timeline must load. If the ranking model is degraded, we fall back to a reverse-chronological feed. Latency SLA: p50 under 200ms, p99 under 800ms for timeline load. Freshness SLA: a tweet from a followed account should appear within 30 seconds on the follower's timeline. These SLAs are tracked on dashboards visible to the entire engineering org. We'd have monthly reliability reviews. Each quarter, we calculate error budgets — if we've used less than 50% of our downtime budget, the team can take more risks on new features. If we've blown the budget, we enter a reliability sprint.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sla", "error_budgets", "graceful_degradation", "reliability_reviews"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good SLA framework. Now, back to technical depth — the ranking algorithm. How does the timeline decide which tweets to show and in what order?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ranking system is an ML model that predicts engagement probability for each candidate tweet. Features include: author engagement history with this user, tweet content signals (media, links, hashtags), social graph signals (do your close friends engage with this author?), and temporal signals (recency). The model is a deep learning model trained on implicit feedback — likes, retweets, replies, dwell time. We'd A/B test every model change with a holdout group seeing reverse-chronological timeline as a baseline.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["ml_ranking", "features", "ab_testing"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's go deeper on the infrastructure that serves this ranking. The user opens the app. Walk me through exactly how the timeline request flows through the system — every service it touches, every cache lookup.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "request_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "The request comes in through... an API gateway, which routes it to the timeline service. The timeline service fetches the pre-computed timeline from the cache — that's the fan-out-on-write portion. For accounts above the follower threshold, it does a separate fetch from those accounts' tweet stores. Then it merges these candidates and sends them to the ranking service, which scores and sorts them. The ranked list is returned to the client. I think there's also a mixer service that injects ads and recommendations into the ranked timeline.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["api_gateway", "timeline_service", "ranking_service", "ad_injection"], "depth": "shallow", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's quite high-level for a VP interview. I'd expect more specificity on the data stores involved, the cache layers, the serialization format, how the ranking model is served in real-time. Let me give you a specific scenario: the Redis cluster holding timelines loses a node. What happens?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Redis cluster uses hash slots — if a node fails, its replica takes over as the new primary. The timeline data on that node is preserved because Redis replicas maintain a copy. There would be a brief disruption — maybe a second or two — during the failover. If the replica is also gone, we'd lose those timelines and need to rebuild them from the fan-out path. To prevent this, I'd ensure replicas are in different availability zones. We should have monitoring on Redis memory usage, replication lag, and node health.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["redis_cluster", "failover", "replica_promotion", "monitoring"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Better. How would you handle a major event — say the Super Bowl — where tweet volume spikes 10x and everyone is refreshing their timeline simultaneously?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "traffic_spikes" }
+    },
+    {
+      "role": "candidate",
+      "content": "Major events are the hardest operational challenge. My approach would be organizational first — establish a 'war room' protocol where key engineers from timeline, infrastructure, and on-call teams are monitoring in real-time during known large events. Technically, we'd pre-scale: add capacity to the fan-out workers, Redis cluster, and ranking service ahead of the event. We'd prepare degradation playbooks — if latency exceeds thresholds, we progressively disable ranking (serve chronological), disable fan-out-on-write (go fully fan-out-on-read with caching), and as a last resort, serve stale timelines. Rate limiting on timeline refreshes — no one needs to refresh more than once per 5 seconds.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["traffic_spikes", "pre_scaling", "graceful_degradation", "war_room", "rate_limiting"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running low on time. What would you say is the biggest technical risk to the timeline system?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The biggest risk is the coupling between timeline quality and ML model correctness. A bad model deployment could tank engagement for 500M users instantly. I'd invest heavily in the ML deployment pipeline — canary deployments where new models are tested on 1% of traffic, automated rollback if engagement metrics drop, and a human-in-the-loop review for major model changes. The technical infra serves the business, and for Twitter, the timeline IS the business.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["ml_deployment_risk", "canary_deployment", "automated_rollback"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thank you. You showed strong organizational thinking and good high-level architecture. Where I'd push you is on technical depth — a VP should be able to go several layers deeper on the request flow, data store choices, and capacity math. The strategic framing was excellent but needs to be backed by architectural precision. Thanks for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 55,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 5,
+      "api_design": 4,
+      "database_design": 5,
+      "caching_strategy": 5,
+      "scalability": 6,
+      "failure_handling": 6,
+      "communication": 8
+    },
+    "strengths": [
+      "Strong organizational and strategic framing — team structure, SLAs, error budgets",
+      "Good degradation strategy for traffic spikes with progressive fallback",
+      "Solid understanding of fan-out concepts at a high level"
+    ],
+    "weaknesses": [
+      "Lacked technical depth when pressed — request flow description was too vague",
+      "Capacity estimation was uncertain and needed interviewer validation",
+      "Couldn't articulate the detailed data flow through specific services and caches",
+      "Too strategic, not technical enough for a VP who needs to guide architecture"
+    ]
+  }
+}

@@ -1,0 +1,379 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "sde2",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_524"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Welcome! Today we're going to design a web search engine. I know that's a massive system, so we'll scope it down as we go. To start, what questions do you have about the requirements?",
+      "annotations": {
+        "action": "opening",
+        "phase": "requirements",
+        "target_concept": "search_engine_scope"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Thanks! I have several clarifying questions. First, are we designing the full pipeline including the web crawler, or focusing on the indexing and query-serving layers? Second, what scale are we targeting: how many documents in the corpus and what query throughput? Third, do we need to support only text search, or also images and other media? Fourth, is this for general web search or a domain-specific search like an e-commerce catalog? And finally, what latency expectations do users have for search results?",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["crawler", "indexing", "query_serving", "corpus_size", "latency_requirements"],
+        "depth": "applied",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent questions. Let's focus on the indexing and query-serving layers, assuming we have a crawler that feeds us documents. General web search, text only. Let's say 10 billion web pages in the corpus, 10,000 queries per second, and we want p99 latency under 500 milliseconds. Does that give you enough to start?",
+      "annotations": {
+        "action": "answer_requirements",
+        "phase": "requirements",
+        "target_concept": "scale_and_latency"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "That's very helpful. Let me do some quick capacity math before diving into the design. If we have 10 billion pages and each page is roughly 50KB of HTML which compresses to maybe 10KB of extracted text, that's 10 billion times 10KB which is 100 terabytes of raw text. The inverted index will be smaller than the raw text but with posting lists and positions, I'd estimate the index at around 30 to 50 terabytes. That's too large for a single machine, so we'll definitely need to shard the index across many nodes. For query throughput, 10,000 QPS across let's say 100 index shards means each shard handles about 100 QPS, which is very manageable.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["capacity_estimation", "index_size", "sharding", "qps_per_shard"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great back-of-the-envelope work. I like that you're thinking about the index size and per-shard load. Let's go into the core data structure. Can you explain how an inverted index works and why it's the right choice here?",
+      "annotations": {
+        "action": "deepen",
+        "phase": "high_level_design",
+        "target_concept": "inverted_index"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. An inverted index is essentially a mapping from every unique term to the list of documents that contain that term. Think of it like the index at the back of a textbook: you look up a word and it tells you which pages mention it. Concretely, if we have three documents: doc1 is 'the cat sat', doc2 is 'the dog sat', doc3 is 'the cat ran'. The inverted index would look like: 'the' maps to [doc1, doc2, doc3], 'cat' maps to [doc1, doc3], 'sat' maps to [doc1, doc2], 'dog' maps to [doc2], 'ran' maps to [doc3]. Each of those lists is called a posting list. When a user searches for 'cat sat', we fetch the posting lists for 'cat' and 'sat' and compute their intersection, which gives us doc1. This is efficient because instead of scanning every document, we only look at documents that contain our search terms. The alternative would be a forward index where you store terms per document and scan everything, which is O(n) in the corpus size and completely infeasible at 10 billion documents.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["inverted_index", "posting_list", "term_to_document_mapping", "set_intersection", "forward_index_comparison"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a clear and well-structured explanation with a good concrete example. Now, the posting list for a common word like 'the' would be billions of entries. How do you handle that, and how do you rank the results once you've found matching documents?",
+      "annotations": {
+        "action": "deepen",
+        "phase": "deep_dive",
+        "target_concept": "ranking_and_posting_list_optimization"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Two parts to this. For common words like 'the,' we can handle them in a few ways. First, we can skip stop words during indexing so ultra-common words aren't in the index at all. Second, even if we keep them, during query processing we'd process posting lists in order of length, starting with the rarest term. If someone searches 'the cat,' we'd start with 'cat' which has a short posting list and then intersect with 'the,' early-terminating once we have enough results. For ranking, the classic approach is TF-IDF. The intuition is: a term is important for a document if it appears frequently in that document (term frequency, TF) but rarely across the corpus (inverse document frequency, IDF). So 'the' has a very low IDF because it's in nearly every document, while 'quantum' has a high IDF because it's rare. If a document mentions 'quantum' 5 times, it gets a high TF-IDF score for that term. In practice, you'd use BM25 which is a refined version of TF-IDF that accounts for document length normalization so longer documents don't unfairly score higher. For a query with multiple terms, you sum or combine the scores for each term to get the document's overall relevance score, then return the top K results.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["stop_words", "posting_list_ordering", "early_termination", "tf_idf", "bm25", "document_length_normalization", "top_k"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. You clearly understand the ranking fundamentals. In modern search engines, TF-IDF and BM25 are just one signal. What other signals would you incorporate into the ranking?",
+      "annotations": {
+        "action": "probe",
+        "phase": "deep_dive",
+        "target_concept": "ranking_signals"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Beyond text relevance, there are several important ranking signals. PageRank is the classic one: a page is important if many other important pages link to it. It's computed offline as a graph algorithm on the web link graph. Freshness matters for queries like news topics, so we'd factor in the document's last-modified date or crawl date. Click-through rate from historical query logs is a powerful signal: if users consistently click result 3 and skip result 1, result 3 is probably more relevant. We'd also consider domain authority, URL structure, page load speed, and mobile-friendliness. In practice, these signals are combined using a machine learning model, typically a learning-to-rank model like LambdaMART or a neural ranker, that's trained on human relevance judgments. The system usually has a multi-stage pipeline: a fast first stage using BM25 to retrieve the top 1000 candidates, then a more expensive ML re-ranker that scores those 1000 and returns the top 10.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["pagerank", "freshness", "click_through_rate", "learning_to_rank", "lambdamart", "multi_stage_ranking", "neural_ranker"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "That multi-stage pipeline is exactly right. Now let's talk about how you'd shard the index. What are your options and which would you choose?",
+      "annotations": {
+        "action": "transition",
+        "phase": "high_level_design",
+        "target_concept": "index_sharding"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "There are two main sharding strategies: document-based and term-based. With document-based sharding, you partition the corpus so each shard holds a complete inverted index for a subset of documents. When a query comes in, you scatter it to all shards, each shard returns its top K results with scores, and a coordinator merges and re-ranks the results. With term-based sharding, each shard owns a subset of terms and their full posting lists. A query for 'cat sat' would go to the shard owning 'cat' and the shard owning 'sat,' and they'd need to coordinate to intersect. I'd choose document-based sharding for several reasons. First, queries are independent across shards, so there's no cross-shard coordination needed during posting list intersection. Second, it handles hot terms gracefully because every shard has the posting list for common terms, spreading the load. Third, term-based sharding creates skew because some terms like 'the' have massive posting lists while others are tiny. The downside of document-based is that every query must fan out to every shard, but with 100 shards and each responding in a few milliseconds, the tail latency is manageable, and you can add replicas for each shard to further reduce variance.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["document_based_sharding", "term_based_sharding", "scatter_gather", "hot_terms", "skew", "tail_latency", "replicas"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a really well-reasoned comparison. You independently identified the right approach and articulated the tradeoffs clearly. What happens if one of your index shards goes down mid-query?",
+      "annotations": {
+        "action": "failure_probe",
+        "phase": "scaling_failures",
+        "target_concept": "shard_failure_handling"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Good question. Each shard should have at least two replicas, ideally three, spread across different availability zones. If the primary replica of shard 7 is unresponsive, the query coordinator routes that shard's portion of the query to a secondary replica. The coordinator should have aggressive timeouts, maybe 200ms, so a slow shard doesn't block the whole query. If all replicas of a shard are down, we have a choice: we can either return degraded results from the other 99 shards, which still covers 99 percent of the corpus and is probably fine for the user, or we can fail the query. I'd choose to return degraded results and indicate that results may be incomplete. For durability of the index itself, we'd store the raw documents and the index segments in a distributed file system like HDFS. If a shard machine dies, a new replica can be spun up and loaded from the stored index segments. Health checks and automated failover should detect and replace unhealthy nodes within minutes.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["replica_placement", "availability_zones", "aggressive_timeouts", "degraded_results", "hdfs", "automated_failover"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Returning degraded results rather than failing entirely is the right call for search. Users won't notice one missing shard. Now, let's discuss the query processing pipeline. Walk me through what happens from the moment a user types a query to when they see results.",
+      "annotations": {
+        "action": "probe",
+        "phase": "high_level_design",
+        "target_concept": "query_processing_pipeline"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure, here's the end-to-end flow. The user types in the search box and as they type, an auto-suggest service proposes completions based on popular queries and the user's search history, using a trie or prefix index. Once they submit the query, it hits a query processing service that does several things: tokenization, lowercasing, stemming to reduce words like 'running' to 'run', spell correction if the query has typos, and query expansion to add synonyms. The processed query then goes to a query coordinator, which fans it out to all index shards in parallel. Each shard performs BM25 retrieval, returns its top K scored documents, say top 50 per shard. The coordinator merges these results, deduplicates if needed, and passes the top candidates to a second-stage re-ranker which applies the heavier ML model with additional features like PageRank and click signals. The re-ranker produces the final top 10 results. A snippet generation service extracts relevant text snippets from the matched documents to show in the search results page. The whole pipeline needs to complete in under 500ms. I'd allocate roughly: 50ms for query processing, 150ms for index retrieval across shards, 200ms for re-ranking, and 100ms for snippet generation, with some overlap since snippet generation can start as re-ranked results stream in.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["auto_suggest", "trie", "tokenization", "stemming", "spell_correction", "query_expansion", "scatter_gather", "re_ranking", "snippet_generation", "latency_budget"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a very comprehensive pipeline. You mentioned spell correction. How would you implement that?",
+      "annotations": {
+        "action": "deepen",
+        "phase": "deep_dive",
+        "target_concept": "spell_correction"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "There are a few approaches. The simplest is edit distance: for a misspelled word, find dictionary words within an edit distance of 1 or 2 using Levenshtein distance. You can precompute this efficiently using a BK-tree or a symmetric delete algorithm like SymSpell, which precomputes all possible deletions within a distance and stores them in a hash map for O(1) lookup. But pure edit distance doesn't account for likelihood. A better approach is a noisy channel model: the probability that the user meant word W given they typed word T is proportional to the prior probability of W times the probability of the typo T given W. The prior comes from word frequency in the corpus, and the error model comes from common typo patterns like adjacent key substitutions. In practice, you'd combine this with query log data: if 90 percent of users who type 'amazn' immediately retype 'amazon,' that's strong signal. For multi-word queries, you can use a language model to consider context. And you'd also want a 'did you mean' feature where you suggest the correction rather than silently replacing the query.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["edit_distance", "levenshtein", "bk_tree", "symspell", "noisy_channel_model", "language_model", "query_log_mining"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Impressive depth on spell correction. Let's talk about index updates. Your crawler is continuously discovering new pages and finding updated content. How do you update the index without disrupting live queries?",
+      "annotations": {
+        "action": "probe",
+        "phase": "deep_dive",
+        "target_concept": "index_updates"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "This is an important operational concern. I'd use a dual-index approach. The main index is built in large offline batch jobs, say daily or every few hours, using a MapReduce or Spark pipeline that processes the full corpus and produces optimized, compressed index segments. These are immutable once built. For freshness, I'd have a smaller real-time index that handles recent documents, maybe the last few hours of crawled content. This real-time index is built incrementally as documents arrive. At query time, we query both the main index and the real-time index, then merge the results. Periodically, the real-time index gets folded into the next batch build of the main index, and the real-time index is reset. For deploying a new main index, I'd do a rolling swap: bring up new shard replicas with the updated index, switch traffic to them, then decommission the old replicas. This avoids any downtime. The tradeoff is that the real-time index is less optimized since it hasn't been through the full compression and optimization pipeline, but it's small enough that this doesn't matter for performance.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["batch_index_build", "real_time_index", "mapreduce", "immutable_segments", "rolling_deployment", "index_merge"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a clean separation of batch and real-time indexing. Let me push you on something. You mentioned compressed index segments. What compression techniques would you apply to the inverted index?",
+      "annotations": {
+        "action": "deepen",
+        "phase": "deep_dive",
+        "target_concept": "index_compression"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "The biggest thing to compress is the posting lists, which are sorted lists of document IDs. Since they're sorted, you can store the gaps between consecutive IDs instead of the absolute IDs. These gaps are much smaller numbers. For example, the list [100, 105, 110, 200] becomes the gap list [100, 5, 5, 90]. Then you apply variable-byte encoding or more aggressive schemes like PForDelta or Simple9 to these gaps. Variable-byte encoding uses fewer bytes for smaller numbers, which is perfect for gap-encoded posting lists where most gaps are small. PForDelta is a block-based encoding that packs groups of 128 gaps together efficiently and is SIMD-friendly for fast decoding. For the term dictionary itself, you'd use front-coding or a finite state transducer, which is essentially a compressed trie that maps terms to their posting list offsets. Lucene uses FSTs extensively. Overall, good compression can reduce the index size by 3 to 5x compared to a naive representation, which directly translates to fewer machines and better cache utilization.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["gap_encoding", "variable_byte", "pfordelta", "simple9", "front_coding", "fst", "simd", "lucene"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Really solid knowledge of index compression. Let's zoom out to the caching layer. Where would caching help in this system?",
+      "annotations": {
+        "action": "transition",
+        "phase": "deep_dive",
+        "target_concept": "caching_strategy"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Caching is critical at multiple levels. First, result caching: a large fraction of queries are repeated. The most popular queries follow a power law distribution, so caching the top results for frequent queries can serve maybe 30 to 40 percent of traffic without hitting the index at all. I'd use a distributed cache like Redis or Memcached with the normalized query string as the key and the serialized result page as the value, with a TTL of maybe 5 to 15 minutes depending on freshness requirements. Second, posting list caching: hot terms like 'facebook' or 'weather' are queried constantly, so their posting lists should stay in memory. The index shards would use an LRU cache or rely on OS page cache for frequently accessed index segments. Third, we can cache the re-ranker's ML model features for frequently seen documents so we don't recompute them. The invalidation strategy for result cache is simple: TTL-based, because web search results don't need to be perfectly fresh for most queries. For news-sensitive queries, we'd bypass the cache or use a shorter TTL.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["result_caching", "power_law", "posting_list_caching", "lru_cache", "page_cache", "feature_caching", "ttl_invalidation", "cache_bypass"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. You mentioned auto-suggest earlier. Can you elaborate on how you'd build that component?",
+      "annotations": {
+        "action": "probe",
+        "phase": "deep_dive",
+        "target_concept": "auto_suggest"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Auto-suggest needs to be extremely fast since it fires on every keystroke, so the latency budget is more like 50ms. I'd build it as a separate service with its own data store. The data source is the query log: we aggregate popular queries and their frequencies. The data structure would be a trie where each node stores the top K completions for that prefix, precomputed and sorted by popularity. For example, at the prefix 'how t' the top completions might be 'how to tie a tie,' 'how to screenshot,' etc. The trie can be stored entirely in memory since the number of unique popular queries is manageable, maybe a few hundred million entries. For personalization, we can blend the user's recent search history with the global popularity signal. To keep it fresh, we rebuild the trie periodically from recent query logs, maybe hourly. For serving, we'd have multiple replicas of this service behind a load balancer with the dataset replicated on each node. One optimization is to use a compressed trie or a ternary search tree to reduce memory footprint.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["trie", "precomputed_top_k", "query_log_aggregation", "personalization", "ternary_search_tree", "latency_budget"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice. Let me throw a curveball. How would you handle a query like 'New York Times' where the intent is clearly to navigate to nytimes.com, versus a query like 'best pizza in New York' which is informational?",
+      "annotations": {
+        "action": "challenge",
+        "phase": "deep_dive",
+        "target_concept": "query_intent_classification"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "That's query intent classification, and it's a key part of a good search experience. Broadly, queries fall into navigational, informational, and transactional categories. For navigational queries like 'New York Times,' the user wants a specific website. We can detect these using a classifier trained on features like: the query matches or closely matches a known domain name, the query has a very skewed click distribution where 90 percent of clicks go to one URL, or the query contains terms like 'login' or 'official site.' For navigational queries, we'd boost the matching domain heavily and potentially show a site link format with sub-pages. For informational queries like 'best pizza in New York,' we'd apply the standard ranking pipeline and potentially show rich results like maps or review snippets. The intent classifier could be a lightweight ML model that runs during the query processing phase, adding maybe 5ms of latency. It outputs a probability distribution over intent categories, and the ranking layer adjusts its scoring accordingly. We'd also use this classification to decide whether to show special result formats like knowledge panels, maps, or direct answers.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["query_intent_classification", "navigational_vs_informational", "click_distribution", "site_links", "rich_results", "lightweight_classifier"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": true,
+        "has_tradeoffs": false
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great awareness of query intent. Last topic: what are the biggest operational challenges of running this system at scale?",
+      "annotations": {
+        "action": "scaling_probe",
+        "phase": "scaling_failures",
+        "target_concept": "operational_challenges"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Several major operational challenges come to mind. First, index build reliability: if the daily index build pipeline fails or produces a corrupted index, you've degraded search quality for billions of queries. I'd build extensive validation checks: compare document counts, run a suite of golden queries against the new index before deploying, and always keep the previous index version for instant rollback. Second, tail latency management: with a scatter-gather architecture over 100 shards, the slowest shard determines your latency. You need to be aggressive about hedged requests, sending duplicate requests to a second replica if the first doesn't respond within a percentile threshold. Third, index freshness vs. cost: building indexes more frequently costs more compute but provides fresher results. You need metrics to understand which queries are freshness-sensitive and prioritize accordingly. Fourth, spam and SEO manipulation: bad actors constantly try to game your ranking. You need continuous monitoring for ranking anomalies and a content quality team working on anti-spam signals. Fifth, geographic distribution: serving users globally means you need index replicas in multiple regions, which multiplies storage costs but is necessary for latency.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": ["index_validation", "rollback", "golden_queries", "tail_latency", "hedged_requests", "freshness_vs_cost", "anti_spam", "geographic_distribution"],
+        "depth": "deep",
+        "has_reasoning": true,
+        "has_numbers": false,
+        "has_tradeoffs": true
+      }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's an excellent and practical list. You've demonstrated strong knowledge across the entire search stack. I'm impressed by the depth on inverted indexes, ranking, compression, and the operational awareness. Thanks for the great discussion, we'll wrap up here.",
+      "annotations": {
+        "action": "wrap_up",
+        "phase": "wrap_up",
+        "target_concept": "overall_assessment"
+      }
+    },
+    {
+      "role": "candidate",
+      "content": "Thank you, I really enjoyed the discussion. Search engines are one of those systems where every layer has interesting engineering challenges, from the data structures to the ML ranking to the operational complexity. I'd be happy to go deeper on any of these topics if there's time.",
+      "annotations": {
+        "quality": "strong",
+        "concepts_mentioned": [],
+        "depth": "none",
+        "has_reasoning": false,
+        "has_numbers": false,
+        "has_tradeoffs": false
+      }
+    }
+  ],
+  "scorecard": {
+    "overall": 76,
+    "passed": true,
+    "pass_bar": 55,
+    "dimensions": {
+      "requirements_gathering": 85,
+      "capacity_estimation": 80,
+      "api_design": 65,
+      "database_design": 82,
+      "caching_strategy": 78,
+      "scalability": 80,
+      "failure_handling": 75,
+      "communication": 85
+    },
+    "strengths": [
+      "Asked excellent clarifying questions upfront that shaped the scope of the entire discussion",
+      "Explained inverted index with a clear concrete example and contrasted it with the forward index alternative",
+      "Performed solid capacity estimation for index size and per-shard QPS without prompting",
+      "Deep knowledge of TF-IDF, BM25, and the multi-stage ranking pipeline with learning-to-rank models",
+      "Independently proposed document-based sharding with a thorough comparison against term-based sharding",
+      "Handled shard failure gracefully with degraded results strategy and clear reasoning",
+      "Demonstrated advanced knowledge of index compression (gap encoding, PForDelta, FSTs) and spell correction (noisy channel model, SymSpell)",
+      "Articulated a multi-level caching strategy with practical numbers and invalidation approach",
+      "Strong operational awareness including hedged requests, index validation, and rollback procedures"
+    ],
+    "weaknesses": [
+      "Did not design an explicit API contract for the search service (endpoints, request/response schema)",
+      "Could have discussed more about internationalization challenges: CJK tokenization, right-to-left languages",
+      "Did not mention semantic or vector search as a complement to keyword-based retrieval",
+      "Anti-spam and content quality discussion was surface-level compared to other topics"
+    ]
+  }
+}

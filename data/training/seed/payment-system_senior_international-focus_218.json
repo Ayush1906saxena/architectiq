@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "senior",
+    "candidate_profile": "international-focus",
+    "total_exchanges": 20,
+    "generation_id": "seed_218"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a payment processing system. Think of something like Stripe or Square. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few questions. Are we targeting a single country or international? What payment methods — credit cards only, or also bank transfers and local methods? What transaction volume? And what are the compliance requirements — PCI DSS level, data residency laws?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["international_payments", "payment_methods", "compliance", "pci_dss"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "International — at least US, India, Brazil, and Europe. All major payment methods per region. 10,000 transactions per second at peak. PCI DSS Level 1. Design the system.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "international_payments" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a fascinating problem because each region has fundamentally different payment rails. In the US, it's ACH for bank transfers (2-3 day settlement) and card networks (Visa, Mastercard). In India, UPI is dominant — real-time bank-to-bank transfers with 10-second settlement. Brazil has PIX, also real-time. Europe has SEPA for bank transfers (same-day or next-day) and Strong Customer Authentication requirements under PSD2. Each of these has different APIs, settlement times, failure modes, and regulatory requirements. The core challenge is building an abstraction layer that normalizes these differences.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ach", "upi", "pix", "sepa", "psd2", "payment_rails", "abstraction_layer"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through that abstraction layer. How do you make these vastly different systems look uniform?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "payment_abstraction" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd define a Payment Intent model as the core abstraction. A payment intent has: amount, currency, payment method type, and a state machine. The states are universal: CREATED → REQUIRES_ACTION → PROCESSING → SUCCEEDED/FAILED. What varies per rail is what happens inside each state. For a US card payment: CREATED → we tokenize the card → PROCESSING → we call the card network → SUCCEEDED. For UPI: CREATED → we generate a payment link → REQUIRES_ACTION → user approves on their banking app → a webhook notifies us → PROCESSING → settlement confirmation → SUCCEEDED. The abstraction hides the 'how' but exposes the 'what' uniformly to merchants.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payment_intent", "state_machine", "adapter_pattern", "webhook_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you implement the adapter for each payment rail?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "adapter_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each payment rail gets a PaymentRailAdapter that implements a common interface: authorize(), capture(), refund(), and getStatus(). But the interface also needs escape hatches. For example, UPI requires a Virtual Payment Address, PIX requires a CPF (Brazilian tax ID), and SEPA requires an IBAN. So the adapter interface accepts a generic 'rail_specific_params' map alongside the standard fields. The adapter translates our internal model to the rail's API format, handles retries per the rail's idempotency guarantees, and translates the rail's responses back to our universal states. Each adapter is a separate, independently deployable service — so we can update the India UPI adapter without touching the US card adapter.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["adapter_pattern", "idempotency", "independent_deployment", "rail_specific_params"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Settlement times vary wildly — UPI is instant, ACH takes days. How does that affect your system design?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "settlement_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Settlement time affects money movement and merchant payouts. For instant rails like UPI and PIX, the funds are available immediately — we can update the merchant's balance in near-real-time. For delayed rails like ACH, we track two balances: pending balance (authorized but not yet settled) and available balance (funds we've received). The payout system only disburses from the available balance. This means merchants on ACH see funds available in 2-3 days, while merchants on UPI see them in minutes. We also need to handle the 'payment succeeded but settlement failed' edge case — ACH transfers can be reversed up to 60 days later. So we maintain a reserve from ACH transactions to cover potential reversals.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["settlement_timing", "pending_vs_available_balance", "ach_reversals", "reserve_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Currency handling is another dimension. How do you deal with multi-currency payments?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "currency_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Currencies are stored as integers in the smallest unit — cents for USD, paise for INR, centavos for BRL — to avoid floating point issues. When a Brazilian customer pays a US merchant, we need a currency conversion. I'd integrate with FX rate providers and lock the rate at payment creation time — the merchant sees exactly how much they'll receive in their currency. The FX rate has a spread (our margin) plus the provider's rate. We store both the original amount/currency and the converted amount/currency on every transaction. For accounting, each currency has its own ledger — we never mix currencies in a single ledger entry. Cross-currency transactions create two ledger entries: a debit in BRL and a credit in USD.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["currency_handling", "integer_arithmetic", "fx_rates", "multi_currency_ledger"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Speaking of compliance — how do you handle data residency? India requires payment data to stay in India.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "data_residency" }
+    },
+    {
+      "role": "candidate",
+      "content": "India's RBI mandates that all payment data for Indian transactions must be stored on servers within India — including card numbers, transaction details, and settlement data. Similar requirements exist in Russia, Indonesia, and increasingly in Europe with GDPR. I'd deploy region-specific database clusters: India transactions go to India-region Postgres, European transactions to EU-region Postgres, and so on. The payment intent service routes writes to the correct regional store based on the transaction's country. For the global merchant dashboard, we aggregate read-only, anonymized metrics centrally, but never move raw PII across borders. This means our sharding is geography-based rather than hash-based — which has implications for cross-region transactions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_residency", "rbi_mandate", "gdpr", "geographic_sharding", "pii_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle PCI DSS compliance for card data across these regions?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "pci_compliance" }
+    },
+    {
+      "role": "candidate",
+      "content": "Card data never touches most of our systems. We minimize the PCI scope using tokenization. The client-side SDK collects card details and sends them directly to a dedicated card vault service — the only PCI DSS Level 1 component. The vault returns a token. All other services only see the token, never the raw card number. The vault itself: encrypted at rest with HSM-managed keys, encrypted in transit, audit logs on every access, and the smallest possible attack surface — no business logic, just store and retrieve. Each region has its own vault instance to comply with data residency. We undergo annual PCI audits, and the small scope of the vault makes audits manageable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["tokenization", "card_vault", "hsm", "pci_scope_reduction", "regional_vault"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about failure handling? A payment is initiated but the payment rail times out. What do you do?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "payment_failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the scariest scenario in payments — we don't know if money moved or not. The golden rule: never double-charge the customer. Every payment request to the rail includes an idempotency key — our payment intent ID. If the rail times out, we query the rail's status API. If the status API also times out, we wait and retry the status check with exponential backoff. We do NOT retry the payment itself — that risks double-charging. The payment stays in PROCESSING state until we get a definitive answer. If we can't get a definitive answer within, say, 1 hour, we flag it for manual review by our operations team. Meanwhile, the merchant sees 'pending' — not charged and not failed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotency", "timeout_handling", "double_charge_prevention", "manual_review_fallback"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about fraud detection across these different payment methods?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "fraud_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fraud patterns differ by rail. Card fraud often involves stolen numbers used remotely — so we check velocity (how many transactions this card has done recently), device fingerprinting, and IP geolocation. UPI fraud is often social engineering — tricking users into approving payments — so the fraud signals are different: unusual transaction amounts, new payee patterns, rapid successive transactions. I'd build a risk scoring engine that runs pre-authorization: each transaction gets a score from 0-100 based on a mix of rules and ML model output. Above 80, block automatically. Between 50-80, trigger additional verification (3DS for cards, OTP for UPI). Below 50, allow. The model is retrained per region because fraud patterns are culturally different.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fraud_detection", "risk_scoring", "velocity_checks", "device_fingerprinting", "regional_fraud_patterns"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost out of time. How would you scale this to 10,000 TPS?",
+      "annotation": { "action": "redirect", "phase": "wrap_up", "target_concept": "scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "The stateless services — API gateway, payment intent service, adapters — scale horizontally behind load balancers. The database layer: each region's Postgres uses read replicas for dashboard queries and the primary handles writes. At 10K TPS globally, if distributed roughly 4K US, 3K India, 2K Europe, 1K Brazil, each region handles manageable load. The card vault scales independently. The async components — webhook delivery, settlement processing, fraud model inference — use message queues to decouple and absorb bursts. The bottleneck is usually the external payment rails themselves — some have rate limits. We queue and batch where allowed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["horizontal_scaling", "regional_distribution", "message_queues", "external_rate_limits"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The key insight is that international payments aren't just 'payments in different currencies.' Each region has unique rails, regulations, fraud patterns, and user expectations. The abstraction layer I designed — payment intents with rail-specific adapters — lets us add new countries without changing the core system. Next, I'd focus on the merchant experience: a unified dashboard showing transactions across all regions with real-time FX conversion, and a settlement engine that optimizes payout timing based on the merchant's needs. Payments is ultimately a trust business — reliability and correctness matter more than raw performance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["abstraction_design", "extensibility", "merchant_experience", "reliability_first"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong domain knowledge on international payment rails. The abstraction design was well thought out. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 72,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 6,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 5,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 8
+    },
+    "strengths": [
+      "Deep knowledge of international payment rails — UPI, PIX, SEPA, ACH with specific details",
+      "Payment abstraction layer design was clean and extensible",
+      "Strong compliance awareness — PCI tokenization, data residency, regional fraud patterns"
+    ],
+    "weaknesses": [
+      "Caching strategy was not discussed at all",
+      "Capacity estimation was superficial — no detailed math on storage or throughput per component",
+      "Database schema design was implied but not explicitly defined"
+    ]
+  }
+}

@@ -1,0 +1,130 @@
+{
+  "metadata": {
+    "problem_id": "key-value-store",
+    "level": "senior",
+    "candidate_profile": "meta-style",
+    "total_exchanges": 20,
+    "generation_id": "seed_314"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We have 10 billion key-value pairs storing user preferences across all Meta products. Read latency must be under 5ms at p99. Design the storage system.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "practical_scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me clarify a few things. What's the average key and value size? What's the read/write ratio? Is this a global system or regional? And are the preferences structured (like a JSON document) or opaque blobs?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["data_model", "read_write_ratio", "data_distribution"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Keys are user_id + preference_name, averaging 50 bytes. Values are small JSON documents, averaging 500 bytes. Read-to-write ratio is 1000:1. Global — users are worldwide. Structured JSON. The read traffic is 10 million QPS at peak.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me size this. 10 billion KV pairs at 550 bytes each is about 5.5 TB of raw data. With replication factor 3, that's 16.5 TB. This fits in memory of a moderately-sized cluster. For 10M read QPS with sub-5ms p99, we need in-memory serving — disk reads at p99 won't make it under 5ms. If each node can serve 100K reads per second, we need at least 100 nodes for reads. But I'd add a caching layer too. Writes are 10K QPS (1000:1 ratio), which is modest. Let me propose an architecture.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "in_memory_serving", "cluster_sizing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Go ahead. How do you serve 10M reads per second under 5ms globally?",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": "global_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two-layer architecture. Layer 1: a globally distributed cache. I'd use TAO-style caching — Meta's actual solution for this class of problem. Regional cache clusters in each major region: US-East, US-West, Europe, Asia. Each region has a full replica of the entire dataset in memory since it's only 5.5 TB per region. Reads are served locally — the user's request hits the nearest region, and the cache responds in under 2ms. Cache hit rate should be 99%+ since the data changes infrequently. Layer 2: a persistent backing store. I'd use a sharded MySQL cluster (also following Meta's pattern) or RocksDB-based storage. Writes go to the primary region's database, and changes propagate to regional caches via a change data capture stream. Invalidation rather than update — when a preference changes, we invalidate the cache entry, and the next read fills it from the database.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["global_architecture", "regional_caching", "change_data_capture", "cache_invalidation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "With invalidation-based caching and cross-region propagation, what's the staleness window? A user changes their preference in US-East and immediately reads in Europe.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "cross_region_consistency" }
+    },
+    {
+      "role": "candidate",
+      "content": "The staleness window is the time for the invalidation to propagate from the primary to the European cache. With a Kafka-based CDC stream, cross-region propagation takes 100-500ms typically. So a user could read stale data for up to 500ms. For user preferences, this is usually acceptable — if I change my notification setting, I can tolerate half a second of stale reads. But for the same-user case specifically, we can do better: after a write, the client can include a 'read-after-write' token (essentially the write timestamp). The regional cache, upon receiving a read with this token, checks if its local data is at least as fresh as the token. If not, it falls back to the primary region for this specific read. This gives read-your-own-writes consistency at the cost of one cross-region read for the writing user only.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cross_region_consistency", "staleness_window", "read_after_write", "consistency_token"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you shard the backing MySQL cluster? And how do you handle a hot user whose preferences are read millions of times per second?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "sharding_hot_keys" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sharding: hash-based on user_id. This keeps all preferences for one user on the same shard, enabling efficient batch reads. With 10 billion KV pairs and, say, 256 shards, each shard holds about 39 million entries — about 21 GB. Very manageable for MySQL. For hot users: the cache handles this. Since we replicate the full dataset to each region's cache, a hot user's preferences are served from in-memory cache, not from MySQL. But within the cache, a single key could still overwhelm one cache node. Solution: use multiple cache replicas for the same key range. A request for a hot key is load-balanced across replicas randomly. We also monitor key-level access patterns and can promote extremely hot keys to a dedicated 'hot tier' that's replicated even more aggressively — every cache node in the region has a copy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sharding_strategy", "hot_key_handling", "cache_replication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "10M QPS at the cache layer. How many cache nodes per region, and what technology do you use?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cache_sizing" }
+    },
+    {
+      "role": "candidate",
+      "content": "For the cache, I'd use Memcached — it's simpler and faster than Redis for pure key-value lookups since it's multithreaded. A single Memcached instance on a 64-core machine with 128 GB RAM can handle about 500K-1M GET operations per second. At 10M QPS globally, if traffic is split roughly evenly across 4 regions, that's 2.5M QPS per region. With 500K ops per node, we need 5 nodes per region for throughput. For memory: 5.5 TB of data doesn't fit in 5 nodes with 128 GB each (640 GB total). But with a 99%+ cache hit rate, we don't need to cache everything. If we cache the active 20% of keys — 2 billion keys at 550 bytes = 1.1 TB — that's 9 nodes per region at 128 GB. I'd deploy 12 nodes per region for both throughput and memory headroom. Total: 48 cache nodes globally.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_sizing", "memcached", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "A cache node in US-East crashes. What's the impact on latency and how do you recover?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If one of 12 cache nodes in US-East crashes, about 8% of the cached keyspace is lost. Those reads will miss the cache and fall through to the MySQL backing store. Impact: the 8% of reads that miss will see latency jump from 1-2ms to 5-20ms as they hit the database. The p99 for the region will spike above our 5ms SLO temporarily. Recovery: the remaining 11 cache nodes redistribute the hash ring using consistent hashing, so only the keys from the failed node are redistributed — no thundering herd on the database. The cache fills organically as reads for the missing keys populate the new owners. Within 5-10 minutes, the hit rate should recover. To speed this up, we could run a proactive cache warmer that reads the failed node's key range from the database and pre-populates the cache. Auto-scaling launches a replacement node, which joins the ring and takes over its portion.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_failure", "consistent_hashing", "cache_warmup", "auto_scaling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the case where a product team wants to add a new type of preference that's 10 KB per user? That changes your sizing significantly.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "capacity_growth" }
+    },
+    {
+      "role": "candidate",
+      "content": "10 KB per user for 3 billion users is 30 TB — a 6x increase. This breaks our in-memory caching strategy. Options: first, compress the values. User preferences are often repetitive JSON with lots of default values. zstd compression might get 5-10x compression on structured JSON, bringing it back to manageable size. Second, tiered storage: frequently accessed preferences stay in the memory cache, while the new 10 KB blobs go to an SSD-backed cache tier like RocksDB-backed Memcached. SSD reads are 100-200 microseconds, still well under 5ms. Third, push back on the product team: do all users need this? Can we lazy-load it only when the user is active? Probably only 10% of users actively change this preference, so we cache only the active subset. As an architect, I'd start by understanding the access pattern before committing to a solution.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_growth", "compression", "tiered_storage", "pushback"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you migrate from an existing preference storage system to this new one without downtime?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "migration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Dual-write migration in phases. Phase 1 — shadow writes: the old system remains primary. Every write also goes to the new system. We compare the results to validate correctness but the new system's responses are discarded. Phase 2 — dual reads: start reading from both systems and comparing. Log discrepancies. Target zero discrepancies for 48 hours. Phase 3 — new system primary: reads shift to the new system. Writes still go to both. The old system is the fallback. Phase 4 — decommission: stop writing to the old system. Keep it in read-only mode for 2 weeks as a safety net. Then shut down. Each phase has a kill switch to revert to the old system within seconds. Total migration timeline: 4-8 weeks depending on the discrepancy rate in phase 2.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["migration", "dual_write", "shadow_testing", "gradual_rollout"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid practical design. You clearly understand the real-world constraints. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 69,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 9,
+      "api_design": 5,
+      "database_design": 7,
+      "caching_strategy": 9,
+      "scalability": 8,
+      "failure_handling": 7,
+      "communication": 7
+    },
+    "strengths": [
+      "Excellent capacity estimation — precise sizing for cache nodes, shards, and memory",
+      "Strong practical knowledge of caching at Meta scale (TAO, Memcached)",
+      "Good migration strategy with safety nets at every phase"
+    ],
+    "weaknesses": [
+      "API design was not discussed — no client-facing interface",
+      "Consistency theory was surface-level — didn't go deep on CAP, vector clocks, or conflict resolution",
+      "Failure handling beyond cache failure was not explored (database failure, network partition)"
+    ]
+  }
+}

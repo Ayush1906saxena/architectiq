@@ -1,0 +1,159 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "senior",
+    "candidate_profile": "ledger-deep",
+    "total_exchanges": 20,
+    "generation_id": "seed_361"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a payment system. I'd like you to focus on the financial ledger — how you record transactions, maintain balances, and ensure financial integrity. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Key questions: What types of financial operations do we need to support — just payments, or also refunds, transfers between accounts, and payouts? Do we need multi-currency support? What's the transaction volume? What are the audit and compliance requirements? And how do we handle disputes and adjustments?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["operation_types", "multi_currency", "transaction_volume", "audit_compliance", "disputes"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Payments, refunds, transfers, and payouts. Multi-currency (USD, EUR, GBP). 10 million transactions per day. Full audit trail required — every penny must be accounted for. Need to handle disputes and manual adjustments. Design the ledger.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "ledger_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "The foundation is double-entry bookkeeping — every financial transaction must debit one account and credit another, and the total debits must equal total credits. This is the fundamental invariant that ensures no money is created or destroyed. Let me start with the account model. CREATE TABLE accounts (account_id BIGINT PRIMARY KEY, account_type ENUM('merchant', 'platform', 'customer', 'fees', 'taxes', 'settlement_clearing', 'refund_reserve') NOT NULL, currency CHAR(3) NOT NULL, current_balance DECIMAL(19, 4) DEFAULT 0, pending_balance DECIMAL(19, 4) DEFAULT 0, is_active BOOLEAN DEFAULT TRUE, created_at TIMESTAMP NOT NULL). I use DECIMAL(19, 4) — never float or double for money. The 4 decimal places handle sub-cent amounts that arise in fee calculations and currency conversion. The 19 total digits support up to $999,999,999,999,999.9999 — sufficient for any operation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["double_entry", "account_model", "decimal_precision", "account_types", "no_floating_point"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now the journal entries table — the core of the ledger.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "journal_entries" }
+    },
+    {
+      "role": "candidate",
+      "content": "CREATE TABLE journal_entries (entry_id BIGINT PRIMARY KEY, transaction_id BIGINT NOT NULL, debit_account_id BIGINT NOT NULL REFERENCES accounts(account_id), credit_account_id BIGINT NOT NULL REFERENCES accounts(account_id), amount DECIMAL(19, 4) NOT NULL CHECK (amount > 0), currency CHAR(3) NOT NULL, entry_type ENUM('payment', 'refund', 'fee', 'payout', 'transfer', 'adjustment', 'reversal') NOT NULL, idempotency_key VARCHAR(255) UNIQUE NOT NULL, description TEXT, metadata JSONB, created_at TIMESTAMP NOT NULL, created_by VARCHAR(100) NOT NULL). Key design decisions: amount is always positive — the direction is determined by debit_account_id and credit_account_id. This eliminates confusion about sign conventions. idempotency_key is UNIQUE — prevents double-posting of the same transaction. Every entry has a created_by field for audit — which service or operator created it. The metadata JSONB field stores context: payment_id, refund_id, external references.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["journal_entries", "positive_amounts", "idempotency", "audit_trail", "metadata"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through a concrete payment flow in the ledger.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "payment_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "A customer pays $100 to a merchant. Our platform takes a 2.9% + $0.30 fee. This creates multiple journal entries, all within a single transaction_id. Entry 1: Debit customer_account, Credit platform_clearing_account, $100.00. (Customer's funds move to platform clearing.) Entry 2: Debit platform_clearing_account, Credit merchant_account, $96.80. (Merchant receives $100 - $2.90 - $0.30 = $96.80.) Entry 3: Debit platform_clearing_account, Credit platform_fees_account, $3.20. (Platform takes the fee: $2.90 + $0.30 = $3.20.) Verification: total debits = $100 + $96.80 + $3.20 = $200. Wait, that's wrong. Let me redo this. The double-entry for each leg: Entry 1: Debit customer $100, Credit clearing $100. Entry 2: Debit clearing $96.80, Credit merchant $96.80. Entry 3: Debit clearing $3.20, Credit fees $3.20. Total debits = $100 + $96.80 + $3.20 = $200. Total credits = $100 + $96.80 + $3.20 = $200. Balanced. The clearing account nets to zero: received $100, paid out $96.80 + $3.20 = $100.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["payment_flow", "fee_calculation", "clearing_account", "balance_verification", "double_entry_balance"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good self-correction. Now how does a refund look in the ledger?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "refund_flow" }
+    },
+    {
+      "role": "candidate",
+      "content": "A full refund of the $100 payment. The entries reverse the original flow. Entry 1: Debit merchant_account $96.80, Credit platform_clearing $96.80. (Take the amount back from the merchant.) Entry 2: Debit platform_fees_account $3.20, Credit platform_clearing $3.20. (Return the fee — our policy is to refund our fee on full refunds. Some platforms keep the fee.) Entry 3: Debit platform_clearing $100, Credit customer_account $100. (Return the full amount to the customer.) These entries reference the original transaction_id in metadata: {\"original_transaction_id\": 12345, \"refund_reason\": \"customer_request\"}. For a partial refund (say $50 of the $100): we proportionally refund. $50 payment refund means $50 * 0.968 = $48.40 from merchant, $50 * 0.032 = $1.60 from fees. Or we can choose to only refund from the merchant's portion and keep all fees — this is a business decision stored in the refund policy. The ledger just records whatever the refund service decides.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["refund_flow", "reversal_entries", "fee_refund_policy", "partial_refund", "transaction_reference"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you compute account balances from journal entries?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "balance_computation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two approaches. Approach 1: Compute from entries (source of truth): SELECT COALESCE(SUM(CASE WHEN credit_account_id = ? THEN amount ELSE 0 END), 0) - COALESCE(SUM(CASE WHEN debit_account_id = ? THEN amount ELSE 0 END), 0) AS balance FROM journal_entries WHERE credit_account_id = ? OR debit_account_id = ?. This is slow for accounts with millions of entries. Approach 2: Maintain a running balance (what I'd actually use). The accounts.current_balance is updated within the same database transaction as the journal entry insert: BEGIN; INSERT INTO journal_entries (...) VALUES (...); UPDATE accounts SET current_balance = current_balance - 100.00 WHERE account_id = ? (debit account); UPDATE accounts SET current_balance = current_balance + 100.00 WHERE account_id = ? (credit account); COMMIT. The atomicity of the transaction guarantees that journal_entries and account balances are always consistent. The running balance is a materialized view of the journal entries. For validation, a nightly reconciliation job computes the balance from scratch (Approach 1) and compares with current_balance. If they diverge, alert immediately — it means a bug in the transaction logic.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["balance_computation", "running_balance", "atomic_transaction", "materialized_view", "nightly_reconciliation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about month-end closing? How does that work?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "period_closing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Month-end closing creates a checkpoint. CREATE TABLE balance_snapshots (snapshot_id BIGINT PRIMARY KEY, account_id BIGINT NOT NULL, period_end DATE NOT NULL, closing_balance DECIMAL(19, 4) NOT NULL, total_debits DECIMAL(19, 4) NOT NULL, total_credits DECIMAL(19, 4) NOT NULL, entry_count INT NOT NULL, created_at TIMESTAMP NOT NULL, UNIQUE(account_id, period_end)). At the end of each month, a closing job: (1) Computes the balance for every account by summing all entries in that month, starting from the previous month's closing_balance. (2) Writes the balance_snapshots. (3) Verifies: for every account, previous_closing_balance + credits - debits = current_closing_balance. (4) Marks the period as closed — no new journal entries with a created_at in the closed period can be inserted (enforced by an application-level check and a database trigger). Benefits: balance queries for dates before the closing are instant — just read the snapshot. Monthly financial reports are pre-computed. And it creates a natural audit boundary — auditors can verify each period independently. Late-arriving entries (due to async processing) that need to be recorded in a closed period are booked as adjustments in the current period with metadata referencing the original period.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["period_closing", "balance_snapshots", "closing_verification", "period_locking", "late_adjustments"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle multi-currency in the ledger?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "multi_currency" }
+    },
+    {
+      "role": "candidate",
+      "content": "Critical rule: each account has a single currency. A merchant receiving EUR has a EUR account; their USD payouts come from a USD account. Cross-currency transactions require a currency conversion step. For example, customer pays $100 USD, merchant's account is EUR. Entry 1: Debit customer_USD $100, Credit platform_clearing_USD $100. Entry 2: Debit platform_clearing_USD $100, Credit platform_fx_USD $100. (Move to FX account.) Entry 3: Debit platform_fx_EUR EUR 92.50 (at exchange rate 0.925), Credit platform_clearing_EUR EUR 92.50. Entry 4: Debit platform_clearing_EUR EUR 92.50, Credit merchant_EUR EUR 89.82. (After 2.9% fee.) Entry 5: Debit platform_clearing_EUR EUR 2.68, Credit platform_fees_EUR EUR 2.68. The FX accounts will naturally have imbalances that represent our currency exposure. We record the exchange rate in the metadata: {\"fx_rate\": 0.925, \"fx_rate_source\": \"ecb\", \"fx_rate_timestamp\": \"2026-03-28T10:00:00Z\"}. The FX gain/loss is computed at month-end by revaluing FX account balances at the closing exchange rate.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_currency", "fx_accounts", "exchange_rate_recording", "currency_exposure", "fx_gain_loss"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you prevent overdrafts — an account going negative when it shouldn't?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "overdraft_prevention" }
+    },
+    {
+      "role": "candidate",
+      "content": "Overdraft prevention is critical for merchant accounts and platform accounts. Within the transaction that creates journal entries: before debiting an account, check: SELECT current_balance FROM accounts WHERE account_id = ? FOR UPDATE. If current_balance < debit_amount, abort the transaction and return InsufficientFundsException. The FOR UPDATE acquires a row lock, preventing concurrent transactions from reading a stale balance. For high-throughput accounts (like the platform clearing account that handles millions of transactions), this row lock becomes a bottleneck — every transaction contends on the same row. Solutions: (1) Use multiple clearing sub-accounts. Instead of one platform_clearing_USD, use platform_clearing_USD_001 through platform_clearing_USD_100. Transactions are round-robined across sub-accounts. The total clearing balance is SUM across all sub-accounts. This gives 100x concurrency. (2) Allow certain accounts to go negative temporarily — the clearing account is OK to be negative briefly because it always nets to zero. Only enforce non-negative constraints on customer and merchant accounts. (3) Use optimistic locking: UPDATE accounts SET current_balance = current_balance - ? WHERE account_id = ? AND current_balance >= ?. If affected_rows = 0, the balance was insufficient.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["overdraft_prevention", "row_locking", "sub_accounts", "optimistic_locking", "concurrency_bottleneck"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle disputes and manual adjustments in the ledger?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "adjustments" }
+    },
+    {
+      "role": "candidate",
+      "content": "Disputes and adjustments are just more journal entries — the ledger treats them like any other transaction. For a chargeback (customer disputes a $100 payment): Entry 1: Debit merchant_account $100, Credit chargeback_clearing $100. (Take money from merchant.) Entry 2: Debit chargeback_clearing $100, Credit customer_account $100. (Return to customer.) Entry 3: Debit merchant_account $15, Credit platform_fees_account $15. (Chargeback fee.) entry_type = 'reversal', with metadata: {\"dispute_id\": \"disp_123\", \"reason\": \"fraudulent\", \"original_transaction_id\": 12345}. For manual adjustments (e.g., correcting a miscalculation): I require a special entry_type = 'adjustment' and the created_by field must be an authorized operator. All adjustment entries require a second approver — implemented via an adjustments_approval table where another authorized user must approve before the journal entry is committed. This dual-control principle is a standard accounting control. The adjustment entry includes: {\"approved_by\": \"finance_manager_2\", \"justification\": \"Fee was calculated incorrectly due to config error\", \"ticket_id\": \"JIRA-4567\"}.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chargeback_entries", "manual_adjustments", "dual_control", "adjustment_approval", "audit_justification"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you generate financial reports from this ledger?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "financial_reporting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Reports are derived from journal entries and balance snapshots. Key reports: (1) Transaction summary: SELECT entry_type, currency, COUNT(*), SUM(amount) FROM journal_entries WHERE created_at BETWEEN ? AND ? GROUP BY entry_type, currency. Shows total payments, refunds, fees by currency. (2) Account statement: for a specific merchant, list all entries in chronological order with running balance. Use the last balance_snapshot as the starting point, then sum entries forward. (3) Platform P&L: total fees collected minus refunded fees, chargeback fees collected, minus our operational costs (payable from separate accounts). (4) Reconciliation report: compare our ledger totals against external sources — Stripe settlement files, bank statements. Any discrepancy is flagged. I'd build these on a read replica to avoid impacting the primary. For complex analytics, I'd replicate journal entries to a data warehouse (BigQuery, Snowflake) via CDC. The warehouse enables ad-hoc queries without touching the production ledger. Financial reports must be reproducible — running the same report twice should give identical results. This is why period closing is essential: it freezes the data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["financial_reporting", "transaction_summary", "account_statement", "reconciliation", "data_warehouse", "reproducibility"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Anything to wrap up the ledger design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Three critical additions. First, immutability: journal entries are NEVER updated or deleted. If an entry is wrong, we create a reversal entry that cancels it, then a new correct entry. This is fundamental to accounting integrity. I'd enforce it with a database trigger that prevents UPDATE or DELETE on journal_entries, and revoke direct table access from application service accounts. Second, for audit compliance (SOX, PCI-DSS), I'd maintain a separate audit_log table that records every access to financial data — who queried which accounts, when, from what IP. This is separate from the ledger itself. Third, idempotency is so critical that I'd add a belt-and-suspenders approach: the idempotency_key UNIQUE constraint prevents duplicates at the DB level, and a Redis-based check prevents even attempting the insert: SETNX idempotency:{key} 1 EX 86400. If SETNX returns 0, the entry already exists — skip without hitting the database.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["immutability", "reversal_entries", "audit_compliance", "sox", "pci_dss", "belt_and_suspenders_idempotency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent ledger design. Very strong accounting fundamentals. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 76,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 4,
+      "api_design": 5,
+      "database_design": 10,
+      "caching_strategy": 4,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Excellent double-entry bookkeeping design with concrete examples showing balanced entries for payments, refunds, and FX",
+      "Strong accounting controls: immutable entries, dual-control adjustments, and month-end closing",
+      "Good concurrency handling with sub-accounts to solve the row lock bottleneck"
+    ],
+    "weaknesses": [
+      "Capacity estimation was not done — no throughput or storage sizing",
+      "API design and caching strategy were not discussed — focused entirely on the data model"
+    ]
+  }
+}

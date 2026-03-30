@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "corrects-own-mistake",
+    "total_exchanges": 22,
+    "generation_id": "seed_335"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a Twitter-like news feed system. Users follow other users and see a timeline of recent posts from people they follow. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Good. Let me clarify the requirements. How many users? How many follows per user on average? What's the expected latency for loading a feed? Do we need real-time updates or is pull-based refresh acceptable?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["qps", "latency", "real_time_updates"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500 million users, average 200 follows. Feed load should be under 200ms at p99. Real-time push for active users, pull for inactive. Let's start with the high-level design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me think about capacity first. If 10% of users are daily active, that's 50 million DAU. If each user refreshes their feed 10 times a day, that's 500 million feed loads per day — about 5,800 per second. For writes, if 1% of users post per day, that's 5 million tweets per day — roughly 58 writes per second. Read-heavy at about 100:1 ratio.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "read_write_ratio"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good numbers. Now walk me through how a user's feed gets generated when they open the app.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "fan_out" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use fan-out on write. When a user posts a tweet, we immediately push that tweet into the feed cache of every follower. So when User A posts, and they have 1,000 followers, we write that tweet reference to 1,000 pre-computed feed lists. Then when any follower opens their app, their feed is already assembled — we just read from their pre-computed list. This gives us that sub-200ms read latency because there's no computation at read time.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fan_out_on_write", "precomputed_feed"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Sounds clean. So every tweet gets fanned out to all followers on write. Walk me through the write path in more detail.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "fan_out_on_write" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. User posts a tweet — it goes to the Tweet Service, which writes to the tweets table. Then a Fan-out Service picks up the event, queries the social graph to get all followers, and for each follower, inserts the tweet ID into their feed list in Redis. Each user's feed is a sorted set in Redis, scored by timestamp. We cap it at the latest 1,000 tweets. The fan-out happens asynchronously via a message queue so the write returns quickly to the poster. For ALL users, this fan-out on write approach keeps reads extremely fast.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fan_out_on_write", "redis_sorted_set", "async_processing"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You said for ALL users. Think about that for a moment. What about a user with 50 million followers?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "celebrity_problem" }
+    },
+    {
+      "role": "candidate",
+      "content": "Wait, that doesn't work for celebrities. Let me fix that. If someone like a major celebrity with 50 million followers posts a tweet, we'd need to write to 50 million feed lists. At even 1ms per write, that's 50,000 seconds — nearly 14 hours to fan out a single tweet. The tweet would be stale before most followers even see it. I need a hybrid approach. Let me split users into two categories: normal users with fewer than, say, 10,000 followers use fan-out on write. Celebrities with more than 10,000 followers use fan-out on read. When a follower opens their feed, we read their pre-computed list from Redis — that covers all their normal followees. Then we separately fetch the latest tweets from the celebrity accounts they follow — a small number of queries since most users follow maybe 5-10 celebrities. We merge and rank these two sets at read time.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["celebrity_problem", "hybrid_fan_out", "fan_out_on_read", "fan_out_on_write"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent self-correction. How do you determine the threshold dynamically? Is 10,000 always the right number?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "dynamic_threshold" }
+    },
+    {
+      "role": "candidate",
+      "content": "It shouldn't be a static number. The threshold depends on our fan-out capacity — specifically, how quickly we can process the fan-out queue. If our fan-out workers can process 100,000 writes per second and we want fan-out to complete within 30 seconds of posting, the threshold is 100,000 * 30 = 3 million followers. But that assumes only one person is posting. With 58 tweets/second globally, we need to share that capacity. So the real calculation is fan-out capacity divided by write rate: 100K / 58 = ~1,700 followers per tweet if we want real-time delivery. In practice, I'd set it dynamically based on current queue depth — if the fan-out queue is backing up, we temporarily lower the threshold and move more users to fan-out on read.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dynamic_threshold", "backpressure", "queue_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Smart. Let's talk about the social graph storage. How do you store and query the follower relationships?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "social_graph" }
+    },
+    {
+      "role": "candidate",
+      "content": "The social graph is a directed graph — User A follows User B doesn't mean B follows A. Two key queries: given a user, who do they follow? And given a user, who follows them? I'd use an adjacency list stored in a wide-column store like Cassandra. The table has two rows per follow relationship — one partitioned by follower (for 'who do I follow') and one partitioned by followee (for 'who follows me'). Cassandra handles the hot partition problem for celebrities because we're reading in the fan-out service, not at user request time. For the fan-out on read path, when we need a user's celebrity follows, that's a single partition read — fast and predictable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["social_graph", "cassandra", "adjacency_list", "partition_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the merge step at read time — combining the pre-computed feed with celebrity tweets?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "feed_merge" }
+    },
+    {
+      "role": "candidate",
+      "content": "The pre-computed feed from Redis is already sorted by timestamp. For the celebrity tweets, I fetch the latest N tweets from each celebrity the user follows — this is a small number of point queries to the tweets table, maybe 5-10 celebrities * 20 tweets each = 100-200 rows. I merge these with the pre-computed feed using a simple k-way merge since both sources are sorted. The merge is O(k * N) where k is the number of celebrity sources plus one for the cached feed, and N is the feed page size, say 50. This adds maybe 10-20ms to the read path — well within our 200ms budget since the Redis read itself is under 5ms and the celebrity tweet fetches can be parallelized.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_merge", "k_way_merge", "parallel_fetching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about real-time updates? The requirement said active users should see new tweets pushed to them.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "real_time_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "For active users with an open connection, I'd use WebSocket or Server-Sent Events. When a new tweet is fanned out to a user's feed in Redis, we also publish a notification to a pub/sub channel specific to that user. The user's open connection subscribes to their channel. A Connection Gateway service manages all WebSocket connections — if we have 10 million concurrent users, with 100K connections per gateway server, we need about 100 gateway servers. The gateway subscribes to the relevant pub/sub channels for all its connected users. When a notification arrives, it pushes the tweet data down the WebSocket. For celebrities, the tweet notification goes through the same path — the read-time merge just happens on the client side by inserting the new tweet into the already-loaded feed at the correct position.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["websocket", "pubsub", "connection_gateway", "real_time_delivery"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What if a gateway server crashes? What happens to those connections?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "connection_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "If a gateway crashes, its 100K connections drop. Clients detect the dropped WebSocket and reconnect — they'll be routed to a different gateway by the load balancer. On reconnect, the client sends its last-seen tweet timestamp, and the new gateway fetches any tweets the user missed during the disconnection window. The key is that the source of truth is still Redis (the pre-computed feed) and the tweets table — the WebSocket is just a notification channel. So missed notifications don't mean missed tweets; they just mean the client needs to pull the delta on reconnect. I'd also have the client do a background pull every 60 seconds as a safety net, even with an active WebSocket, to catch any missed notifications.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["connection_recovery", "reconnection_strategy", "delta_sync"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle tweet deletions in this architecture?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "deletion_propagation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Deletions are tricky with fan-out on write because the tweet ID has been copied to potentially millions of feed lists. We can't fan-out the deletion to all followers — that would have the same scaling issue as the original fan-out. Instead, I'd use a lazy deletion approach. When a tweet is deleted, we mark it as deleted in the tweets table (soft delete). When a user's feed is loaded and rendered, we filter out deleted tweets at read time. The tweet ID is still in their Redis feed list, but when we hydrate the IDs into full tweet objects, deleted ones are filtered. Over time, as feed lists age and older entries get evicted, the deleted references naturally disappear. For celebrity tweets that use fan-out on read, deletion is immediate — the tweet simply won't appear in the next query.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["soft_delete", "lazy_deletion", "feed_hydration"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's discuss feed ranking. Should the feed be purely chronological?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "feed_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "Pure chronological is simplest but not optimal for engagement. I'd add a lightweight ranking layer. When we fetch the candidate tweets — say 200 from the pre-computed feed plus celebrity tweets — we run them through a scoring function before returning the top 50 for the page. The score could be: base_score (recency) + engagement_boost (likes/retweets in the first hour, as a signal of quality) + affinity_score (how often this user interacts with the poster). The scoring is done at read time on the already-fetched data, so it adds minimal latency — just CPU computation. The ML-based scoring model can be more sophisticated over time, but the architecture supports it because we've separated candidate generation (fan-out) from ranking (read-time scoring).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_ranking", "engagement_scoring", "candidate_generation_ranking_separation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running short on time. Anything else you'd add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. Content moderation — tweets flagged by ML models or user reports should be filtered from feeds before delivery, not after. A CDN for media attachments — images and videos should be served from edge nodes, not our origin servers. Rate limiting on the posting API to prevent spam. And monitoring: I'd track fan-out lag (time from post to appearance in followers' feeds), feed load latency percentiles, cache hit rates on the feed Redis, and the celebrity-tweet merge overhead to make sure the hybrid approach isn't degrading read performance.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["content_moderation", "cdn", "rate_limiting", "monitoring"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Really strong interview. I particularly liked how you caught the celebrity problem yourself and immediately redesigned around it. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Unprompted self-correction on the celebrity fan-out problem — caught the flaw without interviewer intervention",
+      "Strong quantitative reasoning throughout with concrete calculations on fan-out timing and merge complexity",
+      "Clean separation of candidate generation and ranking enables future ML improvements"
+    ],
+    "weaknesses": [
+      "Initially proposed fan-out on write for ALL users without considering edge cases",
+      "Could have discussed geographic distribution for a global service",
+      "Limited discussion of data consistency guarantees across the hybrid approach"
+    ]
+  }
+}

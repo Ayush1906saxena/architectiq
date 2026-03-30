@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "staff",
+    "candidate_profile": "testing-focused",
+    "total_exchanges": 20,
+    "generation_id": "seed_229"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter, something that can protect APIs at scale. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few clarifications: Are we rate limiting per user, per API key, per IP, or some combination? What's the scale — how many unique clients and total requests per second? And are we building this as a standalone service or an embedded library?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_key", "qps", "architecture_style"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Rate limit per API key primarily, with optional per-IP overrides. 500K unique API keys, 2 million requests per second across the fleet. Standalone service that other services call. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Before diving into the design, I want to think about how we'll verify correctness. Rate limiting has subtle edge cases — clock drift, race conditions, off-by-one errors at window boundaries. My approach is to design the system and its test strategy simultaneously. Let me start with the algorithm.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["testing_strategy", "correctness", "edge_cases"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Makes sense. What algorithm would you use?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "rate_limiting_algorithm" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a sliding window log combined with a sliding window counter for efficiency. The pure log approach — storing each request timestamp — is accurate but memory-heavy at our scale. The counter approach splits time into fixed windows and interpolates. For 500K keys with, say, a 1-minute window, the counter approach needs about 500K * 16 bytes = 8MB in Redis. The log approach would need 500K * (avg_requests * 8 bytes), which could be gigabytes. I'll use the counter with weighted interpolation. Now, the first test I'd write: given a window of 60 seconds, if the previous window had 80 requests and the current window at 25% elapsed has 30 requests, the estimated count is 0.75 * 80 + 30 = 90. This is a pure unit test — no Redis, no network.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sliding_window", "token_bucket", "memory_estimation", "unit_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Walk me through the high-level architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "API services call our rate limiter via a thin gRPC client library. The rate limiter service is stateless — multiple instances behind a load balancer. State lives in a Redis cluster. Flow: client sends (api_key, endpoint) to rate limiter. The limiter runs a Lua script on Redis that atomically reads the current and previous window counters, computes the weighted sum, increments if allowed, and returns allow/deny plus remaining quota. The Lua script is critical for atomicity — without it, we'd have a read-then-write race condition. My integration test for this: spin up a real Redis in Docker, send exactly the limit number of requests, verify the next one is denied. Then send requests from 10 concurrent goroutines to verify no race conditions allow over-limit.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["grpc", "redis", "lua_script", "atomicity", "integration_testing", "race_condition"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you test the Lua script itself? That seems like a critical piece.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "testing_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "The Lua script gets three levels of testing. First, unit tests using a Redis mock that I can control deterministically — set specific counter values, specific timestamps, and verify the output. Second, property-based tests: generate random sequences of requests with random timestamps and verify invariants — the counter never exceeds the limit, the counter resets after a full window, and the weighted calculation is always between the two window counts. Third, mutation testing on the Lua script — I intentionally introduce bugs (change >= to >, remove the atomic increment, swap window weights) and verify that at least one test catches each mutation. If a mutation survives, I have a test gap.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["unit_testing", "property_based_testing", "mutation_testing", "lua_script"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Impressive rigor. What about testing at the system level — how do you know the whole thing works under real conditions?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "load_testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Load testing with specific scenarios. Scenario 1: steady state — 2M RPS evenly distributed across 500K keys, sustained for 30 minutes. I measure p99 latency of the rate limit check (target: under 5ms) and verify zero false allows. Scenario 2: hot key — one API key sends 100K RPS while others are normal. This tests Redis hot key handling. Scenario 3: ramp up — go from 0 to 2M RPS in 60 seconds, simulating traffic spikes. I'd use a tool like Vegeta or k6 for this. The acceptance criteria: at 2M RPS, the rate limiter adds no more than 5ms p99 latency, correctly enforces limits within a 1% tolerance, and uses less than 2GB of Redis memory.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["load_testing", "hot_key", "latency_target", "acceptance_criteria"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when Redis is down? How do you test for that?",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "chaos_testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is where chaos testing comes in. I'd use a framework like Chaos Monkey or Toxiproxy. Test cases: Redis primary goes down — verify the rate limiter fails open (allows requests) rather than blocking all traffic. Redis is slow — inject 500ms latency with Toxiproxy, verify the client library times out at 10ms and falls back to a local in-memory approximate rate limiter. Redis cluster split-brain — partition one node from the cluster, verify that the system doesn't double-count or lose counts significantly. Network jitter — random packet loss at 5%, verify that the rate limiter still functions within 10% accuracy. Each chaos test runs in a staging environment that mirrors production topology.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["chaos_testing", "fail_open", "toxiproxy", "fallback_strategy", "network_partition"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned failing open. Isn't that dangerous? An attacker could just take down Redis to bypass rate limiting.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "fail_open" }
+    },
+    {
+      "role": "candidate",
+      "content": "Excellent point. Fail-open is the default for availability, but we need layers. When Redis is down, the local in-memory rate limiter kicks in per server instance. It's less accurate — each server only sees its own traffic — but with 20 servers, each one enforcing 1/20th of the global limit gives a roughly correct aggregate. For critical endpoints like authentication, I'd fail closed — better to reject legitimate requests than allow a brute-force attack. The configuration is per-endpoint: normal APIs fail open, security-sensitive APIs fail closed. I'd test both modes explicitly: chaos test with Redis down, verify open endpoints still allow traffic, verify closed endpoints return 503.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fail_open", "fail_closed", "local_rate_limiting", "defense_in_depth"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle clock skew across your fleet of rate limiter instances?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "clock_skew" }
+    },
+    {
+      "role": "candidate",
+      "content": "Clock skew is subtle. Since all state is in Redis and the Lua script uses Redis's own TIME command for the current timestamp, the app server clocks don't matter — Redis is the single time source. But Redis cluster nodes can have clock skew between them. I'd mitigate this by using key-based routing so all operations for a given API key hit the same Redis node. For testing clock skew: I'd write a test that mocks Redis TIME to return values 100ms apart on consecutive calls, and verify the algorithm still produces correct results. I'd also add a monitoring check that compares Redis TIME across cluster nodes and alerts if drift exceeds 50ms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["clock_skew", "redis_time", "key_routing", "deterministic_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the deployment pipeline. How do you safely ship changes to a rate limiter that handles 2M RPS?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "deployment" }
+    },
+    {
+      "role": "candidate",
+      "content": "The CI pipeline runs in this order: unit tests (< 30 seconds), integration tests with Redis in Docker (< 2 minutes), property-based tests (< 5 minutes), then a shortened load test at 10% scale (< 10 minutes). If all pass, we deploy canary to one instance handling real traffic. The canary runs for 30 minutes while we compare its metrics — latency, accuracy, error rate — against the baseline fleet. If the canary's p99 latency is more than 10% worse, automatic rollback. If it passes, progressive rollout: 10%, 25%, 50%, 100% over 2 hours. The Lua script changes are the scariest — those get an additional shadow mode deployment where the new script runs alongside the old one but only the old one's result is used. We compare outputs and alert on divergence.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ci_pipeline", "canary_deployment", "progressive_rollout", "shadow_mode", "automated_rollback"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you test that rate limit configurations are correct — for example, that a new customer's limit is properly set?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "configuration_testing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Configuration is data, and data needs tests too. I'd store rate limit configs in a versioned config store — something like etcd or a git-backed config repo. Every config change triggers a validation suite: schema validation (limits must be positive integers, windows must be between 1 second and 1 hour), consistency checks (no API key has a per-endpoint limit higher than its global limit), and regression tests (golden file comparison — did this change accidentally modify an existing customer's limits?). For runtime verification, a synthetic test client continuously sends requests at exactly the configured limit for a test API key and verifies exactly 0% rejection. Then sends at 110% of the limit and verifies approximately 10% rejection.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["configuration_testing", "schema_validation", "golden_file_testing", "synthetic_monitoring"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great depth on testing. Let's zoom out — what does the overall system look like from a scaling perspective?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "scalability" }
+    },
+    {
+      "role": "candidate",
+      "content": "The rate limiter service scales horizontally — it's stateless. At 2M RPS, with each instance handling about 50K RPS, I need 40 instances. Redis cluster with 6 primary nodes and 6 replicas handles the state — each node manages about 83K keys. The bottleneck is Redis network I/O, not memory. Each rate check is a small Lua script execution — about 0.1ms. So each Redis node handles about 10K operations per slot, well within Redis's capability of 100K+ ops/sec. I'd load test at 3x expected capacity (6M RPS) to verify the system has headroom and to identify which component becomes the bottleneck first.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["horizontal_scaling", "redis_cluster", "bottleneck_analysis", "headroom_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running low on time. Any final thoughts on the testing strategy?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Two final pieces. First, I'd maintain a test environment that continuously replays production traffic (anonymized) against the rate limiter. This catches edge cases that synthetic tests miss — unusual API key patterns, bursty traffic, etc. Second, I'd track test coverage not just by code lines but by failure modes. I'd maintain a failure mode catalogue — Redis down, Redis slow, clock skew, hot key, config error, Lua script bug, network partition — and ensure each one has at least one dedicated test. When a production incident happens, the first action after resolution is writing a test that reproduces it.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["traffic_replay", "failure_mode_catalogue", "incident_driven_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. Your testing rigor is impressive. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 6,
+      "scalability": 7,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional testing strategy spanning unit, integration, property-based, chaos, and load testing",
+      "Strong understanding of failure modes and how to verify system behavior under each",
+      "Practical deployment pipeline with canary, shadow mode, and progressive rollout"
+    ],
+    "weaknesses": [
+      "Could have explored alternative algorithms (token bucket, leaky bucket) more thoroughly",
+      "Multi-region rate limiting was not addressed",
+      "Client library design and SDK considerations were not discussed"
+    ]
+  }
+}

@@ -1,0 +1,199 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "staff",
+    "candidate_profile": "algorithm-comparison",
+    "total_exchanges": 22,
+    "generation_id": "seed_349"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter. The system should support rate limiting for an API gateway handling millions of requests per second. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few clarifying questions. What kinds of rate limiting do we need? Per-user, per-IP, per-API-key, or global? What's the scale — how many unique clients and total QPS? Do we need hard limits (strictly enforce) or soft limits (allow small bursts)? And what's the acceptable latency overhead for the rate limiting check?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting_scope", "qps", "latency", "hard_vs_soft_limits"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Per-API-key rate limiting. 10 million unique API keys, 5 million requests per second total. We need reasonably strict enforcement but small bursts are acceptable. Rate check latency should be under 1ms. I'd like you to walk through multiple algorithms and compare them.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "rate_limiting_algorithms" }
+    },
+    {
+      "role": "candidate",
+      "content": "Perfect. Let me walk through four major rate limiting algorithms, analyzing each in depth. Let me start with the Token Bucket algorithm since it's probably the most widely used.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Go ahead.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Token Bucket works like this: each API key has a bucket that holds tokens. Tokens are added at a steady refill rate, and each request consumes one token. If the bucket is empty, the request is rejected. Two parameters control behavior: bucket_capacity (max burst size) and refill_rate (sustained rate). For example, if a client is allowed 100 requests per second with burst up to 150: refill_rate = 100 tokens/sec, bucket_capacity = 150. The math for refill: when a request arrives at time T, tokens = min(bucket_capacity, previous_tokens + refill_rate * (T - last_refill_time)). For our 10M keys, storage per key is: 3 fields — token_count (8 bytes float), last_refill_time (8 bytes), bucket_capacity (4 bytes) — total ~20 bytes per key. 10M * 20 bytes = 200 MB. Fits easily in Redis.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "refill_rate", "burst_handling", "memory_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What are the pros and cons of Token Bucket?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Pros: it naturally handles bursts — a client that's been idle accumulates tokens and can burst up to bucket_capacity. The two parameters (rate and capacity) give fine-grained control. Implementation is simple — just two values to store per key, and the refill is computed lazily on each request (no background thread needed). It's also the algorithm used by AWS API Gateway and Stripe. Cons: it allows a client to send bucket_capacity requests instantly, which could stress downstream services. If bucket_capacity = 150 and a client sends 150 requests in 1ms, that's a 150K effective rate momentarily. Also, in a distributed setting, if you have multiple rate limiter nodes, each node might have its own token state — you need a centralized store like Redis or accept some imprecision.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "burst_handling", "distributed_consistency"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now walk me through Leaky Bucket.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "leaky_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Leaky Bucket is like a FIFO queue with a fixed processing rate. Requests enter the bucket (queue), and they're processed (leaked) at a constant rate. If the bucket (queue) is full, new requests are dropped. Parameters: bucket_size (queue capacity) and leak_rate (processing rate). For 100 requests/sec with queue size 50: requests are dequeued at exactly 100/sec. If 200 requests arrive in one second, 100 are processed immediately, 50 are queued, and 50 are rejected. The key difference from Token Bucket: Leaky Bucket smooths out traffic perfectly — the output rate is always exactly leak_rate, never bursty. It's like a traffic shaper rather than a policer. Storage: queue pointer + size + rate = ~16 bytes per key. But the actual queue of pending requests needs memory too: 50 entries * 64 bytes per entry = 3,200 bytes per active queue. Worst case: 10M * 3.2KB = 32 GB. That's much more expensive.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leaky_bucket", "traffic_shaping", "queue_management", "memory_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting point about memory. What are the practical issues with Leaky Bucket?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "leaky_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several practical issues. First, the queue needs active processing — you need a background worker draining each bucket at the leak rate. With 10M keys, that's infeasible to do per-key. You'd need to batch process, which adds complexity. Second, it introduces latency — requests sit in the queue waiting to be processed, so even allowed requests might experience 50-500ms of delay. For an API gateway where we just want to accept or reject, that added latency is unacceptable. Third, the 32 GB memory footprint is 160x more than Token Bucket. In practice, Leaky Bucket is better suited for traffic shaping at the network level (like Linux tc) rather than API rate limiting. Most API gateways don't use it for this reason.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leaky_bucket", "latency_impact", "practical_limitations", "traffic_shaping"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Makes sense. Now let's look at Fixed Window Counter.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "fixed_window" }
+    },
+    {
+      "role": "candidate",
+      "content": "Fixed Window Counter divides time into fixed intervals — say 1-second windows. For each API key, you maintain a counter for the current window. If counter >= limit, reject. When a new window starts, the counter resets to zero. Storage is minimal: just the counter (4 bytes) and window_start (8 bytes) per key. 10M keys * 12 bytes = 120 MB. Implementation in Redis is elegant: use INCR with EXPIRE. Key format: `rate:{api_key}:{window_timestamp}`. INCR increments atomically, EXPIRE auto-cleans old keys.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fixed_window", "redis_implementation", "memory_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned a boundary problem earlier with fixed windows. Explain that.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "fixed_window" }
+    },
+    {
+      "role": "candidate",
+      "content": "The boundary problem is the critical flaw. Consider a limit of 100 requests per second. A client sends 100 requests at second 0.9 (end of window 0) and 100 requests at second 1.1 (start of window 1). Both windows see exactly 100 requests — both pass. But in the 200ms span from 0.9 to 1.1, the client effectively sent 200 requests — 2x the intended limit. The downstream service sees a 1,000 req/sec burst within that 200ms window. This is catastrophic for services that are sensitive to instantaneous load. The worst case is always 2x the configured limit at any window boundary.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["fixed_window", "boundary_problem", "burst_vulnerability"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "So how does Sliding Window Log solve this?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "sliding_window_log" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sliding Window Log keeps a sorted set of timestamps for each request within the window. When a new request arrives: (1) remove all entries older than (now - window_size), (2) count remaining entries, (3) if count < limit, add the new timestamp and allow; otherwise reject. This eliminates the boundary problem entirely because the window slides with each request. In Redis, this maps to a sorted set: ZREMRANGEBYSCORE to purge old entries, ZCARD to count, ZADD to insert. However, the memory cost is significant. Each timestamp is 8 bytes, plus sorted set overhead (~40 bytes per entry in Redis). For a client with a 100/sec limit: 100 entries * 48 bytes = 4,800 bytes per active key. For 10M keys: 10M * 4,800 = 48 GB. That's 400x the Fixed Window cost.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sliding_window_log", "sorted_set", "memory_cost", "boundary_elimination"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "48 GB is expensive. Is there a compromise?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "sliding_window_counter" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes — the Sliding Window Counter, which is a hybrid. It combines two fixed window counters with a weighted average. It keeps the counter for the current window and the previous window. When a request arrives, it computes: weighted_count = previous_window_count * overlap_percentage + current_window_count. For example, if we're 30% into the current 1-second window: weighted_count = prev_count * 0.7 + current_count * 1.0. If weighted_count >= limit, reject. This uses only 24 bytes per key (two counters + two timestamps) — 240 MB for 10M keys. It's not perfect — the accuracy depends on traffic distribution within windows — but in practice it reduces the boundary burst from 2x to about 1.2x-1.5x. Cloudflare uses this approach.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["sliding_window_counter", "weighted_average", "accuracy_tradeoff", "practical_usage"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Now you've analyzed all four. Which one would you pick for our system and why?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "algorithm_selection" }
+    },
+    {
+      "role": "candidate",
+      "content": "For our API gateway at 5M req/sec with 10M keys, I'd pick Token Bucket. Here's my reasoning: (1) Memory efficiency — 200 MB total, fits in a single Redis instance with room to spare. (2) Burst-friendly — APIs should allow small bursts for good developer experience. A client that's been idle shouldn't be penalized for a burst of legitimate traffic. (3) No boundary problem — unlike Fixed Window, there's no edge case where clients get 2x their limit. (4) Simple implementation — two values per key, lazy refill computation, no background workers. (5) Industry proven — used by AWS, Stripe, and GitHub for their API rate limiting. The main downside is allowing bursts, but we control that via bucket_capacity. I'd set bucket_capacity to 1.5x the per-second rate as a reasonable default.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket", "algorithm_selection", "memory_efficiency", "burst_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good choice. Now how do you make this distributed? We have multiple gateway nodes that all need to enforce the same limits.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Two main approaches. First approach: centralized — all gateway nodes call Redis for every rate limit check. The token bucket operation (read tokens, compute refill, decrement, write back) needs to be atomic. I'd use a Lua script in Redis to do this in a single round trip. At 5M req/sec and say 20 gateway nodes, Redis handles 5M operations/sec. A single Redis instance can do about 200K-500K ops/sec, so we'd need a Redis Cluster with at least 15-20 shards, partitioned by API key. Latency: Redis RTT is ~0.2-0.5ms within the same datacenter, which fits our 1ms budget. Second approach: local rate limiting with synchronization. Each gateway maintains a local token bucket with 1/N of the quota (N = number of gateways). Periodically (every 100ms), nodes sync their counts with a central store. This is faster (no network call per request) but less accurate — a client could get up to N*bucket_capacity burst if they hit all nodes simultaneously.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_rate_limiting", "redis_lua_script", "redis_cluster", "local_rate_limiting", "synchronization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Which distributed approach would you recommend?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a hybrid. For the majority of clients (those with moderate traffic), use the centralized Redis approach — the latency is acceptable and accuracy is perfect. For extremely high-volume clients (top 1% that generate 50%+ of traffic), use local rate limiting with periodic sync, because the per-request Redis call becomes a bottleneck for those specific keys (hot key problem). The sync interval determines accuracy: at 100ms sync, we could over-admit by up to 100ms * rate_per_gateway = 100ms * (100/20) = 0.5 extra requests per gateway, or 10 extra requests system-wide. That's within our tolerance for soft limits. For the Lua script, the atomic operation is: local tokens = math.min(capacity, redis.call('GET', key) + refill_rate * elapsed); if tokens >= 1 then tokens = tokens - 1; redis.call('SET', key, tokens); return 1; else return 0; end.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hybrid_approach", "hot_key_problem", "lua_script", "sync_accuracy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when Redis is down? The rate limiter is on the critical path.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is the classic safety vs availability trade-off. Option A: fail open — if Redis is unreachable, allow all requests through. This keeps the API available but removes rate limiting protection. Good for most APIs where availability matters more. Option B: fail closed — reject all requests. This protects downstream services but causes total outage. Only appropriate for payment or security-sensitive APIs. I'd implement fail open as the default with a local fallback: each gateway maintains an approximate in-memory token bucket that activates when Redis is unreachable. This local limiter uses conservative limits (50% of the actual quota) to provide some protection without centralized coordination. Additionally, I'd have Redis Sentinel or Cluster with automatic failover — typical failover time is 10-30 seconds, during which the local limiters handle things.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["failure_handling", "fail_open", "fail_closed", "local_fallback", "redis_sentinel"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. How do you communicate rate limit status back to the client?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Following the IETF draft standard (RateLimit header fields), every response includes: X-RateLimit-Limit: 100 (the configured limit), X-RateLimit-Remaining: 73 (tokens left), X-RateLimit-Reset: 1640000000 (Unix timestamp when bucket is full again). When rate limited, return HTTP 429 Too Many Requests with a Retry-After header indicating when the client can retry. The response body includes a JSON error: {\"error\": \"rate_limit_exceeded\", \"retry_after_ms\": 250}. This lets well-behaved clients implement exponential backoff. For our Token Bucket, the Retry-After calculation is: time_until_one_token = (1 - current_tokens) / refill_rate. If current_tokens = 0 and refill_rate = 100/sec, retry after 10ms.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "rate_limit_headers", "http_429", "retry_after", "ietf_standard"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent coverage. Anything you'd add to wrap up?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few operational concerns. First, monitoring: track the rate of 429 responses per API key, overall rejection rate, Redis latency percentiles, and local fallback activation. Alert if rejection rate exceeds baseline by 3x (might indicate a DDoS). Second, configuration: rate limits should be configurable per API key tier (free=10/sec, pro=100/sec, enterprise=1000/sec) stored in a config service, not hardcoded. Third, I'd add a rate limiting bypass for internal services using a trusted header, validated by the gateway. Finally, for compliance, log all rate-limited requests with timestamps for audit purposes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["monitoring", "tiered_limits", "configuration_management", "audit_logging"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great interview. Your algorithm comparison was thorough and your final recommendation was well-justified. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 79,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 8,
+      "api_design": 8,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 9,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Deep algorithmic analysis — compared four algorithms with concrete math for memory, accuracy, and performance",
+      "Excellent trade-off reasoning on every algorithm choice with quantitative backing",
+      "Practical hybrid distributed design that addresses the hot key problem"
+    ],
+    "weaknesses": [
+      "Could have discussed multi-region rate limiting and clock synchronization issues",
+      "Didn't cover rate limiting for different time windows (per-second, per-minute, per-day) simultaneously"
+    ]
+  }
+}

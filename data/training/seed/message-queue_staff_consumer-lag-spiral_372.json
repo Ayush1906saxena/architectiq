@@ -1,0 +1,130 @@
+{
+  "metadata": {
+    "problem_id": "message-queue",
+    "level": "staff",
+    "candidate_profile": "consumer-lag-spiral",
+    "total_exchanges": 22,
+    "generation_id": "seed_372"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed message queue — think Kafka. Today I want to focus on a specific operational nightmare: consumer lag spirals. But first, give me the architecture.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "message_queue_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll model this on Kafka's architecture. Messages are published to topics, which are divided into partitions. Each partition is an append-only log stored on broker nodes with configurable replication factor. Consumer groups subscribe to topics — each partition is assigned to exactly one consumer in the group. Consumers track their offset — their position in the log. Producers write at the tail, consumers read from their offset. If a consumer can't keep up with the production rate, the gap between the latest offset and the consumer's offset grows — that's consumer lag.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka_architecture", "partition", "consumer_group", "consumer_offset", "consumer_lag"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now here's the scenario: you have an order processing pipeline. Orders come into a Kafka topic at 10,000 messages per second. Your consumer group normally processes them at 12,000 per second — comfortable headroom. But a deployment yesterday added a new feature that makes processing 20% slower. Now your consumers process at 9,600 per second. You're falling behind by 400 messages per second. It's been 2 hours. What's the situation?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "consumer_lag" }
+    },
+    {
+      "role": "candidate",
+      "content": "After 2 hours, the lag is 400 messages/second times 7,200 seconds = 2.88 million messages behind. At the current deficit rate, the lag is growing linearly. The consumer is processing messages that are about 5 minutes old. But here's where it gets worse: the order processing involves looking up product inventory, customer data, and pricing. Those lookups were designed for current data. Now we're processing messages from 5 minutes ago. Some of those orders reference inventory that's already been sold by newer orders, or prices that have changed. The processing logic might need to handle more conflicts, retries, or validation failures — all of which make processing slower.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lag_calculation", "stale_data_processing", "cascading_slowdown"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly. The processing is getting slower because the data is stale. Each message takes longer because it's more likely to hit conflicts. Walk me through how this becomes a spiral.",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "lag_spiral" }
+    },
+    {
+      "role": "candidate",
+      "content": "The spiral works like this. At 5 minutes behind, maybe 5% of orders hit inventory conflicts, adding 10% to average processing time. Now we're processing at 8,700/sec instead of 9,600. The lag grows faster — 1,300 messages/sec deficit instead of 400. Within another hour, we're 30 minutes behind. At 30 minutes behind, 20% of orders hit conflicts, maybe 15% reference data that requires extra database lookups to validate. Processing drops to 7,500/sec. Deficit is 2,500/sec. Now the lag is growing quadratically, not linearly. In another hour, we could be 2-3 hours behind, and by that point, a large fraction of messages require expensive reconciliation. This is the death spiral — each increment of lag makes processing slower, which increases lag faster.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["lag_spiral", "quadratic_growth", "conflict_amplification", "death_spiral"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good description. What are the secondary effects? What else breaks?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "secondary_effects" }
+    },
+    {
+      "role": "candidate",
+      "content": "Many things. First, memory pressure: the consumer might be accumulating in-flight messages, database connections, and retry buffers. JVM garbage collection pauses increase, causing stop-the-world events that make processing even slower. Second, database load: stale data processing triggers more database reads and writes — conflict resolution, re-validation queries. The database that was handling 10K queries/sec is now handling 25K from all the retries. It slows down, which makes consumers slower. Third, downstream systems: anything that depends on processed orders — shipping, inventory, notifications — is also delayed. If the shipping system has its own timeout waiting for order confirmation, those orders might fail entirely. Fourth, Kafka retention: if you have a 24-hour retention policy and lag reaches 24 hours, messages start getting deleted before they're consumed. Now you're losing data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["memory_pressure", "gc_pauses", "database_amplification", "downstream_delays", "retention_expiry", "data_loss"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You're 2 hours behind and falling further. You get paged. What do you do right now?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "immediate_response" }
+    },
+    {
+      "role": "candidate",
+      "content": "Immediate triage. Step 1: assess if we can quickly revert the deployment that caused the 20% slowdown. If it's a simple feature flag, disable it. That restores processing to 12K/sec and we start eating into the 2.88M message backlog at a rate of 2K/sec — roughly 24 minutes to catch up. Step 2: if reverting isn't possible, add more consumers. If each consumer handles 1,200 messages/sec and we currently have 8 consumers on 8 partitions, we're capped — Kafka limits one consumer per partition per group. We'd need to add more partitions temporarily, which is a disruptive operation. Alternative: spin up a second consumer group that processes the backlog in parallel with different partition assignments. Step 3: if neither works, prioritize. Not all orders are equal — identify high-value or time-sensitive orders and process them first. Skip or defer low-priority messages.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rollback", "consumer_scaling", "partition_constraint", "message_prioritization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You can't revert — the new feature is already serving customers and some orders depend on it. And you can't easily add partitions. What else?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "alternative_recovery" }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, then we need to make the current consumers faster. First, identify the bottleneck. Profile the consumer: is it CPU-bound, I/O-bound, or waiting on external services? If it's waiting on database queries for inventory checks, can we batch the lookups? Instead of checking inventory for each message individually, batch 100 messages, fetch all their inventory in one query. That could dramatically reduce per-message overhead. Second, for the stale-data problem specifically: instead of processing old messages with current validation logic, can we short-circuit the conflict detection? For messages older than X minutes, skip the real-time inventory check and mark them for async reconciliation later. Process them quickly and fix any issues in a subsequent pass.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["profiling", "batch_processing", "short_circuit_validation", "async_reconciliation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting — the idea of processing stale messages differently. But how do you decide which messages to short-circuit and which need full processing?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "message_classification" }
+    },
+    {
+      "role": "candidate",
+      "content": "Classify by message age and business impact. Messages less than 1 minute old get full processing — they're still relatively fresh. Messages between 1 and 30 minutes old get lightweight processing: skip inventory reservation (it's likely stale anyway), process the order optimistically, and queue a reconciliation event to verify inventory after the fact. Messages older than 30 minutes get even more aggressive: check if a newer message for the same order ID exists in the topic. If so, skip the old message entirely — the newer one supersedes it. This requires a lookahead buffer or a Bloom filter of recent order IDs. For truly ancient messages — hours old — we might need to discard and regenerate them from the source system.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["age_classification", "optimistic_processing", "message_deduplication", "bloom_filter", "message_compaction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's talk prevention. How do you design the system so this lag spiral can't happen in the first place?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "prevention" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several layers of prevention. First, capacity headroom: design for consumers to process at 2x the expected peak, not 1.2x. If peak is 10K/sec, ensure consumers can handle 20K. This absorbs deployment slowdowns. Second, processing time budgets: each message gets a maximum processing time of, say, 100ms. If it exceeds that, it's fast-failed to a dead letter queue for retry rather than blocking the main pipeline. Third, automated lag alerts with automatic scaling. If lag exceeds 10K messages, alert. If it exceeds 100K, automatically add consumer instances (assuming we've pre-provisioned enough partitions). Fourth, deploy pipeline code changes with consumer lag as a rollback trigger. If lag doubles within 30 minutes of a deployment, auto-rollback.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_headroom", "processing_budget", "dead_letter_queue", "auto_scaling", "deployment_canary"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the design of the processing logic itself? How do you make it resilient to stale data?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "stale_data_resilience" }
+    },
+    {
+      "role": "candidate",
+      "content": "Design the consumer to be tolerant of staleness by default. First, use event timestamps, not system time, for business logic. If a message says 'ordered at 2:00 PM', use 2:00 PM as the reference time for pricing and availability — not the current time when we're processing it. Second, separate hot-path from cold-path processing. The hot path does minimum viable work: validate, persist the order, ack the message. Heavy work like inventory reservation, fraud detection, and notification happen asynchronously through separate, independently-scalable consumers. If the hot path consumer falls behind, at least orders are captured. Third, use optimistic concurrency: assume operations will succeed, process quickly, and handle conflicts as exceptions rather than preventing them upfront.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["event_time_processing", "hot_cold_path_separation", "optimistic_concurrency", "async_processing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent interview. You demonstrated strong understanding of the lag spiral dynamics and practical recovery and prevention strategies. The age-based message classification was a particularly creative approach. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 76,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 6,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 8
+    },
+    "strengths": [
+      "Excellent quantitative analysis of the lag spiral with concrete numbers at each stage",
+      "Creative age-based message classification for differentiated processing",
+      "Strong separation of hot-path and cold-path processing for resilience"
+    ],
+    "weaknesses": [
+      "Didn't discuss monitoring dashboards or what specific metrics to track for early detection",
+      "Kafka partition scaling limitations were mentioned but not fully addressed",
+      "Data consistency guarantees during optimistic processing were not specified"
+    ]
+  }
+}

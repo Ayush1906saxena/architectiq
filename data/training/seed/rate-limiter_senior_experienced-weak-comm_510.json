@@ -1,0 +1,133 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "senior",
+    "candidate_profile": "experienced_weak_communicator",
+    "total_exchanges": 22,
+    "generation_id": "seed_510"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter for a high-traffic API. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Yeah so like, the thing with rate limiters is, it depends on where in the stack you put them. Because if you're doing L4 rate limiting it's different from L7. And then there's the whole thing with — sorry, let me back up. How many requests per second total? And is this internal or external?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["l4_vs_l7", "internal_vs_external"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good distinction on L4 vs L7. This is L7 — application-level rate limiting at the API gateway. 1 million requests per second, 20 gateway instances, per-API-key limits. Walk me through your design.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "OK so the algorithm, right. I've implemented token bucket before in production — it's actually really elegant. The bucket holds N tokens, refills at rate R. You check if there's a token, decrement, allow. If empty, reject. The state is just two values: token count and last refill timestamp. On each request you compute elapsed time, add proportional tokens capped at N, then try to decrement. The whole thing can be done atomically in Redis with a Lua script. I wrote one at my last company — it was like 20 lines. Anyway the thing is, there's also sliding window which I — actually wait, should I talk about the algorithm first or the architecture?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["token_bucket", "refill_rate", "atomic_lua_script", "sliding_window"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You clearly know the algorithms. Let's focus — start with the architecture, then we'll go deep where needed.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, so. Gateway gets a request, extracts the API key from the header, calls the rate limiter. Rate limiter checks Redis. Redis runs the Lua script. Returns allow or deny. Gateway responds. That's the hot path. But the interesting part — at my last company we found that the Redis round-trip was like 0.5ms p50 but 3ms p99 because of — well, it was actually a network issue, not Redis itself. Anyway. The point is, for 1M RPS across 20 gateways, that's 50K per gateway. Each gateway calls Redis... actually wait, if every request hits Redis that's 1M ops/sec on Redis. A single Redis does maybe 150K. So we need at least 7 Redis nodes. Shard by API key hash.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["request_flow", "redis_latency", "redis_throughput", "sharding", "ops_per_node"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. You mentioned a production experience with p99 latency. Can you elaborate on that and how you'd avoid it here?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "latency_optimization" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yeah so at my last company — it was an ad tech platform, high QPS — we had Redis in a different AZ from the gateways. The cross-AZ RTT added 1-2ms. We moved Redis to the same AZ, which helped. But then we had a different problem: some Lua scripts were touching multiple keys and causing — um, well basically. The fix was: local rate limiting. We put an in-process token bucket on each gateway. The local bucket handles the fast path. Only when the local bucket is near the limit — say 80% consumed — do we check Redis for the global count. This cut Redis calls by 90%. The local bucket has a fraction of the global limit — like 1/20th on each of 20 gateways. But traffic isn't evenly distributed, so we'd dynamically adjust the local quota based on observed traffic share.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cross_az_latency", "local_rate_limiting", "threshold_sync", "dynamic_quota", "traffic_aware_adjustment"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The dynamic quota adjustment is a great insight from real experience. How does that work concretely?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "dynamic_quota" }
+    },
+    {
+      "role": "candidate",
+      "content": "So each gateway tracks its traffic share per API key over a sliding window — like the last 60 seconds. If gateway A sees 60% of key X's traffic, it gets 60% of key X's limit as its local quota. The global limit is 1000/min, gateway A gets 600/min locally. This adapts to sticky sessions, geographic routing patterns, whatever. The gateways report their counts to Redis every second, and Redis responds with the updated global count and the per-gateway quota adjustment. It's basically — hmm, it's like a feedback loop. The gateways are doing local enforcement with periodic global reconciliation.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["traffic_share_tracking", "dynamic_quota_calculation", "periodic_reconciliation", "feedback_loop"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent production insight. Now, what algorithm do you recommend — you mentioned both token bucket and sliding window?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "algorithm_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "So this is where — OK let me think about this structured. Token bucket: great for per-second rate limiting because it naturally handles bursts. A client that's been quiet accumulates tokens and can burst up to the bucket capacity. Sliding window counter: better for per-minute and per-hour limits because the interpolation between windows gives smooth enforcement without the burst behavior. For our use case with both 1000/min and 10K/hour limits, I'd use token bucket for the per-minute (allows short bursts which clients expect) and sliding window counter for per-hour (where we want smooth enforcement). Two checks per request, both must pass.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_bucket_for_bursts", "sliding_window_for_smooth", "hybrid_per_window_type", "dual_check"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Clear recommendation. What happens when Redis goes down?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "redis_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "This happened to us in production. The — well, OK. Redis primary went down, sentinel promoted the replica, but there was a 4-second window where all rate limiting was gone. In those 4 seconds, a malicious client hammered the API and caused a downstream cascade. After that, we implemented: fail-open by default but with local enforcement as fallback. If Redis is unreachable, each gateway enforces limit/N locally. It's not perfect — a client hitting all gateways gets N× the limit — but it prevents the total loss of rate limiting. We also added a circuit breaker on the Redis connection — if it's down, stop trying for 5 seconds to avoid connection storms. And we pre-configured the Redis sentinel with a faster failover timeout.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["production_incident", "sentinel_failover", "fail_open_local_fallback", "circuit_breaker", "connection_storms", "failover_tuning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great war story. How do you return rate limit information to the client?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "client_communication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Headers — X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, and Retry-After on 429s. The thing people miss is — the Remaining value should reflect the most restrictive active rule. If the per-minute limit has 500 remaining but the per-hour limit has only 10 remaining, show 10. Otherwise clients think they have room and get surprised by the hourly limit.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limit_headers", "most_restrictive_rule", "client_surprise_prevention"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's a detail most candidates miss — the most restrictive rule. Good. We're almost done — anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh there's so much — um, let me pick the important ones. Monitoring: track rejection rate per client, Redis hit rate vs local hit rate, and p99 of the rate limiting overhead (should be <1ms). Allow dynamic limit changes via a config service without gateway restart. And consider — this is something I learned the hard way — an allowlist for internal services. Your own monitoring system shouldn't get rate-limited by your own rate limiter. That caused an outage once.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["monitoring", "dynamic_config", "allowlist", "internal_services", "self_rate_limit_incident"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The internal allowlist point is excellent operational wisdom. Overall, strong interview — deep production experience and good algorithmic knowledge. Your communication was a bit scattered at times but the substance was there. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 62,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 6,
+      "caching_strategy": 8,
+      "scalability": 8,
+      "failure_handling": 8,
+      "communication": 4
+    },
+    "strengths": [
+      "Deep production experience — Redis failover incident, dynamic quota adjustment, and internal allowlist are real operational wisdom",
+      "Excellent local rate limiting design with traffic-aware dynamic quota rebalancing",
+      "Strong algorithm selection — hybrid token bucket + sliding window with clear reasoning per window type",
+      "Most-restrictive-rule header detail shows client-facing API maturity"
+    ],
+    "weaknesses": [
+      "Communication was disorganized — jumped between topics, started sentences and abandoned them, frequent tangents",
+      "Initial response was unfocused — mentioned L4/L7 without the interviewer asking",
+      "Didn't structure the answer — required interviewer to redirect multiple times",
+      "No discussion of the rate limit configuration system or self-service portal",
+      "Missing distributed consistency analysis — didn't formally discuss the accuracy bounds of the local+global approach"
+    ]
+  }
+}

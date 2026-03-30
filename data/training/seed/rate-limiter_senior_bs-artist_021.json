@@ -1,0 +1,192 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "senior",
+    "candidate_profile": "bs-artist",
+    "total_exchanges": 22,
+    "generation_id": "seed_021"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter for a large-scale API platform. What are your initial thoughts and questions?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Yeah absolutely, I've built rate limiters multiple times in production. The key is using Redis with a sliding window approach — it's the industry standard. Before we dive in, let me clarify: are we talking about a rate limiter as a standalone service or embedded in an API gateway?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["redis_caching", "sliding_window", "api_gateway"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Standalone service that API gateways can call. 100,000 requests per second total, rate limiting per API key at configurable limits. Walk me through your design.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Perfect. So the architecture is pretty straightforward — I've done this before. We put a Redis cluster behind a thin service layer. When a request comes in, we check the sliding window in Redis. If the count is under the limit, we allow it; otherwise we return rate-limited. The sliding window is much better than fixed window because it doesn't have the boundary problem. We use Redis because it's in-memory and blazing fast — sub-millisecond latency.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["redis_caching", "sliding_window", "fixed_window_counter"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You keep mentioning sliding window in Redis. Can you show me the specific Redis commands you'd use to implement a sliding window rate limiter?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "sliding_window" }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure, so we'd use... well, the basic idea is you store timestamps of each request in Redis. You use a sorted set — ZADD to add the timestamp, and then you count how many entries are within the window. If the count exceeds the limit, you reject. It's all very standard.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["sliding_window", "redis_sorted_set"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Okay, walk me through the exact Redis commands. What's the sequence of ZADD, ZRANGEBYSCORE, ZCARD — whatever you'd use? Be specific.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "sliding_window" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, so you'd do a ZADD with the current timestamp as both the score and member. Then you'd do a... ZCOUNT? Or maybe ZRANGEBYSCORE to get entries within the last 60 seconds. Actually, you'd want to remove old entries first with ZREMRANGEBYSCORE to clean up entries outside the window. Then ZCARD to count what's left. Something like that — the exact commands might vary slightly in implementation.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["sliding_window", "redis_sorted_set"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's four separate Redis commands — ZREMRANGEBYSCORE, ZADD, ZCARD, and potentially EXPIRE. At 100K requests per second, those four commands aren't atomic. What happens if two requests for the same user interleave between the ZCARD and the ZADD?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "race_condition" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, so that's where you use a Lua script. You wrap all the Redis commands in a Lua script so they execute atomically. Lua scripts in Redis are atomic by design — single-threaded execution model.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["lua_scripting", "atomicity"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Why Lua specifically? Why not use Redis transactions with MULTI/EXEC?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "lua_scripting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Well, Lua is just better for this use case. MULTI/EXEC has limitations — it's not really designed for this kind of logic. Lua is more flexible and powerful. It's the recommended approach.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["lua_scripting", "redis_transactions"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Can you be more specific about those limitations? Why can't MULTI/EXEC work here?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "lua_scripting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, so MULTI/EXEC in Redis is like a transaction, but... I think the issue is that you can't use the result of one command as input to another command within the transaction? Like, you can't read the ZCARD result and then conditionally decide whether to ZADD. It's all queued up and executed at once without branching logic. Lua lets you have that conditional logic.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["redis_transactions", "lua_scripting"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's actually correct — MULTI/EXEC doesn't support conditional logic based on intermediate results. Good. Now, you mentioned you'd use a sorted set with timestamps. At 100 requests per minute per user, each user's sorted set has up to 100 members. With 10 million users, that's potentially 1 billion members across all sorted sets. What's the memory impact?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Well, Redis is very memory-efficient. It uses compressed data structures internally. And not all 10 million users are active simultaneously — the sorted sets auto-expire. So the actual memory usage would be much lower. I'd say a few gigabytes at most — easily handled by a Redis cluster.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["capacity_estimation", "redis_caching"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's do the math. Each sorted set member is a timestamp — 8 bytes for the score plus 8 bytes for the member, plus Redis overhead of about 40 bytes per entry. That's roughly 56 bytes per entry. If 1 million users are active with 50 entries each on average, that's 2.8GB. You're right that it's manageable. But have you considered the alternative — sliding window counters instead of sliding window logs?",
+      "annotation": { "action": "teach", "phase": "deep_dive", "target_concept": "sliding_window_counter" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yeah, sliding window counters are another approach. Instead of storing individual timestamps, you store counts in sub-windows. Like, for a 1-minute window, you'd have 60 one-second buckets. You sum up the buckets within the window. It uses less memory but it's an approximation. I prefer the sorted set approach for accuracy.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["sliding_window_counter", "sliding_window"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair. What about different rate limiting algorithms? How does token bucket compare to your sliding window approach?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Token bucket is great for allowing bursts. The user accumulates tokens over time and can spend them in bursts. Sliding window is more about enforcing a strict count within a time period. Token bucket is what AWS and most cloud providers use for their API rate limiting. For our use case, I'd actually say sliding window is better because we want strict limits, not bursty behavior.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["token_bucket", "sliding_window"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about distributed systems challenges. With a Redis cluster, what happens when you need to rate limit a user whose key is on a specific shard, but the request hits a different application server?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's not really a problem with Redis Cluster — it handles routing automatically. The client library knows which shard holds which key based on the hash slot. So any application server can talk to any Redis node, and the client handles routing. It's all transparent.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["redis_cluster", "hash_slot", "client_routing"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about network partitions? If one of your Redis nodes becomes unreachable from some app servers but not others?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "network_partition" }
+    },
+    {
+      "role": "candidate",
+      "content": "In that case, Redis Cluster handles failover automatically. It promotes a replica. There might be a brief period of inconsistency during failover — a few seconds — where rate limiting might not be accurate. But that's an acceptable trade-off. We can also fail open during that period — let requests through rather than blocking them.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["failover", "fail_open", "network_partition"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You've mentioned several times that you've built this before. Can you describe a specific challenge you encountered in a production rate limiter?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Yeah, so at my previous company we had issues with hot keys — certain API customers generating way more traffic than others, causing hot spots on specific Redis shards. We solved it by... implementing a local cache on each app server. A small in-memory counter that batches updates to Redis every 100ms instead of on every request. This reduced Redis traffic by 90% for hot users.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["hot_key", "local_caching", "batching"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That local batching approach introduces inaccuracy — with 10 app servers each batching locally for 100ms, a user could exceed their limit by up to 10x during each batch window. How did you handle that?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "local_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Well, in practice the inaccuracy wasn't that bad because... traffic distributes fairly evenly across servers. But yes, theoretically it's a concern. We accepted the trade-off for the performance benefit. For critical endpoints we'd still go to Redis directly.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["local_caching"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's wrap up. Summarize your design.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Distributed rate limiter using Redis Cluster as the backing store. Sliding window algorithm implemented with sorted sets — ZADD, ZREMRANGEBYSCORE, ZCARD — wrapped in a Lua script for atomicity. Configurable limits per API key stored in a separate config store. Rate limiter service sits between the API gateway and backend services. Fail open on Redis failures. Local batching for hot keys. Return 429 with Retry-After header when rate limited.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["redis_caching", "sliding_window", "lua_scripting", "fail_open", "api_gateway"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thank you for your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 35,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 3,
+      "capacity_estimation": 2,
+      "api_design": 4,
+      "database_design": 4,
+      "caching_strategy": 4,
+      "scalability": 4,
+      "failure_handling": 3,
+      "communication": 5
+    },
+    "strengths": [
+      "Knew the right vocabulary — sliding window, sorted sets, Lua scripts, token bucket",
+      "Eventually gave a correct explanation of why Lua is needed over MULTI/EXEC when pressed",
+      "Decent final summary that covered the main components"
+    ],
+    "weaknesses": [
+      "Couldn't produce the specific Redis commands confidently — was guessing at the sequence",
+      "Claimed Lua scripting as the answer but initially couldn't explain why Lua over MULTI/EXEC",
+      "No capacity estimation — interviewer had to do the math",
+      "Claims of production experience didn't hold up under scrutiny — local batching story fell apart when challenged",
+      "Consistently used vague language like 'industry standard' and 'recommended approach' without substantive reasoning"
+    ]
+  }
+}

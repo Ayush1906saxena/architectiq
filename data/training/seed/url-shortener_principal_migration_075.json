@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "principal",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_075"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We have a URL shortener that was built 5 years ago as part of a monolithic application. It works, but the monolith is being decomposed into microservices. The URL shortener handles 50,000 redirects per second and has 10 billion stored mappings. How would you migrate it to a new architecture with zero downtime?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Interesting — this is a migration problem, not a greenfield design. The hardest part isn't designing the new system — it's getting there safely. Before I propose anything, I need to understand the current system. What database is the monolith using? How is the URL shortener coupled to the rest of the monolith — does it share a database, share code, or both? And what's driving the migration — is it the URL shortener that's causing pain, or is it collateral damage from the broader monolith decomposition?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["migration_context", "coupling_analysis", "motivation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The monolith runs on a single large MySQL database. The URL shortener tables share the same MySQL instance with user accounts, billing, and 30 other features. The monolith is a Java application. The URL shortener code is deeply integrated — it uses shared ORM models and business logic. The migration is driven by the broader decomposition effort. The URL shortener itself is stable but it's blocking other teams from migrating because they share database tables.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "current_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "So the coupling is at both the code level and the data level. That's the hardest kind of migration. The database coupling is the critical path — other teams can't fully extract their services until the shared MySQL is decomposed. Let me outline the approach using the Strangler Fig pattern: gradually route traffic from the old system to the new system, feature by feature, until the old system can be decommissioned.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["strangler_fig", "code_coupling", "data_coupling"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the phases.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "migration_phases" }
+    },
+    {
+      "role": "candidate",
+      "content": "Phase 0 — Build the new service. Design the new URL shortener as a standalone microservice with its own database. I'd choose PostgreSQL or DynamoDB depending on the cloud strategy. The new service has clean APIs: POST /shorten, GET /{code}/redirect, GET /{code}/stats. This runs in parallel with the monolith, handling zero traffic initially. Fully tested, load tested, ready to go.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["new_service_design", "api_design", "load_testing"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Continue.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "migration_phases" }
+    },
+    {
+      "role": "candidate",
+      "content": "Phase 1 — Data migration. This is the scariest part. 10 billion rows needs careful handling. I would NOT do a big-bang data migration. Instead: Set up change data capture (CDC) on the MySQL url_mappings table using something like Debezium. Every insert, update, or delete in MySQL is streamed to the new service's database in near-real-time. Run a one-time backfill job to copy all existing 10 billion rows. This runs at a throttled rate — maybe 100K rows/second so we don't overload MySQL. After backfill, the CDC stream keeps the new database in sync. Verification: run a continuous comparison job that samples random rows from both databases and verifies they match. Track the mismatch rate — target zero.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdc", "debezium", "backfill", "data_verification", "throttling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How long does the backfill take at 100K rows/second for 10 billion rows?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "backfill_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "10 billion divided by 100K per second is 100,000 seconds, which is about 28 hours. So roughly a day and a half. During that time, the CDC stream ensures any new writes to the old system are also captured. After the backfill completes and CDC catches up, the new database should be an exact mirror. We'd verify with the sampling job for at least a week before proceeding.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["backfill_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What's Phase 2?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "traffic_migration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Phase 2 — Shadow traffic. We deploy a routing layer (could be an Envoy sidecar or an API gateway rule) that intercepts URL shortener requests. For redirect requests (the read path, which is 99% of traffic), we send the request to BOTH the monolith and the new service. The monolith's response goes to the user. The new service's response is compared but discarded. We log any discrepancies. This validates that the new service returns the same results as the old service under real production traffic — 50,000 requests per second. We run this for 1-2 weeks and fix any bugs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["shadow_traffic", "routing_layer", "production_validation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Doesn't shadow traffic double your load? You're making 50K requests to the monolith AND 50K to the new service.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "shadow_traffic_cost" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yes, it does. The new service is provisioned for it — that's expected. The monolith handles the same load it always has. The total infrastructure cost temporarily increases, but the redirect path is cheap (cache lookup + redirect). The alternative — switching traffic without validation — is far riskier. A few weeks of double-cost is cheap insurance against a botched migration that breaks 50K redirects per second. If cost is really a concern, we can shadow only 10% of traffic instead of 100%.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cost_of_validation", "risk_mitigation", "partial_shadow"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair point. What about Phase 3?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "traffic_cutover" }
+    },
+    {
+      "role": "candidate",
+      "content": "Phase 3 — Read traffic migration. Using the routing layer, we gradually shift read traffic (redirects) from the monolith to the new service. Start at 1%, monitor latency and error rates. If everything looks good, ramp to 5%, 10%, 25%, 50%, 100%. Each step has a bake time of at least 24 hours. Rollback plan: the routing layer can instantly send traffic back to the monolith. The monolith is still running and receiving CDC updates, so it has all the data. This phase is relatively low risk because the new service was validated in Phase 2.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["traffic_shifting", "canary_rollout", "rollback_plan"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "And write traffic?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "write_migration" }
+    },
+    {
+      "role": "candidate",
+      "content": "Phase 4 — Write traffic migration. This is the most delicate phase. We need to move URL creation (writes) from the monolith to the new service. The challenge is the transition period where writes could go to either system. My approach: dual-write. The routing layer sends write requests to the new service, which writes to its own database AND also writes to the MySQL table (for backward compatibility). The CDC stream is reversed — now the new service is the source of truth, and MySQL is the follower. Once all reads AND writes go to the new service, we can stop writing to MySQL. We keep the MySQL data around for a month as a safety net before dropping the tables.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dual_write", "source_of_truth", "write_migration", "safety_net"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the shared ORM models and business logic you mentioned? Other parts of the monolith might be reading the URL tables.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "code_coupling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Critical point. Before any data migration, I need to identify every consumer of the URL shortener tables in the monolith. This is an audit: grep the codebase for references to the URL tables and ORM models, check any reporting queries or cron jobs that touch these tables, and talk to the other teams. Any code that reads or writes URL data needs to be updated to call the new service's API instead. If an internal reporting job does a JOIN between url_mappings and the users table, that query needs to be refactored — the URL data comes from the new service's API, the user data from its own source. This refactoring might be the longest phase — it depends on how tangled the monolith is. In my experience, you always discover dependencies you didn't know about.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dependency_audit", "api_migration", "refactoring", "hidden_dependencies"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How long does this entire migration take, end to end?",
+      "annotation": { "action": "probe", "phase": "wrap_up", "target_concept": "timeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "Realistic timeline: Phase 0 (build new service): 6-8 weeks with a team of 3. Phase 1 (data migration + CDC): 3-4 weeks including backfill, verification, and bake time. Phase 2 (shadow traffic): 2-3 weeks. Phase 3 (read traffic migration): 2-3 weeks for the gradual rollout. Phase 4 (write traffic migration): 3-4 weeks including the dependency audit and refactoring. Decommission: 4 weeks of safety net then cleanup. Total: about 5-6 months. The biggest variable is the dependency audit in Phase 4 — if the monolith is really tangled, that alone could take 2-3 months. I'd staff this with a dedicated migration team of 3-4 engineers who understand both the old and new systems.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["project_timeline", "team_staffing", "risk_factors"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the biggest risk to this migration?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Two big risks. First, data consistency during the dual-write period. If a write succeeds in the new service but fails to write back to MySQL, and some old code reads from MySQL, it gets stale data. I'd mitigate with a reconciliation job that continuously checks consistency between both databases. Second, team fatigue. Migrations are long, unglamorous projects. At month 4, the team will want to move on to new features. I've seen migrations stall at 90% completion — the last 10% of traffic never moves, and now you're maintaining two systems indefinitely. The organizational commitment to finish is as important as the technical plan.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["data_consistency_risk", "reconciliation", "team_fatigue", "organizational_commitment"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. You demonstrated deep migration expertise — the phased approach, the emphasis on validation at each step, and the awareness of organizational challenges. The CDC + backfill + shadow traffic strategy is exactly how this should be done. Strong interview.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 79,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 5,
+      "scalability": 7,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Excellent migration methodology — Strangler Fig with CDC, shadow traffic, and phased cutover",
+      "Strong risk awareness — data consistency, hidden dependencies, team fatigue",
+      "Realistic timeline with concrete staffing recommendations"
+    ],
+    "weaknesses": [
+      "Didn't discuss the new service's caching strategy or architecture in detail",
+      "Limited discussion of the new service's scalability beyond 50K redirects/sec",
+      "Didn't address monitoring and alerting strategy for the migration itself"
+    ]
+  }
+}

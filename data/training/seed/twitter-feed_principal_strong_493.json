@@ -1,0 +1,130 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "principal",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_493"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a social media feed system at Twitter/Instagram scale. At the principal level, I'm interested in architecture across teams, the feed ranking ML system, and content moderation strategy.",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'll structure this around three domains that map to major engineering teams: content ingestion and storage (how posts enter the system), feed generation and ranking (how we decide what to show each user), and integrity and safety (content moderation, spam, and abuse). Let me clarify requirements first: what's the DAU, what content types, and is the feed chronological or ranked?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["domain_decomposition", "team_mapping", "content_ingestion", "feed_ranking", "integrity"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "500M DAU, text and images, algorithmically ranked. Some users have 50M+ followers. Content moderation is a top priority — regulatory pressure from the EU Digital Services Act.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Key numbers: 500M DAU, assume each user checks feed 10 times/day — 5 billion feed requests per day, roughly 60K feed loads per second. Posts: maybe 200M new posts per day (500M × 0.4 post rate). The follower graph: 500M users × average 200 followings = 100 billion edges. This graph is the foundation of everything — feed generation, notifications, and moderation propagation. Storage for the graph alone at 16 bytes per edge is 1.6TB — fits in memory across a cluster.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feed_request_rate", "post_volume", "social_graph_size", "graph_storage_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good estimation. Walk me through the feed generation architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "feed_generation" }
+    },
+    {
+      "role": "candidate",
+      "content": "The classic fan-out-on-write versus fan-out-on-read trade-off, but the real answer is a hybrid with three tiers. Tier 1 — pre-materialized feeds: for the 80% of users who follow fewer than 500 accounts, we pre-build their feed on write. When anyone they follow posts, the post ID is pushed into their feed timeline in Redis. This makes reads O(1) — just fetch the pre-built list. Tier 2 — celebrity injection at read time: users following celebrities (accounts with >100K followers) get their celebrity content merged at read time. This avoids the 50M fan-out problem. At read time, we fetch the pre-built feed from Tier 1 and the latest posts from each followed celebrity (typically <20 accounts), then merge. Tier 3 — ranking: the merged candidate set (maybe 500-1000 posts) goes through the ranking model. This is where the algorithmic magic happens — more on this in a minute. The key insight: Tier 1 and Tier 2 are retrieval (what are the candidate posts?). Tier 3 is ranking (in what order?). Decoupling retrieval from ranking lets us evolve them independently.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hybrid_fanout", "three_tier_architecture", "pre_materialized_feeds", "celebrity_injection", "retrieval_vs_ranking", "decoupling"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Tell me about the ranking system in depth.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "feed_ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "The ranking system is a multi-stage ML pipeline. Stage 1 — lightweight scoring: a fast model (logistic regression or small neural net) scores all ~1000 candidates on basic features — post age, author-viewer interaction history, content type, and engagement velocity of the post. This takes <5ms for 1000 candidates. Prune to top 200. Stage 2 — heavy ranking: a deeper model (transformer-based or wide-and-deep) scores the top 200 on richer features — visual content embeddings (what's in the image?), text semantic similarity to the user's interests, social proof signals (liked by people similar to this user), and diversity signals (don't show 10 posts from the same person). This takes 10-20ms. Stage 3 — policy and business rules: inject ads at specific positions, apply content warnings, enforce diversity requirements (mix of content types, authors), and apply any country-specific regulatory filters. Stage 4 — real-time re-ranking: as the user scrolls, we track their engagement (did they pause? did they scroll past quickly?) and adapt the remainder of the feed in near-real-time. The training loop: engagement events (likes, shares, dwell time, hides) feed back into the training data. Models are retrained daily and evaluated against offline metrics (NDCG, engagement rate on holdout set) before deployment.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_stage_ranking", "lightweight_scoring", "transformer_ranking", "content_embeddings", "social_proof", "diversity", "real_time_reranking", "training_loop", "offline_evaluation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "The EU Digital Services Act requires transparency about why content is recommended. How do you make this ranking system explainable?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "ranking_explainability" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is one of the hardest requirements. The DSA specifically requires that users can understand and influence the recommendation algorithm. Three approaches. First, provide a 'Why am I seeing this?' feature for every recommended post. This requires the ranking system to output an explanation alongside the score. For the lightweight model, feature attribution (SHAP values or similar) can identify the top 2-3 reasons — 'Because you follow @user,' 'Because this topic is trending in your network,' 'Because you liked similar posts.' For the heavy transformer model, explanations are harder — we might use a separate smaller model trained to generate human-readable explanations from the ranking features. Second, offer a non-algorithmic chronological feed as an alternative. The DSA requires that users can opt out of algorithmic ranking. This is technically straightforward (just serve Tier 1 + Tier 2 without Tier 3) but has business impact — engagement drops significantly on chronological feeds. Third, publish a transparency report on the ranking system — what features are used, what the optimization objectives are, and aggregate statistics on content distribution. This is a legal and policy deliverable, not a technical one, but the technical team must provide the data.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dsa_compliance", "explainability", "shap_values", "feature_attribution", "chronological_alternative", "transparency_report", "business_impact"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent. Let's talk about content moderation. How do you prevent harmful content from going viral before human reviewers can assess it?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "content_moderation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Content moderation has two time horizons: pre-distribution (before the post reaches feeds) and post-distribution (after it's spreading). Pre-distribution: every new post goes through an ML classification pipeline before it's eligible for feed distribution. The pipeline runs multiple models in parallel: hate speech classifier, nudity/violence detector (for images), spam classifier, and misinformation scorer. Posts scoring above high-confidence thresholds are auto-removed. Posts in the uncertain middle zone are held for human review — they're visible to the author but not distributed to feeds until cleared. This 'shadow hold' prevents viral spread while avoiding false positive censorship from the author's perspective. Post-distribution: monitor the velocity of engagement. A post that's being shared 100x faster than normal for its author might be going viral for problematic reasons. Velocity-based triggers escalate to human review and optionally reduce distribution (suppress in recommendations, require click-through to view). The organizational model: an ML team builds the classifiers, a policy team defines the rules, and a large operations team (hundreds of reviewers, often outsourced) handles the human review queue. The challenge: moderation must work across languages, cultural contexts, and constantly evolving adversarial tactics. The ML models need continuous retraining.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ml_classification", "pre_distribution_review", "shadow_hold", "velocity_monitoring", "human_review_queue", "adversarial_retraining", "organizational_model"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you structure the engineering organization for this platform?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "team_structure" }
+    },
+    {
+      "role": "candidate",
+      "content": "Five major teams. Feed Ranking team (25-30 engineers + 10-15 ML researchers): owns the ranking models, feature store, experimentation platform, and the multi-stage ranking pipeline. This is the highest-leverage team. Content Ingestion team (15-20 engineers): owns the post creation flow, fan-out pipeline, media processing (image resizing, video transcoding), and the social graph service. Integrity team (20-25 engineers + 10 ML scientists): owns content moderation classifiers, spam detection, abuse reporting, and the human review tools platform. Works closely with the Trust & Safety policy team. Serving Infrastructure team (15-20 engineers): owns the feed serving path, Redis timeline cache, API layer, and latency optimization. Their metric is p99 feed load time. Data Platform team (15-20 engineers): shared ML training infrastructure, data warehouse, analytics, and the event streaming pipeline (Kafka) that connects everything. Plus mobile teams (30-40 engineers across iOS and Android) that own the client experience. Total: about 150-180 engineers for the core feed platform.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["team_structure", "headcount", "metric_ownership", "ml_research_allocation", "integrity_team", "mobile_teams"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if the Redis feed cache cluster has a major failure? 500M users can't load their feed.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "This is a Tier 0 incident. Mitigation layers: first, the Redis cluster should be replicated with automatic failover. A single node failure promotes a replica in seconds. For a cluster-wide failure (rare but possible — bad config push, for example): graceful degradation. The feed service falls back to fan-out-on-read from the database. This is slower — maybe 500ms instead of 50ms — but functional. We'd serve a smaller feed (top 20 posts instead of 50) to reduce database load. For the heaviest users (following 1000+ accounts), we might serve a trending/popular feed as a fallback rather than computing their personal feed from scratch. Prevention: the Redis cluster should be in multiple availability zones. Config changes should be canary-deployed to one shard first, not pushed globally. And we should run regular disaster recovery drills — intentionally kill the cache in a test environment monthly to verify the fallback path works.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["graceful_degradation", "fan_out_on_read_fallback", "reduced_feed", "trending_fallback", "multi_az", "canary_deployment", "dr_drills"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The thing that makes or breaks a social feed platform isn't any single technical component — it's the speed of the feedback loop. How fast can we detect that a ranking change hurts user satisfaction? How fast can we identify a new spam tactic and deploy a countermeasure? How fast can we comply with a new regulatory requirement? The teams and systems I've described are optimized for cycle time, not just throughput. The ranking team ships an experiment daily. The integrity team deploys new classifiers in hours, not weeks. That operational velocity is the competitive moat.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["feedback_loop_speed", "operational_velocity", "competitive_moat", "experiment_velocity", "rapid_deployment"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exceptional interview. Deep across ranking, moderation, and organizational design. The operational velocity framing is exactly the right insight at this level. Strong hire.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 87,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 9,
+      "api_design": 7,
+      "database_design": 8,
+      "caching_strategy": 9,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Outstanding three-tier feed architecture with clean separation of retrieval and ranking",
+      "Deep multi-stage ML ranking pipeline with practical latency budgets per stage",
+      "Excellent content moderation design — shadow hold, velocity monitoring, and organizational model",
+      "DSA compliance answer showed both technical depth and business awareness"
+    ],
+    "weaknesses": [
+      "API design was implicit — didn't define feed API contract or pagination strategy",
+      "Could have discussed the ad insertion system in more detail — it's a major revenue driver"
+    ]
+  }
+}

@@ -1,0 +1,150 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "senior",
+    "candidate_profile": "uber-style",
+    "total_exchanges": 22,
+    "generation_id": "seed_315"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a ride-sharing platform. I'm particularly interested in the real-time location tracking challenge. We have 4 million location updates per second. How do you ingest, index, and query this in real-time?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": "real_time_location" }
+    },
+    {
+      "role": "candidate",
+      "content": "Before diving into the location system, let me clarify scope. Are the 4 million updates coming from both drivers and riders, or just drivers? What's the typical query pattern — nearest N drivers within a radius? What's the acceptable staleness for location data? And are we talking about a single city or global?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["scale", "query_patterns", "staleness", "geography"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "4 million from active drivers, updating every 4 seconds. Riders query for nearest available drivers. Location data must be fresher than 10 seconds. Global — 100 cities, but most traffic concentrated in 20 megacities. Let's focus on the ingestion and spatial indexing.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "location_ingestion" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me break this down. 4 million updates per second, each containing driver_id, latitude, longitude, timestamp, speed, and heading. That's roughly 200 bytes per update, so 800 MB/s of ingestion throughput. The system needs to: ingest updates and store the latest position for each driver, maintain a spatial index for nearest-driver queries, and support real-time query latency under 100ms. I'd design this as two subsystems: the Location Ingestion Pipeline and the Spatial Query Service.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "system_decomposition", "bandwidth_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Start with the ingestion pipeline. How do you handle 4 million writes per second?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "location_ingestion" }
+    },
+    {
+      "role": "candidate",
+      "content": "The driver's mobile app sends location updates via a persistent connection — either WebSocket or MQTT since it's low-bandwidth bidirectional. These hit a fleet of connection gateway servers. Each gateway batches updates and publishes to a Kafka cluster. With 4M updates/sec and 200 bytes each, Kafka needs to handle 800 MB/s. Using 20 partitions and 10 Kafka brokers, each broker handles 80 MB/s — well within capacity. Consumer services read from Kafka and update the driver's latest position in an in-memory store. I'd use Redis with the Geospatial data type (backed by sorted sets using geohash). The Redis GEOADD command updates the driver's position — it's O(log N) per update. At 4M updates/sec across a Redis cluster of 20 shards, each shard handles 200K updates/sec. Redis can sustain this with pipelining.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["location_ingestion", "kafka", "redis_geospatial", "mqtt", "pipelining"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Redis Geospatial uses a single sorted set per key. How do you shard the spatial data? Nearest-driver queries need to cross shard boundaries.",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "spatial_sharding" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good challenge. I'd shard by city or region, not by driver ID. Each city gets its own Redis shard (or set of shards for megacities). A query for nearest drivers is always within a single city, so it hits only one shard. Within a megacity like Mumbai with 500K active drivers, I'd further partition using geohash prefixes — divide the city into a grid of, say, 4-character geohash cells (about 40km x 20km each). Each cell is a separate Redis key. A nearest-driver query computes the user's geohash cell and queries that cell plus the 8 neighboring cells. This bounds the query to at most 9 GEORADIUS calls. For cities that span multiple cells, the query service aggregates results and returns the top N closest. The trade-off: drivers near cell boundaries require querying neighbors, adding latency. But since each cell query is independent, we can issue them in parallel.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["spatial_sharding", "geohash", "neighbor_cells", "parallel_queries"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "A rider opens the app and requests 'find me the nearest 5 available drivers within 3 km.' Walk me through the exact query execution.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "spatial_query" }
+    },
+    {
+      "role": "candidate",
+      "content": "Step 1: The rider's app sends their lat/lng to the Ride Matching Service. Step 2: Compute the rider's geohash to determine which city and cell they're in. Step 3: Issue GEORADIUSBYMEMBER queries to the rider's cell and 8 neighboring cells in Redis — 9 parallel queries, each returning drivers within 3 km of the rider's position. Each query is O(N + log(M)) where N is the number of results and M is the total members in the sorted set. Step 4: Merge results from all 9 cells, filter to only available drivers (check the driver availability service — a separate fast lookup), sort by distance. Step 5: Return the nearest 5 available drivers to the client with their position, ETA (computed from road distance using a routing engine), and driver info. Total latency budget: Redis queries in parallel ~2ms, availability filter ~1ms, ETA computation ~50ms (most expensive part), total under 100ms. The ETA can be computed for only the top 10 candidates to limit the routing engine cost.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["spatial_query", "georadius", "query_execution", "eta_computation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "ETA computation seems expensive. How does the routing engine work, and how do you make it fast enough for real-time matching?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "routing_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "The routing engine computes the shortest path between the driver's current position and the rider's pickup point, accounting for real-time traffic. Under the hood, it uses a precomputed road graph with traffic-weighted edges. The algorithm is a variant of Dijkstra's with Contraction Hierarchies — a preprocessing technique that reduces the search space from millions of nodes to thousands. Preprocessing: the road graph is contracted offline (takes hours), but queries run in under 1ms. For real-time traffic, we overlay live traffic data onto the precomputed graph edges — this is an approximation but it's within 10% of the true travel time. The routing engine runs as a distributed service — each instance holds the graph for one metro area in memory. The graph for a large city like NYC is about 2-3 GB. With 20 routing instances per city, we can handle the query load. We also cache recent route computations — many driver-to-rider ETAs are repeated within short time windows.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["routing_engine", "contraction_hierarchies", "dijkstra", "traffic_overlay", "route_caching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "During surge — say a concert ends and 50,000 people request rides in one area. How does the system handle this demand spike?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "surge_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "50,000 simultaneous ride requests in one geohash cell creates two problems: matching capacity and driver supply. For matching capacity: the Ride Matching Service auto-scales horizontally. Each request is independent, so more instances handle more requests. The Redis geospatial queries don't bottleneck because the cell size limits the working set. For driver supply: there aren't 50,000 available drivers nearby. We need surge pricing to attract more drivers to the area. The pricing service uses a supply-demand ratio: if the ratio is below 0.5 (2 riders per available driver), start surge. The multiplier increases with the imbalance. We also notify nearby drivers in adjacent cells that demand is high in this area. For the ride queue: requests that can't be matched immediately enter a waiting queue with a countdown. We re-run matching every 5 seconds as new drivers become available. If wait time exceeds 10 minutes, we offer the rider alternatives: scheduled pickup, pool ride with longer ETA, or a link to public transit.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_handling", "surge_pricing", "supply_demand_balancing", "queue_management"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the case where a driver's phone loses GPS signal — say they enter a tunnel?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "gps_loss" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the driver stops sending location updates, we need to distinguish between GPS loss and driver going offline. Our approach: if no update for 30 seconds, mark the driver as 'stale' in the spatial index — they still appear in queries but with a lower confidence score. If no update for 2 minutes, mark them as 'inactive' and exclude from matching. For the active ride in a tunnel: the driver's app uses dead reckoning — extrapolating position from the last known speed, heading, and the road graph. We snap the predicted position to the road. The rider sees the car moving along the expected route even without GPS. For ETA: we precompute the expected tunnel transit time from historical data. When GPS resumes, we correct any drift. We also use cell tower triangulation as a fallback — less accurate (50-300m) but enough to confirm the driver is still moving.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["gps_loss", "dead_reckoning", "map_snapping", "cell_tower_fallback"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about ride matching. How do you decide which driver to assign to a rider? It's not always the nearest one.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ride_matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Ride matching is an optimization problem. The objective isn't to minimize distance to the nearest driver — it's to maximize system-level efficiency. We use a batch matching algorithm: every 2 seconds, we collect all unmatched ride requests and all available drivers in a region, then solve an assignment problem. The scoring function for a driver-rider pair considers: estimated pickup time (primary factor), driver heading (a driver heading toward the rider is preferred over one heading away), driver trip completion (prefer drivers closer to dropping off their current rider), rider wait time (riders who've been waiting longer get priority). We solve this as a bipartite matching problem using the Hungarian algorithm or, for larger instances, an approximation via greedy assignment with priority queues. Batch matching is superior to greedy nearest-match because it considers global optimality — assigning the nearest driver to rider A might leave rider B with a 15-minute wait.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["ride_matching", "batch_matching", "hungarian_algorithm", "optimization"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle the trip lifecycle — from request to drop-off — and ensure the data is consistent?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "trip_lifecycle" }
+    },
+    {
+      "role": "candidate",
+      "content": "The trip is a state machine: REQUESTED -> MATCHED -> DRIVER_EN_ROUTE -> ARRIVED -> IN_PROGRESS -> COMPLETED (or CANCELLED at various stages). Each transition is an atomic database write with the previous state as a precondition — optimistic locking. The trip record in PostgreSQL stores: trip_id, rider_id, driver_id, status, pickup_location, dropoff_location, route_polyline, pricing breakdown, timestamps for each state transition. The state machine enforces valid transitions — you can't go from REQUESTED to COMPLETED. Each transition also triggers side effects: MATCHED sends a push notification to the rider, ARRIVED starts a 5-minute timer (auto-cancel if rider doesn't show), COMPLETED triggers the payment charge. These side effects are processed via an event-driven architecture — state transitions emit events to Kafka, and downstream services react asynchronously. This decouples the trip service from payment, notification, and analytics services.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["trip_lifecycle", "state_machine", "event_driven", "optimistic_locking"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Wrap up with anything else you'd want to cover for a production ride-sharing system.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few critical additions. Safety: share trip details with emergency contacts, in-app emergency button that connects to 911 with the rider's GPS position, driver identity verification via photo matching. Fraud detection: detect fake GPS coordinates from drivers trying to manipulate surge pricing — compare GPS positions with cell tower data and accelerometer readings. Multi-region: each city operates semi-independently. We don't need global consistency — a ride in Mumbai doesn't affect a ride in London. But the user account system is global. And testing: a simulator that can replay recorded trip data to load-test the system under realistic traffic patterns, including surge events.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["safety", "fraud_detection", "multi_region", "simulation_testing"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Strong real-time systems design. Thanks for the detailed walkthrough.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 74,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 9,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Exceptional real-time systems design — spatial indexing, geohash sharding, and routing engine",
+      "Strong ride matching algorithm with batch optimization and multiple scoring factors",
+      "Practical GPS loss handling with dead reckoning and cell tower fallback"
+    ],
+    "weaknesses": [
+      "API design was not discussed — no client-facing endpoints or protocols",
+      "Failure handling was limited to GPS loss and surge — didn't discuss database failures or service outages",
+      "Payment and pricing system details were thin"
+    ]
+  }
+}

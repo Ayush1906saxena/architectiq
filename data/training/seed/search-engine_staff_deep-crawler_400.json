@@ -1,0 +1,129 @@
+{
+  "metadata": {
+    "problem_id": "search-engine",
+    "level": "staff",
+    "candidate_profile": "deep-crawler",
+    "total_exchanges": 20,
+    "generation_id": "seed_400"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We're designing a search engine. Let's go deep on the web crawler component. Start with the URL frontier — what is it and how do you design it?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "url_frontier" }
+    },
+    {
+      "role": "candidate",
+      "content": "The URL frontier is the data structure that holds all discovered URLs waiting to be crawled. It's more than a simple queue — it's the central brain of the crawler that decides what to crawl and when. I'd design it with two main components: a front queue set for prioritization and a back queue set for politeness enforcement. The front queues are priority queues organized by URL importance. Priority is computed from: PageRank of the domain (high-authority sites first), freshness requirements (news sites need re-crawling every 15 minutes, while a company's 'About' page can wait weeks), and whether the URL was discovered from a high-quality source. I'd have 256 front queues at different priority levels. A prioritizer assigns incoming URLs to the appropriate front queue. The back queues enforce per-host crawl rate limits. There's one back queue per host (domain). A selector pulls the highest-priority URL from the front queues and routes it to the appropriate host-specific back queue. Each back queue has a 'next crawl time' — the earliest we're allowed to fetch from that host. A heap of (next_crawl_time, host) lets us efficiently find which back queue to dequeue next. This separation ensures we respect crawl politeness while still globally prioritizing important URLs. The frontier itself is too large for memory — billions of URLs — so I'd use a hybrid: hot URLs (next ~10M to crawl) in Redis, cold URLs on disk in RocksDB, with a background loader that refills the Redis hot set from RocksDB.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["url_frontier", "front_queues_prioritization", "back_queues_politeness", "heap_based_scheduling", "hybrid_storage"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned politeness. How do you handle robots.txt and crawl delays?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "politeness" }
+    },
+    {
+      "role": "candidate",
+      "content": "robots.txt compliance is non-negotiable — it's both an ethical obligation and a legal one (courts have ruled on this). Before crawling any path on a domain, we check its robots.txt. Implementation: maintain a robots.txt cache — a key-value store mapping domain to its parsed robots.txt rules, along with the fetch timestamp. Cache TTL is 24 hours. When a crawler worker picks a URL, it first checks the cache for that domain's robots.txt. If the URL's path is disallowed for our user-agent, we skip it. If the robots.txt isn't cached (new domain), we fetch it first — this is the very first request to any new domain. The parsed output is a compiled automaton for fast path matching, not raw string comparison. For crawl-delay: robots.txt can specify a Crawl-delay directive (e.g., Crawl-delay: 10, meaning wait 10 seconds between requests to that host). We enforce this in the back queue's 'next crawl time' — after each request, we set next_crawl_time = now + crawl_delay. If there's no explicit crawl-delay, we use a default of 1-2 seconds between requests to the same host. For very large sites that set a Crawl-delay of 60 seconds, we respect it but also negotiate via their webmaster tools if possible — a 60-second delay on a site with 10M pages means it takes 19 years to crawl completely. Beyond robots.txt, I also implement: adaptive throttling (if a host starts returning 429 or 503, exponentially back off), user-agent identification (clearly identifying our crawler in the UA string with a contact URL), and time-of-day awareness (reduce crawl rate during a site's peak hours if we can detect them from response latency).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["politeness", "robots_txt_compliance", "crawl_delay", "adaptive_throttling", "user_agent_identification", "compiled_automaton_matching"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. DNS resolution is a bottleneck for crawlers. How do you handle it?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "dns_pre_resolution" }
+    },
+    {
+      "role": "candidate",
+      "content": "Standard DNS resolution is synchronous and takes 20-100ms per lookup, sometimes more with recursive resolution. At a crawl rate of 10,000 pages per second, waiting for DNS inline adds 200ms-1s of latency per request — it's the dominant bottleneck. My approach: run a local DNS caching resolver (like unbound or dnsmasq) on each crawler node. This handles repeated lookups for the same domain instantly. But the real optimization is pre-resolution. When a URL enters the frontier, we asynchronously resolve its domain in a background DNS resolution thread pool. By the time the URL is dequeued for crawling, the IP address is already cached locally. I'd run a dedicated DNS pre-fetcher service that reads URLs from the frontier pipeline, resolves them in batches, and stores the results in a shared DNS cache (Redis with TTL matching the DNS record's TTL). The crawl workers never do live DNS — they always read from the cache. For cache misses (which should be rare), the worker falls back to synchronous resolution with a 2-second timeout. Additional considerations: monitor for DNS-based load balancing (round-robin A records) — we should re-resolve periodically to distribute load across the host's servers. Also watch for DNS-based blocking — some sites return NXDOMAIN for known crawler IPs. And be aware of DNS over HTTPS (DoH) adoption, which may require different resolution approaches.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["dns_pre_resolution", "local_caching_resolver", "async_pre_fetching", "shared_dns_cache", "dns_load_balancing", "dns_blocking"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you manage HTTP connection pooling for a crawler that's hitting millions of different hosts?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "connection_pooling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Connection pooling for a web crawler is fundamentally different from a typical service that talks to a few backends. We have millions of distinct hosts, each crawled infrequently. A traditional connection pool per host would hold millions of mostly-idle connections, wasting memory and file descriptors. My design: a per-host connection pool with aggressive idle timeout. Each pool holds at most 1-2 connections per host (since we rate-limit to 1 request per second per host anyway). Idle connections are closed after 30 seconds. For hosts we crawl frequently (large sites), the connection stays warm and we benefit from TCP connection reuse (avoiding the 3-way handshake) and TLS session resumption (avoiding the expensive key exchange). For long-tail domains we visit once and never again, we accept the overhead of a new connection each time. The pool manager uses a global limit — say 50,000 open connections across all hosts per crawler node. If we hit the limit, we close the least-recently-used connection before opening a new one. Implementation: I'd use a library like aiohttp (Python) or hyper (Rust) that supports HTTP/2 connection pooling natively. HTTP/2 is advantageous for crawling because multiple requests to the same host can multiplex over a single TCP connection — we can fetch a page and its linked resources concurrently without head-of-line blocking. For HTTPS (most of the web now), TLS session tickets reduce subsequent handshakes to a single round trip. We cache TLS session tickets per host alongside the DNS cache.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["connection_pooling", "per_host_pool", "idle_timeout", "global_connection_limit", "http2_multiplexing", "tls_session_resumption"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Once you've fetched a page, how do you extract the content? What's the processing pipeline?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "content_extraction" }
+    },
+    {
+      "role": "candidate",
+      "content": "The content processing pipeline has several stages. Stage 1: Content-type detection. Check the HTTP Content-Type header and also do magic-byte detection (the first few bytes of the response body). We only process HTML — PDFs, images, and videos are either skipped or handled by specialized pipelines. Stage 2: Character encoding normalization. The web is messy — pages declare UTF-8 in the Content-Type header but actually use Windows-1252, or declare nothing at all. We use an encoding detector (like chardet or ICU) on the raw bytes and normalize everything to UTF-8. Stage 3: HTML parsing and cleaning. Parse the HTML with a lenient parser (like lxml in Python or jsoup in Java) that handles malformed HTML gracefully. Extract the DOM tree. Remove boilerplate: navigation, headers, footers, sidebars, ads, cookie banners. This is the 'main content extraction' problem — libraries like Readability (the one Mozilla uses for Reader View) or Trafilatura do this well. The goal is to extract the primary article text. Stage 4: Link extraction. Parse all <a href=''> tags, resolve relative URLs against the page's base URL, canonicalize them (lowercase scheme and host, remove fragments, normalize path), and feed them into the URL frontier as discovered URLs. Filter out obviously non-crawlable links: mailto:, javascript:, and links matching robots.txt Disallow patterns. Stage 5: Metadata extraction. Pull title, meta description, Open Graph tags, structured data (JSON-LD, microdata). These feed the search index directly. Stage 6: Language detection. Run a classifier (like langdetect or fasttext) on the extracted text to tag the page's language. This is used for language-specific indexing and search result filtering.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["content_extraction", "encoding_normalization", "boilerplate_removal", "link_extraction", "url_canonicalization", "metadata_extraction", "language_detection"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The web has a massive deduplication problem — the same content at different URLs. How do you detect and handle duplicates?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "deduplication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Deduplication happens at two levels: URL-level and content-level. URL-level dedup is straightforward: canonicalize the URL (strip tracking parameters like utm_source, normalize www vs non-www, enforce trailing slash consistency, resolve redirects to the final URL) and check against a set of already-crawled URLs. This set is too large for a hash set in memory — billions of URLs — so I'd use a Bloom filter for fast 'definitely not seen' checks (with a 1% false positive rate, which is acceptable — we'd rather re-crawl 1% of pages than maintain an exact set). For the authoritative set, a persistent store like RocksDB or a distributed key-value store. Content-level dedup catches near-duplicates: the same article published at different URLs (syndication, mirrors, parameterized pages). The standard approach is SimHash (Locality-Sensitive Hashing). We compute a SimHash fingerprint of the extracted text — a 64-bit hash where similar documents produce similar hashes. Two documents with Hamming distance <= 3 between their SimHash values are considered near-duplicates. SimHash is elegant because it's fast to compute (O(n) in document length) and comparison is O(1) — just XOR the two 64-bit values and count set bits. For storage efficiency, I'd partition the SimHash space and build a lookup table: for each of the 64 possible bit positions, store the SimHash values that could match within Hamming distance 3. This lets us find near-duplicates in O(1) lookups rather than comparing against all known hashes. When we detect a duplicate, we keep the canonical URL (the one with the highest PageRank or the earliest crawl date) and store a redirect for the duplicate URLs in the search index.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["deduplication", "url_canonicalization", "bloom_filter", "simhash", "hamming_distance", "near_duplicate_detection", "canonical_url_selection"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you detect when a page has changed and needs re-crawling?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "change_detection" }
+    },
+    {
+      "role": "candidate",
+      "content": "Change detection drives re-crawl scheduling — we want to re-crawl pages that change frequently and avoid wasting resources on static pages. Several signals. First, HTTP conditional requests. We store the ETag and Last-Modified header from each crawl. On re-crawl, we send If-None-Match: <etag> and If-Modified-Since: <date>. If the server returns 304 Not Modified, we save the full download. Unfortunately, many servers don't implement conditional responses correctly. Second, content fingerprinting. We store a hash (CRC32 or SHA-256) of the extracted text (not the raw HTML, which changes with ad injections and CSRF tokens). On re-crawl, compare the new hash to the stored hash. If identical, the substantive content hasn't changed. Third, historical change frequency estimation. For each URL, we track its change history: the last N crawl timestamps and whether the content changed. Using this, we estimate the change frequency — a simple model is to assume changes follow a Poisson process and compute the expected change rate. Pages that change daily should be re-crawled daily; pages that haven't changed in 6 months can be checked monthly. This is the 'adaptive re-crawl' strategy and it converges over time to an efficient allocation of crawl budget. Fourth, sitemaps with <lastmod>. For sites that provide accurate XML sitemaps, the lastmod field tells us exactly which URLs have changed. We can prioritize those in the frontier. But many sites have inaccurate lastmod values (always set to 'today'), so we verify a sample before trusting a site's sitemap. The re-crawl scheduling feeds back into the URL frontier's priority system: higher change frequency → higher priority → more frequent slot in the crawl schedule.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["change_detection", "conditional_http_requests", "content_fingerprinting", "adaptive_recrawl", "poisson_change_model", "sitemap_lastmod", "crawl_budget_allocation"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you prioritize what to crawl? With billions of URLs and limited resources, how do you allocate your crawl budget?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "priority_scheduling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Crawl budget allocation is the most impactful decision in a crawler. The objective function: maximize the freshness and coverage of our search index given a fixed crawl capacity (say 100K pages per second). I'd score each URL with a composite priority: Score = w1*PageRank + w2*ChangeProbability + w3*QueryImpact + w4*AgePenalty. PageRank (w1=0.3): higher-authority pages are more important. We compute an approximate PageRank from the link graph we've already crawled — it's a chicken-and-egg problem, but we bootstrap from a curated seed list and iteratively refine. ChangeProbability (w2=0.25): from our adaptive re-crawl model. A news homepage that changes every 10 minutes gets high priority. QueryImpact (w3=0.25): how many search queries would be affected if this page is stale. We compute this by joining the crawl database with query logs — pages that appear in the top 10 results for popular queries have high query impact. This is the most valuable signal but requires search-side integration. AgePenalty (w4=0.2): how long since we last crawled this URL. Priority increases linearly with staleness, ensuring even low-priority pages get refreshed eventually. For new URLs (never crawled), I'd set a default priority based on domain authority and link context — a URL linked from a high-PageRank page is likely more important than one from a low-quality page. The budget allocation across domains also matters: I'd cap any single domain at 5% of total crawl capacity to ensure diversity, even if a megasite like Wikipedia has millions of high-priority pages.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["priority_scheduling", "composite_scoring", "pagerank", "query_impact", "age_penalty", "domain_budget_cap", "crawl_budget_allocation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last question: how do you coordinate a distributed crawl across multiple machines?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "distributed_crawl" }
+    },
+    {
+      "role": "candidate",
+      "content": "Distributed crawl coordination must solve three problems: work partitioning, dedup coordination, and politeness enforcement across nodes. For work partitioning, I'd shard by domain — each domain is assigned to exactly one crawler node using consistent hashing on the domain name. This ensures all URLs for a given host are crawled by the same node, which simplifies politeness enforcement (only one node needs to track the per-host crawl rate) and connection pooling (warm connections stay on one node). The frontier is similarly sharded — each node manages the frontier for its assigned domains. For URL dedup, the centralized Bloom filter approach doesn't scale — it becomes a bottleneck and a single point of failure. Instead, each node maintains its own Bloom filter for URLs in its domain shard. For cross-domain dedup (same content on different domains), we run a periodic batch job that compares SimHash fingerprints across all nodes. This is eventually consistent but acceptable — discovering a duplicate a few hours late is fine. For coordination: a ZooKeeper or etcd cluster manages the domain-to-node assignment. When a node fails, its domains are redistributed to surviving nodes. The new owners pick up the frontier state from persistent storage (the RocksDB-backed frontier). When a node discovers URLs for domains assigned to other nodes, it publishes them to a Kafka topic partitioned by domain hash. The owning node consumes from its partition and adds URLs to its local frontier. Monitoring: a central dashboard tracks per-node crawl rate, error rate, frontier size, and dedup ratio. If one node is falling behind (its domains have disproportionately many high-priority URLs), we can rebalance by moving some of its domains to less-loaded nodes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_crawl", "domain_sharding", "consistent_hashing", "distributed_dedup", "kafka_url_exchange", "zookeeper_coordination", "node_failure_handling"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thorough deep dive on web crawling. You covered every layer from URL scheduling to distributed coordination. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 80,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 8,
+      "api_design": 5,
+      "database_design": 8,
+      "caching_strategy": 7,
+      "scalability": 10,
+      "failure_handling": 8,
+      "communication": 9
+    },
+    "strengths": [
+      "Exceptional URL frontier design with front/back queue separation for priority and politeness",
+      "Comprehensive deduplication strategy using Bloom filters and SimHash with Hamming distance",
+      "Well-thought-out distributed coordination with domain-sharded architecture"
+    ],
+    "weaknesses": [
+      "Did not discuss indexing pipeline — how crawled content feeds into the search index",
+      "JavaScript rendering (headless browser) for SPAs was not mentioned"
+    ]
+  }
+}

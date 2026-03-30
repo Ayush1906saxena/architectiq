@@ -1,0 +1,188 @@
+{
+  "metadata": {
+    "problem_id": "message-queue-design",
+    "level": "staff",
+    "candidate_profile": "strong",
+    "total_exchanges": 24,
+    "generation_id": "seed_476"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Design a distributed message queue like Kafka. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Before I dive in, let me clarify the requirements. What's the target throughput in messages per second? What delivery semantics do we need -- at-least-once, exactly-once? Is per-partition ordering sufficient or do we need total ordering? What's the expected message size distribution? And what retention policy -- time-based, size-based, or compaction-based?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["throughput", "delivery_semantics", "ordering", "message_size", "retention_policy", "compaction"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "15 million messages per second peak, 3M average. At-least-once baseline with exactly-once as a feature. Per-partition ordering. Average 1KB messages with occasional 100KB. Both time-based and compaction retention needed. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "throughput" }
+    },
+    {
+      "role": "candidate",
+      "content": "A few more: how many topics and partitions are we targeting? What's the consumer landscape -- hundreds of consumer groups or thousands? And what's our replication factor target and acceptable end-to-end latency for a produce-to-consume round trip?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["topic_count", "partition_count", "consumer_groups", "replication_factor", "end_to_end_latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "50,000 partitions across 500 topics. Hundreds of consumer groups. Replication factor of 3. Sub-100ms p99 produce latency. Let's start with capacity math.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me work through the numbers. At 15M msg/s peak with 1KB average, that's 15 GB/s of ingest throughput. With replication factor 3, each message is written 3 times, so total disk write throughput is 45 GB/s across the cluster. For storage: at 3M msg/s average, that's 3 GB/s or about 259 TB per day. With 7-day retention and 3x replication, we need roughly 5.4 PB of usable storage. For the broker fleet: a modern server with 12 spinning disks at 200 MB/s sequential write each gives about 2.4 GB/s of disk throughput. To handle 45 GB/s of writes, we need at least 19 brokers just for write throughput -- but accounting for reads from consumers and replication fetches, I'd size for 3x that. So roughly 60 brokers. Each broker with 24 x 16TB drives gives 384TB per broker, times 60 is about 23 PB of raw storage, which comfortably holds our 5.4 PB with room for operational headroom. Network: at 15 GB/s ingest plus replication traffic plus consumer reads, each broker needs 25 Gbps+ NICs. I'd go with 100 Gbps.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "disk_throughput", "storage_sizing", "broker_fleet_sizing", "network_bandwidth", "replication_overhead"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thorough math. Walk me through the core architecture.",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "The system has four major components. First, brokers -- stateful servers that store partitions. Each partition is an ordered, append-only commit log implemented as a sequence of segment files on disk. A segment is typically 1GB and consists of a data file plus an index file that maps logical offsets to physical file positions. Second, a controller -- one broker elected as the active controller manages cluster metadata: partition-to-broker assignment, leader election, ISR management. I'd prefer a Raft-based internal metadata quorum over external ZooKeeper to reduce operational complexity. Third, producers -- client libraries that discover partition leaders via metadata requests, batch messages by destination partition, optionally compress batches with LZ4 or Zstandard, and send produce requests. Fourth, consumers organized into consumer groups -- each partition is assigned to exactly one consumer within a group, ensuring ordered processing. The group coordinator broker manages membership and triggers rebalances on join/leave events.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["brokers", "commit_log", "segment_files", "offset_index", "controller", "raft", "producers", "batching", "compression", "consumer_groups", "group_coordinator"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned ISR. Explain the replication protocol in detail -- how does a follower stay in sync, and what determines ISR membership?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "isr_replication" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each partition has one leader and N-1 followers. All produces go to the leader. Followers continuously issue fetch requests to the leader, pulling new data starting from their current offset -- essentially the same protocol consumers use, which is elegant because it reuses the same code path. A follower is considered in-sync if two conditions hold: it has fetched up to within a configurable lag threshold (say replica.lag.max.messages or more commonly a time-based threshold like replica.lag.time.max.ms of 10 seconds), and it has sent a fetch request within that time window. If a follower falls behind -- maybe it's doing a GC pause or its disk is slow -- it drops out of the ISR. The leader tracks the ISR set and reports changes to the controller. When a producer sends with acks=all, the leader waits until all current ISR members have replicated the message before acknowledging. The key subtlety: the ISR is dynamic. If a follower is slow, it gets removed from ISR, and acks=all only waits for the remaining in-sync replicas. This means we never let a slow replica block the entire pipeline, but we maintain durability as long as min.insync.replicas is satisfied -- typically set to 2 with RF=3. If the ISR shrinks below min.insync.replicas, the leader rejects new writes with a NotEnoughReplicas error rather than accepting under-replicated data silently.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["leader_follower", "fetch_protocol", "isr_membership", "lag_threshold", "acks_all", "dynamic_isr", "min_insync_replicas", "under_replication"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens during leader election when a leader broker dies? Walk through the sequence.",
+      "annotation": { "action": "failure_probe", "phase": "deep_dive", "target_concept": "leader_election" }
+    },
+    {
+      "role": "candidate",
+      "content": "The controller detects the broker failure via heartbeat timeout -- say 10 seconds. For every partition that had its leader on the dead broker, the controller selects a new leader from the ISR. It picks the first replica in the ISR list -- this is deterministic and fast, no voting needed because the ISR is pre-computed. The controller then writes the new leader assignment to the metadata log and sends LeaderAndIsr requests to all relevant brokers. The new leader starts accepting produce and fetch requests. Followers that were fetching from the old leader switch to the new leader. The key guarantee: since the new leader was in the ISR, it has all committed messages. No data loss for acks=all produces. The failure window is the detection time plus the metadata propagation time -- typically 10-30 seconds of unavailability for affected partitions. During this window, producers buffer locally and retry. One important edge case: if the ISR had shrunk to just the dead leader -- called an under-replicated partition -- we face a choice. Either we wait for the dead broker to come back (clean leader election, no data loss but potentially long outage) or we elect an out-of-sync replica (unclean leader election, fast recovery but potential message loss). This is configurable via unclean.leader.election.enable and it's one of the most consequential configuration decisions in a Kafka deployment.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["controller_detection", "heartbeat_timeout", "isr_leader_selection", "metadata_propagation", "failover_window", "unclean_leader_election", "data_loss_tradeoff"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now explain exactly-once semantics. How do you achieve it end-to-end?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "exactly_once_semantics" }
+    },
+    {
+      "role": "candidate",
+      "content": "Exactly-once has two layers. First, idempotent producers. Each producer gets a unique producer ID (PID) from the broker. Every message batch includes the PID and a monotonically increasing sequence number per partition. The broker maintains a small in-memory map of PID to last-seen sequence number for each partition. If a producer retries a batch and the broker sees a duplicate sequence number, it deduplicates silently and returns success. This gives us exactly-once from a single producer to a single partition. Second, transactional semantics for exactly-once across multiple partitions. The producer begins a transaction, sends messages to multiple topic-partitions, then commits. Under the hood, a transaction coordinator broker manages the two-phase commit. On begin, the producer registers with the coordinator using a transactional.id. On commit, the coordinator writes a PREPARE record to its transaction log, then writes commit markers to all involved partitions, then writes COMMITTED to the transaction log. Consumers configured with isolation.level=read_committed skip messages from uncommitted or aborted transactions by reading only up to the Last Stable Offset (LSO) rather than the High Watermark. The LSO is the offset before the earliest open transaction. This means transactional consumers may see slightly higher latency because they can't read ahead of open transactions.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["idempotent_producer", "producer_id", "sequence_number", "deduplication", "transactions", "two_phase_commit", "transaction_coordinator", "commit_markers", "last_stable_offset", "read_committed"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned compaction retention earlier. How does log compaction work and when would you use it versus time-based retention?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "log_compaction" }
+    },
+    {
+      "role": "candidate",
+      "content": "Time-based retention is simple: delete segments older than the retention period. Great for event streams where you care about history for N days then discard. Log compaction is fundamentally different -- it retains the latest value for each key indefinitely. A background compaction thread scans closed segments, builds an offset map of the latest offset for each key, then rewrites segments keeping only the latest entry per key. Tombstones (null-value messages) are retained for a configurable delete.retention.ms before being physically removed, giving consumers time to see the deletion. Use cases: compacted topics are perfect for changelogs. If you're doing stream processing with Kafka Streams, the state store changelog is a compacted topic -- on recovery, you replay the compacted topic to rebuild state without replaying the entire history. Another use case: storing the latest configuration or user profile per key. The consumer group offset topic (__consumer_offsets) is itself a compacted topic -- each consumer group's committed offset is a key-value pair, and only the latest matters. The tradeoff: compaction is CPU and I/O intensive. The compaction thread reads and rewrites segments, which competes with normal produce/consume I/O. You need to tune the compaction thread count and the ratio of dirty-to-clean log allowed before compaction triggers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["log_compaction", "time_based_retention", "compaction_thread", "offset_map", "tombstones", "changelog", "kafka_streams", "consumer_offsets_topic", "compaction_tuning"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about a failure scenario. A consumer group with 20 consumers is processing 100 partitions. One consumer dies. Walk me through what happens and what can go wrong.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "consumer_rebalance_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The dead consumer stops sending heartbeats to the group coordinator. After session.timeout.ms (default 45 seconds, or 10 seconds with a shorter config), the coordinator marks it dead and initiates a rebalance. In the eager rebalance protocol, all 19 remaining consumers revoke their current assignments, re-join the group, and the group leader (one of the consumers) runs the partition assignment strategy to redistribute 100 partitions across 19 consumers. During this stop-the-world pause, no consumer in the group is processing any partition. This can take 10-60 seconds depending on group size and coordinator load. What can go wrong: first, cascading rebalances. If the rebalance takes long enough that another consumer's session times out while waiting, it triggers yet another rebalance. I've seen groups enter rebalance storms where they never stabilize. Second, duplicate processing. Before revoking, consumers must commit their current offsets. If a consumer had processed messages but not yet committed (the commit interval is typically 5 seconds), those messages will be reprocessed by the new assignee -- violating exactly-once without idempotent consumers on the downstream. Third, the cooperative incremental rebalance protocol mitigates the stop-the-world problem. Instead of revoking all assignments, it runs two rebalance rounds: first round identifies which partitions need to move, revokes only those. Second round assigns the freed partitions to new consumers. The 19 consumers keep processing their non-moving partitions throughout. This reduces the blast radius dramatically.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["session_timeout", "group_coordinator", "stop_the_world", "cascading_rebalances", "rebalance_storms", "duplicate_processing", "offset_commit_gap", "cooperative_rebalancing", "incremental_rebalance"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you prevent those cascading rebalance storms in production?",
+      "annotation": { "action": "deepen", "phase": "scaling_failures", "target_concept": "rebalance_stability" }
+    },
+    {
+      "role": "candidate",
+      "content": "Several techniques. First, use static group membership. Assign each consumer a group.instance.id. When a consumer restarts, it rejoins with the same instance ID and gets its previous partition assignments back without triggering a full rebalance. The coordinator only triggers a rebalance if the session timeout expires without the instance reconnecting. Second, tune the timeouts carefully -- session.timeout.ms should be long enough to survive transient issues (I'd use 45 seconds) while heartbeat.interval.ms stays short (3 seconds) for fast detection. Third, use the cooperative rebalance strategy as I mentioned. Fourth, monitor consumer lag and rebalance frequency. If a consumer group is rebalancing more than once per hour, something is wrong -- probably consumers are under-provisioned and timing out during processing. Fifth, for critical pipelines, I'd implement a pause-and-drain pattern: the consumer commits offsets frequently (every 1 second), so the window of reprocessed messages after a rebalance is small.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["static_group_membership", "group_instance_id", "timeout_tuning", "cooperative_rebalance", "consumer_lag_monitoring", "rebalance_frequency", "frequent_offset_commits"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good operational thinking. What about partition scaling? You have 100 partitions and throughput doubles. How do you add partitions without disrupting consumers?",
+      "annotation": { "action": "scaling_probe", "phase": "scaling_failures", "target_concept": "partition_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Adding partitions to an existing topic is operationally simple -- you issue an alter-topic command and the controller assigns the new partitions to brokers. But there are important caveats. First, key-based ordering breaks. If producers hash message keys to partitions, changing the partition count changes the hash mapping. Messages for 'user-123' that were going to partition 7 might now go to partition 107. Consumers that relied on all events for a user landing on the same partition now see them split. For ordered processing per key, you need to either accept a brief reordering window during the transition or use a more sophisticated routing layer that maintains stable key-to-partition mappings. Second, the new partitions start empty -- no historical data. Consumers in existing consumer groups will get the new partitions assigned in a rebalance, but those partitions have no backlog to process, creating an uneven load distribution temporarily. Third, compacted topics are especially tricky: the compaction guarantee is per-partition, so existing keys won't be migrated to new partitions. My preferred approach for capacity scaling: over-provision partitions from the start. For a high-throughput topic, start with 200-500 partitions even if current throughput only needs 50. The overhead of extra partitions is mostly metadata and open file handles, which is manageable. This avoids partition expansion entirely in most cases.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["partition_expansion", "key_ordering_break", "hash_mapping", "empty_partitions", "compaction_caveat", "over_provisioning", "metadata_overhead"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about the storage engine. How does the broker efficiently serve a consumer reading from an arbitrary offset?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "storage_engine" }
+    },
+    {
+      "role": "candidate",
+      "content": "Each partition's log is split into segments, typically 1GB each. Each segment has two files: the data file (messages in sequential order) and a sparse index file that maps offsets to physical file positions at regular intervals -- say every 4KB of messages. When a consumer requests data from offset N, the broker first does a binary search across segment files to find which segment contains offset N (segment files are named by their base offset). Then it binary searches the sparse index within that segment to find the nearest indexed position at or before offset N. It seeks to that position in the data file and scans forward to the exact offset. For the common case -- a consumer reading at the tail of the log -- the data is already in the OS page cache because it was just written. The broker uses sendfile (zero-copy) to transfer directly from the page cache to the network socket without copying through user space. This is critical for throughput: at 15 GB/s of produce plus consumer reads plus replication fetches, eliminating memory copies is the difference between needing 60 brokers and 200. For consumers reading historical data (replay scenarios), the reads hit disk, but since they're sequential reads through the segment file, the OS prefetcher handles it efficiently.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["segment_files", "sparse_index", "binary_search", "page_cache", "zero_copy_sendfile", "sequential_reads", "os_prefetcher"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about monitoring and observability? How do you know the cluster is healthy?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "observability" }
+    },
+    {
+      "role": "candidate",
+      "content": "Key metrics I'd monitor: under-replicated partitions -- the single most important Kafka metric. If it's above zero, you have brokers that can't keep up with replication, which means you're one failure away from data loss. Consumer lag per consumer group per partition -- tells you if consumers are falling behind. Alert if lag exceeds a threshold in time (not just message count, since message rates vary). Request latency percentiles for produce and fetch -- p50, p99, p999. If p99 produce latency crosses 100ms, something is degrading. ISR shrink/expand rate -- frequent ISR changes indicate unstable brokers. Disk utilization and I/O wait per broker. Log compaction lag for compacted topics. Rebalance frequency and duration per consumer group. I'd expose all of this via JMX, scrape with Prometheus, and visualize in Grafana with alerts in PagerDuty. For deeper debugging, broker request logs showing slow requests and consumer group state dumps.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["under_replicated_partitions", "consumer_lag", "request_latency_percentiles", "isr_churn", "disk_utilization", "compaction_lag", "prometheus", "grafana", "jmx"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Last topic. How would you handle a broker disk failure? The broker is still running but one of its disks dies, taking several partition replicas with it.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "disk_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "First, the broker detects the disk failure via I/O errors on the affected segment files. Newer Kafka versions support JBOD (just a bunch of disks) where each disk operates independently -- a single disk failure doesn't take down the broker. The broker marks the affected log directories as offline. For partitions that had their leader replica on the failed disk, the controller triggers leader election to an ISR member on another broker. For follower replicas on the failed disk, the controller removes them from the ISR and the leader continues without them. To recover: we need to reassign those replicas to healthy disks or other brokers. The controller initiates replica reassignment, and the new replica locations start fetching from the leader to rebuild the data. This is bandwidth-intensive -- rebuilding a full partition can mean copying hundreds of GB. We should throttle reassignment to avoid saturating the network and impacting live traffic. I'd set inter-broker replication throttle to 100 MB/s per broker so rebuilding happens in the background over hours rather than impacting produce latency. Meanwhile, the cluster operates with reduced replication factor for those partitions, which is a calculated risk we accept during recovery.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["jbod", "disk_failure_detection", "log_directory_offline", "replica_reassignment", "replication_throttling", "degraded_replication", "recovery_bandwidth"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Excellent depth throughout. You drove the conversation well, did thorough capacity math, and handled failure scenarios with real operational awareness. Strong performance. Thanks.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Thank you. To summarize the design: a cluster of 60 brokers with Raft-based controller consensus, partitioned append-only logs with sparse indexing and zero-copy delivery, ISR-based replication with configurable durability guarantees, idempotent producers and transactional semantics for exactly-once, cooperative consumer group rebalancing for availability, and both time-based and compaction retention. The main operational concerns are ISR stability, consumer rebalance management, and capacity planning around the interplay of produce throughput, replication, and consumer read amplification.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["architecture_summary", "key_design_decisions", "operational_concerns"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    }
+  ],
+  "scorecard": {
+    "overall": 82,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 9,
+      "capacity_estimation": 9,
+      "api_design": 8,
+      "database_design": 8,
+      "caching_strategy": 8,
+      "scalability": 9,
+      "failure_handling": 9,
+      "communication": 9
+    },
+    "strengths": [
+      "Drove the conversation proactively, asking precise clarifying questions including retention policy types",
+      "Thorough capacity estimation with detailed broker fleet sizing, disk throughput, and network bandwidth math",
+      "Deep explanation of ISR replication including dynamic membership, min.insync.replicas, and unclean leader election tradeoffs",
+      "Exactly-once semantics covered comprehensively: idempotent producers with sequence numbers and transactional two-phase commit with LSO",
+      "Excellent treatment of consumer rebalance failure scenarios including cascading storms and cooperative rebalancing mitigation",
+      "Strong operational awareness: monitoring, JBOD disk failure recovery, replication throttling"
+    ],
+    "weaknesses": [
+      "Could have discussed cross-datacenter replication and geo-replication strategies",
+      "No mention of schema registry or serialization format considerations",
+      "Did not address quota management for multi-tenant deployments"
+    ]
+  }
+}

@@ -1,0 +1,152 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "senior",
+    "candidate_profile": "mediocre",
+    "total_exchanges": 20,
+    "generation_id": "seed_499"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a ride-sharing service like Uber. Riders request rides, drivers accept, and we need real-time matching. What would you like to clarify?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "How many rides per day and how many cities?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["scale"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "5 million rides per day across 30 cities, 1 million active drivers. Match within 15 seconds. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Do we need surge pricing? And is the payment in-app?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["surge_pricing", "payments"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Yes to both. Let's design. Walk me through the system.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Two apps — rider and driver. The rider enters a destination and requests a ride. The backend finds a nearby driver, sends them the request, and if they accept, the trip starts. The driver navigates to the rider, picks them up, drives to the destination, and the trip ends. Payment is charged automatically. The backend needs to track driver locations in real time — drivers send GPS coordinates every few seconds. We store these in... I'd use a database with geospatial support, like PostGIS.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["rider_driver_apps", "basic_flow", "gps_tracking", "postgis"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "PostGIS is a good tool, but consider: 1 million drivers sending GPS every 4 seconds is 250K writes per second. Can PostGIS handle that write throughput on a single instance?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "location_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Probably not at that rate. I should use something faster for the real-time location — Redis? It has geospatial commands like GEOADD and GEORADIUS. Redis handles hundreds of thousands of operations per second. PostGIS could still be the durable store for historical location data.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["redis_geospatial", "geoadd", "georadius", "hot_vs_cold_storage"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good correction. How does matching work? A rider in downtown requests a ride — how do you find the right driver?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Use GEORADIUS in Redis to find all available drivers within, say, 3km of the rider. Sort by distance and offer the ride to the closest one. If they decline or don't respond in 15 seconds, try the next closest.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["georadius", "nearest_driver", "timeout_retry"], "depth": "surface", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Why distance instead of ETA? And is matching one request at a time optimal?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "matching_quality" }
+    },
+    {
+      "role": "candidate",
+      "content": "ETA would be better — actual driving time, not straight-line distance. We'd need to call a routing API for each candidate driver. That adds latency though — if there are 20 nearby drivers, that's 20 routing API calls. As for batch matching... I've heard of it but I'm not sure how to implement it. Match multiple requests at once for a globally better assignment?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["eta_vs_distance", "routing_api", "batch_matching"], "depth": "surface", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You could pre-filter by distance (cheap) to get the top 10 candidates, then compute ETA only for those 10 (manageable). For batch matching, you'd accumulate requests for 2-3 seconds and solve an assignment problem. But let's move on — how does the trip lifecycle work?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "trip_lifecycle" }
+    },
+    {
+      "role": "candidate",
+      "content": "The trip has states: REQUESTED → DRIVER_ASSIGNED → DRIVER_EN_ROUTE → ARRIVED → IN_PROGRESS → COMPLETED. Or CANCELLED at various points. I'd store this in PostgreSQL — a trips table with trip_id, rider_id, driver_id, status, pickup_location, dropoff_location, fare, timestamps for each state change. State transitions are updates to the status column.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["trip_states", "postgresql", "state_transitions", "trip_schema"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you compute the fare?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "fare_calculation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Base fare plus per-mile and per-minute charges. We track the route during the trip using the driver's GPS points. At trip end, calculate total distance (sum of segments between GPS points) and total time. Fare = base_fare + (distance × per_mile_rate) + (time × per_minute_rate). Apply surge multiplier if applicable. Minimum fare if the calculated amount is too low.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fare_formula", "gps_based_distance", "time_component", "surge_multiplier", "minimum_fare"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does surge pricing work?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "When demand exceeds supply in an area — more ride requests than available drivers — we increase the price. Divide the city into zones, compute supply and demand per zone periodically, and set a multiplier. Higher multiplier when the imbalance is bigger. This encourages more drivers to go to high-demand areas and discourages low-priority riders.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["supply_demand", "zone_pricing", "multiplier", "incentive_mechanism"], "depth": "surface", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens when the driver's phone loses GPS signal mid-trip? The fare calculation depends on GPS.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "gps_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "We could fall back to estimating the route based on the original pickup and dropoff locations — compute the expected route using the maps API and charge based on that instead of actual GPS. The estimated route might not match the actual path (detours, traffic reroutes), but it's a reasonable fallback. We should also buffer GPS data on the driver's phone — if the signal comes back, upload the gap retroactively.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["route_estimation", "maps_api_fallback", "local_gps_buffering", "retroactive_upload"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're almost done. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Real-time tracking — the rider should see the driver's car moving on the map. This needs WebSocket connections and frequent location pushes. A rating system for quality control. And push notifications — alerting the driver of new ride offers and the rider when the driver arrives.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["real_time_tracking", "websockets", "ratings", "push_notifications"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thanks. You showed decent understanding of the core flow. The areas to strengthen are capacity planning, matching optimization, and deeper failure handling.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 50,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 4,
+      "capacity_estimation": 3,
+      "api_design": 5,
+      "database_design": 6,
+      "caching_strategy": 5,
+      "scalability": 5,
+      "failure_handling": 5,
+      "communication": 6
+    },
+    "strengths": [
+      "Good recovery on location storage — switched from PostGIS to Redis when challenged on write throughput",
+      "Practical GPS failure handling with route estimation fallback and local buffering",
+      "Clean trip state machine with reasonable schema design"
+    ],
+    "weaknesses": [
+      "No capacity estimation — didn't calculate QPS, location update throughput, or storage requirements",
+      "Matching algorithm was surface-level — proposed nearest-by-distance, needed prompting for ETA and batch matching",
+      "Surge pricing description was generic — no specifics on zone sizing, update frequency, or multiplier curve",
+      "Requirements gathering was minimal — only two questions",
+      "No discussion of multi-city architecture, data partitioning, or regional deployment"
+    ]
+  }
+}

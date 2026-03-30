@@ -1,0 +1,183 @@
+{
+  "metadata": {
+    "problem_id": "ride-sharing",
+    "level": "senior",
+    "candidate_profile": "experienced-weak-comm",
+    "total_exchanges": 24,
+    "generation_id": "seed_016"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We're going to design a ride-sharing service like Uber or Lyft. We need to support riders requesting rides and matching them with nearby drivers. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "So geohashing is going to be the key here. We need to map drivers to geographic cells and then do proximity queries. Oh, but first — what's the scale? Number of cities, concurrent rides, that sort of thing. Also, do we need to handle surge pricing? And what about the matching algorithm — nearest driver or do we optimize for ETA?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["geohashing", "proximity_queries", "scale", "surge_pricing", "matching"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's hold off on geohashing for a moment — let me set the requirements first. 500 cities, 1 million concurrent active drivers, 500K concurrent rides. Match based on ETA, not just distance. Surge pricing is in scope. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, right. So the driver location updates — they'd be sending GPS coordinates every few seconds. That's a lot of writes. Let me think about the location ingestion pipeline. Actually, before that — do we need the trip history, payment processing, or just the matching and ride lifecycle?",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["location_updates", "ingestion_pipeline"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Focus on matching, ride lifecycle (request to dropoff), and location tracking. Payment is out of scope. Let's start with a structured approach — maybe start with the API or the high-level components?",
+      "annotation": { "action": "redirect", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. So the key APIs are: rider requests ride (pickup location, destination), system matches with a driver, driver accepts/rejects, then we track the ride through pickup, in-progress, and completed states. For the driver side, there's a constant stream of location updates. Let me jump into the geohashing piece because that's the most interesting part.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["api_design", "ride_states", "geohashing"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Before we go deep on geohashing, can you give me the high-level architecture? What are the main services and how do they interact?",
+      "annotation": { "action": "redirect", "phase": "high_level_design", "target_concept": "architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh sorry, yeah. So... we'd have a Location Service that ingests driver GPS updates, a Matching Service that finds nearby drivers for a ride request, a Ride Service that manages the ride lifecycle state machine, and a Notification Service for real-time updates to both rider and driver. Behind these, we have a geospatial index for driver locations, a database for ride records, and a message queue for async communication. The rider's app talks to a gateway, which routes to the appropriate service.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["service_architecture", "location_service", "matching_service", "ride_service", "notification_service"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good overview. Now, the location updates. 1 million active drivers sending GPS every 3-5 seconds. What's the throughput?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "1 million drivers, every 4 seconds average, that's 250K location updates per second. Each update is small — maybe latitude, longitude, heading, speed, timestamp, driver_id — around 100 bytes. So throughput-wise it's 25MB/s, which is manageable. But we need to update the geospatial index in near-real-time because when a ride request comes in, we need current driver positions. Oh, and the geohash approach — let me explain how geohashing works.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["capacity_estimation", "location_updates", "real_time_indexing"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Go ahead with geohashing, but stay focused — how does it help with our matching problem specifically?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "geohashing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right. So geohashing divides the Earth's surface into a grid of cells. Each cell is represented by a string — longer strings mean smaller cells, higher precision. At precision level 6, each cell is about 1.2km x 600m. We encode each driver's lat/long into a geohash string. The brilliant property is that nearby locations share a common prefix — so a proximity query becomes a prefix search. When a rider requests a ride, we compute the rider's geohash, then look up all drivers in the same cell and adjacent cells. Adjacent cells are needed because the rider might be near a cell boundary. We store this in Redis: key is the geohash string, value is a set of driver IDs. When a driver moves, we remove them from the old geohash cell and add them to the new one. If the driver stays in the same cell, no update needed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["geohashing", "precision_levels", "prefix_search", "adjacent_cells", "boundary_problem"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good depth on geohashing. But you mentioned matching should be based on ETA, not just distance. A driver 2km away on the highway might reach the rider faster than a driver 500m away on congested streets. How do you handle that?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "eta_matching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Good point — the geohash gives us candidate drivers by proximity, but then we need to compute actual ETAs for each candidate. So it's a two-phase process. Phase 1: use geohash to get candidates within a radius — say all drivers in the same and adjacent geohash cells, maybe 20-50 candidates. Phase 2: for each candidate, call a routing service (like our own routing engine or Google Maps API) to compute the actual driving ETA from the driver to the rider. Sort by ETA and pick the best. The routing call is the expensive part. But since we're only computing ETA for 20-50 candidates rather than 1 million, it's feasible. Oh, but the routing service needs to account for real-time traffic. We could precompute estimated travel times for common cell-to-cell routes and adjust based on time of day, but real-time is better.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["eta_matching", "two_phase_matching", "routing_service", "real_time_traffic"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's come back to the ride lifecycle. Can you walk through the state machine for a ride?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ride_lifecycle" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right, the state machine. States are: REQUESTED (rider submits), MATCHING (system finding a driver), DRIVER_ASSIGNED (driver found and notified), DRIVER_EN_ROUTE (driver accepted, heading to pickup), ARRIVED (driver at pickup location), IN_PROGRESS (rider picked up), COMPLETED (dropped off), and CANCELLED (either party cancels). Each state transition is an event stored in a ride_events table for auditing. The Ride Service enforces valid transitions — you can't go from REQUESTED to COMPLETED, for instance. Oh, I should mention — when the driver is assigned, there's a timeout. If the driver doesn't accept within 30 seconds, the system re-enters MATCHING and tries the next best driver. This needs to be handled carefully to avoid assigning the same ride to multiple drivers.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["state_machine", "ride_states", "state_transitions", "event_sourcing", "driver_timeout"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now let's talk about surge pricing. How does it work at a systems level?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "surge_pricing" }
+    },
+    {
+      "role": "candidate",
+      "content": "Surge pricing is about supply and demand balance. We compute a multiplier per geographic zone based on the ratio of ride requests to available drivers. High demand + low supply = high multiplier. The computation runs periodically — maybe every 2 minutes — per zone. Zones could be geohash cells at a coarser precision level. The pipeline: count ride requests in each zone over the last N minutes, count available drivers in each zone, compute the ratio, map the ratio to a multiplier using a predefined curve. Actually, this ties back to the geohash infrastructure — we already have drivers indexed by geohash cell, so counting supply per zone is a Redis aggregation. Demand is tracked by the Matching Service.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["surge_pricing", "supply_demand", "zone_computation", "pricing_multiplier"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "This is good content, but I want to point out that we've jumped between geohashing, ETA matching, ride lifecycle, and surge pricing without fully closing any of them. Let's try to be more structured. Can you talk about the failure scenarios?",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Fair feedback. Let me pick one: what happens if the Location Service goes down? Drivers are sending GPS updates but we can't process them. The geospatial index becomes stale — driver positions are wrong. Matching becomes inaccurate. Mitigation: the Location Service should be horizontally scaled with no single point of failure. Each instance is stateless — it just processes updates and writes to Redis. If an instance dies, the load balancer routes to others. Redis itself should be clustered. If the entire Redis cluster goes down... that's more serious. We'd need a secondary store — maybe an in-memory backup or a fallback to reading the most recent known positions from a durable store like Cassandra. But honestly, if the location index is fully down, matching quality degrades severely. We might need to pause new ride requests and alert on-call.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["location_service_failure", "stale_index", "horizontal_scaling", "redis_cluster", "fallback_strategy"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about the driver's perspective? The driver is in a ride and their app loses connectivity — GPS updates stop. How does the system handle this?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "driver_connectivity" }
+    },
+    {
+      "role": "candidate",
+      "content": "The app should buffer GPS updates locally and send them when connectivity returns — so the ride tracking isn't lost, just delayed. For the rider's experience during the gap, we can show an estimated position based on the last known location and the planned route — dead reckoning, basically. The system should distinguish between 'driver disconnected temporarily' and 'driver went offline.' If we haven't received an update for, say, 2 minutes during an active ride, we send a push notification to the driver and alert the rider. After 5 minutes, we might try to contact the driver via the call center.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["offline_buffering", "dead_reckoning", "connectivity_timeout", "escalation"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "At 250K location updates per second, how do you handle the write throughput to Redis?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "write_throughput" }
+    },
+    {
+      "role": "candidate",
+      "content": "250K writes/sec is within Redis capability with a cluster. But each update might require a SREM from the old geohash cell and SADD to the new one — that's 2 operations. But most updates don't cross cell boundaries (driver is moving within the same ~1km cell), so we can optimize: the client (Location Service) computes the geohash and compares with the previous geohash. Only if it changed do we update Redis. This could reduce Redis writes by maybe 80-90%. The remaining 25-50K writes/sec is easy for a Redis cluster. Oh wait, we should also use Redis GEO commands — GEOADD and GEORADIUS — instead of manual geohash management. Redis has built-in geospatial indexing that handles this natively.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["write_optimization", "geohash_change_detection", "redis_geo", "throughput_reduction"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good optimization. You jumped to Redis GEO at the end — would you still use your custom geohash approach or switch to Redis GEO commands?",
+      "annotation": { "action": "challenge", "phase": "scaling_failures", "target_concept": "redis_geo" }
+    },
+    {
+      "role": "candidate",
+      "content": "Actually, Redis GEO uses geohashing under the hood — GEOADD stores the member with a sorted set score based on the geohash. GEORADIUS does the adjacent cell lookup I described. So using Redis GEO is the same concept with a cleaner API. I'd use Redis GEO commands for the driver location index. The benefit is less code to maintain and Redis handles the adjacent cell query correctly including the boundary issues I mentioned. The tradeoff is less flexibility — if we wanted a custom cell size or non-standard geospatial query, we'd need the manual approach.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_geo", "geohashing", "api_simplicity"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running low. Any final additions?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Yeah — ETA sharing with riders in real-time via WebSockets during the ride, fraud detection for fake GPS spoofing (drivers faking locations), and analytics on matching efficiency: what percentage of ride requests are matched within 30 seconds, average ETA accuracy versus actual pickup time. These metrics drive the product. Sorry about being jumpy earlier — I tend to get excited about the geospatial parts and lose track of the structure.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["real_time_updates", "gps_spoofing", "matching_analytics", "self_awareness"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "No worries — your geospatial knowledge is clearly strong. The interview had excellent depth on geohashing and matching, though the structure could have been tighter. Thanks for the conversation!",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 55,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 7,
+      "api_design": 5,
+      "database_design": 5,
+      "caching_strategy": 6,
+      "scalability": 6,
+      "failure_handling": 6,
+      "communication": 4
+    },
+    "strengths": [
+      "Deep geohashing knowledge — understood precision levels, boundary problems, and adjacent cell queries",
+      "Strong two-phase matching design combining geospatial proximity with ETA routing",
+      "Good write optimization insight — only updating Redis on geohash cell changes",
+      "Solid ride lifecycle state machine with driver timeout handling"
+    ],
+    "weaknesses": [
+      "Communication was disorganized — jumped between topics repeatedly, needed interviewer to redirect multiple times",
+      "Kept gravitating to geohashing before establishing high-level architecture",
+      "Database design was barely discussed — no schema for rides, drivers, or trip history",
+      "API design was superficial — listed endpoints without detail",
+      "Failure scenarios needed prompting — didn't proactively discuss reliability"
+    ]
+  }
+}

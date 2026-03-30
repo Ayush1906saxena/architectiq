@@ -1,0 +1,180 @@
+{
+  "metadata": {
+    "problem_id": "url-shortener",
+    "level": "staff",
+    "candidate_profile": "starts-wrong-recovers",
+    "total_exchanges": 24,
+    "generation_id": "seed_093"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Today we'll design a URL shortening service similar to bit.ly. It needs to handle significant scale. What questions do you have before we start?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, so basically we take a long URL and make it short. How many users are we talking about?",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["qps"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Assume 100 million new URLs per day, 100:1 read-to-write ratio. What else would you like to know?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "That should be fine. Let me jump into the design. So I'd have a single web server running something like Express.js. When a request comes in to create a short URL, we take the long URL and run MD5 on it to get a hash, then take the first 7 characters as the short code. We store the mapping in a MySQL database on the same server. For redirects, we just look up the short code in the database and return a 301.",
+      "annotation": { "quality": "poor", "concepts_mentioned": ["api_design", "database_choice"], "depth": "surface", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Interesting starting point. Let's examine some aspects of this. With 100 million URLs per day and MD5 producing a fixed hash, what's the probability of collisions with a 7-character prefix?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "collision_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm, MD5 is 128 bits, but we're only using 7 hex characters which is 28 bits... so that's about 268 million possible values. With 100 million URLs per day, we'd start seeing collisions within a few days. Yeah, that's actually a really big problem.",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["collision_handling", "base62_encoding"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Right. And what about your single server handling 100 million writes and 10 billion reads per day?",
+      "annotation": { "action": "challenge", "phase": "high_level_design", "target_concept": "scalability" }
+    },
+    {
+      "role": "candidate",
+      "content": "Yeah... 10 billion reads per day is about 115,000 per second. A single MySQL instance with no caching can't handle that. And a single web server would fall over too. Okay, I think I need to step back and rethink this.",
+      "annotation": { "quality": "medium", "concepts_mentioned": ["qps_calculation", "scalability"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's totally fine. Take a moment and let's redesign this properly.",
+      "annotation": { "action": "encourage", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Alright, let me start over with the right foundations. For URL encoding, instead of MD5, I'll use base62 encoding of a unique ID. Base62 with 7 characters gives us 62^7 ≈ 3.5 trillion possible codes — that's enough for decades. For ID generation, I'll use a distributed approach: a Snowflake-like ID generator or pre-allocated ID ranges to avoid a single point of failure.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["base62_encoding", "snowflake_id"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good recovery. How about the architecture now?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multiple stateless application servers behind an L7 load balancer. For reads — the redirect path — I'd put a Redis cluster in front of the database. At 115K reads per second, if we can serve 90%+ from cache, the database only sees about 11K QPS, which is very manageable. The cache key is the short code, value is the long URL. LRU eviction with TTL matching our URL expiration policy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["load_balancing", "redis_caching", "cache_eviction", "qps_calculation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Much better. What about the database layer? You mentioned MySQL earlier — still going with that?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "MySQL or PostgreSQL would both work here since our access pattern is simple key-value lookups. But at this scale, we need to think about sharding from the start. I'd shard by hash of the short code across, say, 32 shards initially. Each shard is a MySQL primary with one or two read replicas. For the write path, we route to the correct shard based on the generated short code. Actually, given the simplicity of the access pattern, DynamoDB could be a strong option too — it handles the sharding for us and scales automatically.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "sharding_strategy", "read_replicas"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What are the trade-offs between self-managed MySQL shards and DynamoDB?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "MySQL shards give us full control — we can optimize queries, tune buffer pools, and there's no vendor lock-in. But operational overhead is high: managing replication lag, shard rebalancing, failover. DynamoDB gives us single-digit millisecond reads at any scale with zero operational burden, and its on-demand pricing works well for variable traffic. The downside is cost at sustained high throughput — at 115K reads/sec, the cost could be significant compared to self-managed. Also, DynamoDB's partition key design means we need to be careful about hot partitions. I'd go DynamoDB for a startup, MySQL shards if we have a strong infra team.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["database_choice", "sharding_strategy"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great analysis. Let's go back to your initial design for a moment — you used a 301 redirect. Want to reconsider?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right — with 301, the browser caches the redirect permanently, so subsequent clicks bypass our service entirely. Good for performance, bad for analytics. We should use 302 for most cases so every click hits our servers and we can track it. We can offer 301 as an opt-in for users who only care about speed.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "analytics_pipeline"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you handle the analytics without impacting redirect latency?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "analytics_pipeline" }
+    },
+    {
+      "role": "candidate",
+      "content": "Asynchronous event pipeline. On each redirect, we write a click event to Kafka — short code, timestamp, IP, user agent. A separate consumer service reads from Kafka, enriches the data with geo-IP lookup, and aggregates it into a time-series store like ClickHouse. The redirect path never waits for analytics processing. If Kafka is temporarily unavailable, we buffer events in memory with a bounded queue and drop if the queue fills — redirects are more important than analytics accuracy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["analytics_pipeline", "kafka", "async"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Let's talk about failure scenarios. What happens if your Redis cache goes down entirely?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's the thundering herd problem again — all 115K reads per second suddenly hit the database. First line of defense: Redis Cluster with 6+ nodes and automatic failover, so losing one node doesn't lose the whole cache. Second: local in-process cache on each app server — a small LRU of maybe 100K entries covering the hottest URLs. Third: if database load spikes, circuit breaker trips and we start returning HTTP 503 with Retry-After headers to shed load gracefully rather than cascading failure.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_failure", "circuit_breaker", "single_point_of_failure"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What about protecting the write path from abuse?",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Rate limiting at multiple levels. At the API gateway, per-IP and per-API-key rate limits — maybe 100 creations per minute for free users, higher for paid. A token bucket algorithm works well here. Also, we should validate URLs — check they're well-formed, not pointing to malicious sites. We can integrate with Google Safe Browsing API to block known phishing URLs.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "security"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Given that you started with a very different design, what was the key insight that changed your approach?",
+      "annotation": { "action": "meta_probe", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The key insight was starting with the numbers. When I actually calculated the QPS — 115K reads per second — it became immediately obvious that a single server with direct database lookups is a non-starter. That forced me to think about caching, which solved the read path, and then sharding, which solved the storage problem. The MD5 issue was a separate mistake — using a hash function for uniqueness instead of a proper ID generation scheme. In retrospect, I should have done back-of-envelope math first before proposing any architecture.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "I appreciate the self-awareness. Any final additions to your design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things: CDN layer at the edge for the most popular short URLs to serve redirects with sub-10ms latency globally. Monitoring dashboards tracking cache hit rate, p99 redirect latency, and creation throughput. A TTL-based cleanup job that runs during off-peak hours to expire old URLs and reclaim storage. And multi-region deployment for disaster recovery — active-passive with async database replication.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cdn_redirect", "monitoring", "url_expiration", "multi_region"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good recovery overall. You showed strong self-correction ability. Thank you for the interview.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 65,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 4,
+      "capacity_estimation": 7,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 7,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 6
+    },
+    "strengths": [
+      "Strong self-correction — recognized flaws in initial design and rebuilt from scratch",
+      "Good back-of-envelope math once prompted to think about scale",
+      "Solid trade-off analysis on DynamoDB vs MySQL shards"
+    ],
+    "weaknesses": [
+      "Initial design showed fundamental gaps — single server, MD5 hashing, no caching",
+      "Didn't do capacity estimation upfront, leading to a flawed starting architecture",
+      "Minimal requirements gathering before jumping into design"
+    ]
+  }
+}

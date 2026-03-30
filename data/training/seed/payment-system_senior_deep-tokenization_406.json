@@ -1,0 +1,109 @@
+{
+  "metadata": {
+    "problem_id": "payment-system",
+    "level": "senior",
+    "candidate_profile": "deep-tokenization",
+    "total_exchanges": 16,
+    "generation_id": "seed_406"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "We've been designing a payment system. Let's go deep on card tokenization. Start with the basics — why tokenize, and how does it reduce PCI scope?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "pci_scope_reduction" }
+    },
+    {
+      "role": "candidate",
+      "content": "PCI DSS (Payment Card Industry Data Security Standard) requires that any system that stores, processes, or transmits cardholder data meets strict security requirements — encryption, access controls, logging, network segmentation, annual audits, and more. The full PCI DSS compliance has over 300 requirements. Tokenization reduces scope by ensuring that the vast majority of our systems never touch real card numbers. Instead of storing the PAN (Primary Account Number) like 4111111111111234 in our database, we store a token like tok_a3b7c9d2e4f6 that has no mathematical relationship to the original PAN. Only the token vault — a dedicated, heavily secured service — maintains the mapping between tokens and real PANs. Everything downstream of tokenization — our order service, billing service, analytics pipeline, customer support tools — only ever sees tokens. These systems are out of PCI scope because they never handle cardholder data. The PCI audit scope shrinks from the entire application stack to just: the token vault service, the initial card capture page (or better, an iframe hosted by the payment processor), and the network path between them. In practice, this means going from a 6-month, $200K+ PCI audit to a much simpler SAQ (Self-Assessment Questionnaire) for most of the system, with only the vault requiring the full ROC (Report on Compliance).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["pci_scope_reduction", "tokenization_basics", "pan_replacement", "audit_scope_reduction", "saq_vs_roc"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Walk me through the token vault architecture. How is it built?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "token_vault_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "The token vault is the most security-critical component in the entire payment system. Architecture: it's a standalone microservice with its own dedicated database, running in a separate network segment (a PCI enclave) with strict firewall rules — only the card capture service and the payment gateway can communicate with it, and only over mutual TLS. The database stores the mapping: {token, encrypted_pan, card_fingerprint, created_at, last_used, status}. The PAN is encrypted at the application level before writing to the database using AES-256-GCM — the vault service encrypts and decrypts, the database never sees plaintext PANs. The encryption key is not stored alongside the data — it's held in an HSM (Hardware Security Module) and fetched via a key reference at encryption/decryption time. Token generation: when a new card is submitted, the vault generates a random token (UUID v4 or a custom random string), encrypts the PAN with the current data encryption key (DEK), stores the mapping, and returns the token. For subsequent operations (charging the card, refunding), the downstream service sends the token to the payment gateway, which calls the vault to detokenize — retrieve the real PAN for the processor API call. The vault is designed for high availability — active-active across two data centers with synchronous replication of the token database. An unavailable vault means no new tokenizations and no charges — it's a P0 dependency. To mitigate: aggressive caching of frequently-used tokens in an encrypted in-memory cache (Redis with at-rest and in-transit encryption, also within the PCI enclave), and circuit breakers with graceful degradation (queue charges during brief outages).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_vault_architecture", "pci_enclave", "mutual_tls", "application_level_encryption", "aes_256_gcm", "hsm_key_management", "high_availability"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned encryption. What is format-preserving encryption, and when would you use it instead of random tokens?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "format_preserving_encryption" }
+    },
+    {
+      "role": "candidate",
+      "content": "Format-Preserving Encryption (FPE), standardized as NIST FF1 and FF3-1, encrypts a plaintext such that the ciphertext has the same format and length as the input. For a 16-digit card number, FPE produces a 16-digit output that looks like a valid card number — it passes Luhn check, has the same length, and can be stored in existing database fields without schema changes. Why FPE? Legacy system compatibility. If you have a 20-year-old billing system that validates card numbers against the Luhn algorithm, expects exactly 16 digits, and would break on a random alphanumeric token, FPE lets you introduce tokenization without modifying the legacy system. The token literally looks like a card number to any system that handles it. The tradeoffs versus random tokens: FPE tokens have a mathematical relationship to the original PAN (they're the encrypted output), so if the encryption key is compromised, all tokens can be reversed. Random tokens have no mathematical relationship — even with a key compromise, you'd also need the token database to reverse them. FPE's security margin is narrower because the domain is small (10^16 possible 16-digit numbers) — this is much smaller than the key space for AES. Dedicated attackers with access to many plaintext-ciphertext pairs could potentially mount known-plaintext attacks. For new systems, I'd strongly prefer random tokens. They're simpler, more secure, and don't constrain token format. FPE is a pragmatic choice for brownfield environments where changing every downstream system to handle non-numeric tokens is cost-prohibitive.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["format_preserving_encryption", "nist_ff1", "legacy_compatibility", "luhn_check", "security_tradeoffs", "key_compromise_impact", "brownfield_justification"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the lifecycle of a token? When is it created, used, and destroyed?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "token_lifecycle" }
+    },
+    {
+      "role": "candidate",
+      "content": "A token's lifecycle mirrors the card's lifecycle in our system. Creation: when a customer enters their card for the first time (checkout, adding a saved card), the vault creates a token. Before creating a new token, we check the card fingerprint — a hash of the full PAN — to see if this card has already been tokenized. If so, we return the existing token rather than creating a duplicate. This prevents the same card from accumulating multiple tokens, which would complicate fraud detection and analytics. Active use: the token is used for charges, recurring billing, refunds. Each use is logged (token, operation, timestamp) for audit purposes. The token itself is stateless — it doesn't carry balance or transaction information. Suspension: if a card is reported stolen or a fraud alert is triggered, we suspend the token — it still exists in the vault but detokenization requests return an error. This immediately blocks all charges across every service using that token, without those services needing to know about the fraud. Reactivation: if the fraud alert is resolved (false positive), the token can be reactivated. Expiration: when the physical card expires, the token should be updated. If the processor supports account updater services (Visa Account Updater, Mastercard ABU), we receive automatic notifications when a card number changes (due to expiry or reissuance). We update the encrypted PAN in the vault while keeping the same token — downstream systems are unaffected. Destruction: when a customer removes their saved card or deletes their account, the token is permanently deleted. We securely erase the encrypted PAN from the database, remove any cached copies, and log the destruction event. PCI requires that we can demonstrate the card data is irrecoverable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["token_lifecycle", "card_fingerprinting", "deduplication", "token_suspension", "account_updater", "secure_deletion", "pci_destruction_requirement"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What's the difference between multi-use and single-use tokens? When would you use each?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "multi_use_vs_single_use" }
+    },
+    {
+      "role": "candidate",
+      "content": "Multi-use tokens persist and can be used for multiple transactions over their lifetime. This is what I've been describing — the customer saves a card, gets a token, and uses it for months or years of purchases and subscriptions. The token is stored in the customer's account profile. Risk: if a multi-use token is leaked (through a database breach of a non-PCI system), an attacker could use it to initiate charges through our API. Mitigation: tokens are only usable within our system (they're meaningless to external processors), and our API requires authentication + token + CVV for new charges, or authentication + token for recurring charges that have been previously authorized. Single-use tokens are ephemeral — they represent one transaction and expire after use (or after a short timeout, like 15 minutes). The primary use case: checkout flows where the customer enters their card but doesn't want to save it. The card capture page generates a single-use token, the backend uses it to process the payment, and it's immediately invalidated. If intercepted, it's already expired. Another use case: tokenized data sharing between microservices. When the order service needs to pass card information to the fraud service for analysis, it passes a single-use token scoped to that specific operation, rather than the persistent multi-use token. This limits blast radius — even if the fraud service is compromised, the single-use token can't be reused. Stripe's API exemplifies this: the client-side Stripe.js creates a single-use token (tok_xxx) which is then converted to a multi-use customer payment method (pm_xxx) server-side.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["multi_use_vs_single_use", "ephemeral_tokens", "checkout_flow", "blast_radius_limitation", "scoped_tokens", "stripe_api_example"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How does the HSM fit into all of this? Walk me through key management for the vault.",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "hsm_key_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "The HSM (Hardware Security Module) is the root of trust for the entire tokenization system. It's a tamper-resistant hardware device that generates, stores, and performs cryptographic operations with keys that never leave the device in plaintext. Our key hierarchy: the HSM holds the Key Encryption Key (KEK) — the master key. The KEK encrypts the Data Encryption Keys (DEKs) that are used to encrypt PANs in the vault database. The DEKs are stored in the vault's database encrypted under the KEK. When the vault service needs to encrypt or decrypt a PAN, it sends the encrypted DEK to the HSM, the HSM decrypts it internally and returns the plaintext DEK to the vault service over a secure channel. The vault service performs the AES-256-GCM encryption/decryption of the PAN with the DEK in application memory, then zeroes the DEK from memory. Why not have the HSM do the PAN encryption directly? Performance. HSMs handle 1,000-10,000 cryptographic operations per second, but we might need 50,000+ tokenizations per second at peak. The HSM is the bottleneck, so we minimize its involvement to DEK unwrapping (one HSM call per vault service startup, not per transaction). Key rotation: we rotate DEKs quarterly. The new DEK encrypts all new PANs. Old PANs remain encrypted under the old DEK until a background re-encryption job migrates them. We keep old DEKs (encrypted under the KEK) until all data is migrated. The KEK is rotated annually — this is the most sensitive operation, requiring physical presence at the HSM by two authorized personnel (dual control). PCI requires that no single individual can access or reconstruct the full key. We use HSMs from vendors like Thales Luna or AWS CloudHSM (FIPS 140-2 Level 3 certified), deployed in pairs for redundancy.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hsm_key_management", "key_hierarchy", "kek_dek_model", "hsm_performance_limits", "key_rotation", "dual_control", "fips_certification"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you maintain a compliance audit trail for all tokenization operations?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "compliance_audit_trail" }
+    },
+    {
+      "role": "candidate",
+      "content": "Every operation on the token vault must be immutably logged for PCI compliance and forensic capability. The audit trail captures: every tokenization (who requested it, when, from which IP, which service), every detokenization (who, when, why — the business justification, like 'charge' or 'refund'), every token lifecycle event (creation, suspension, reactivation, destruction), every key management operation (DEK rotation, KEK rotation, HSM access), and every administrative access (who logged into the vault service, what they did). The log format: structured JSON events written to an append-only log. Never include the actual PAN or token in the audit log — only the token ID (a separate identifier from the token value itself) and operation metadata. The logs are shipped to a SIEM (Security Information and Event Management) system like Splunk or Elastic SIEM in real-time via a secured log pipeline. The SIEM provides: real-time alerting on suspicious patterns (unusual detokenization volume, access from unexpected IPs, after-hours administrative access), compliance dashboards showing access patterns over time, and forensic search capability for incident response. Retention: PCI requires audit logs to be retained for at least 1 year, with at least 3 months immediately available for analysis. I'd retain for 7 years to cover SOX and other financial regulations. The logs themselves must be tamper-proof — I'd use cryptographic chaining (each log entry includes a hash of the previous entry, creating a verifiable chain) and store them in a separate system with restricted write access. During annual PCI audits, the QSA (Qualified Security Assessor) will sample audit log entries and verify: completeness (no gaps in timestamps), integrity (chain hashes validate), access justification (every detokenization has a legitimate business reason), and appropriate access controls (only authorized services and personnel).",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["compliance_audit_trail", "append_only_log", "siem_integration", "tamper_proof_logging", "cryptographic_chaining", "pci_retention_requirements", "qsa_audit_process"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Comprehensive deep dive on tokenization. You covered the security architecture from encryption to compliance. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 71,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 5,
+      "capacity_estimation": 6,
+      "api_design": 7,
+      "database_design": 7,
+      "caching_strategy": 5,
+      "scalability": 6,
+      "failure_handling": 7,
+      "communication": 8
+    },
+    "strengths": [
+      "Clear explanation of PCI scope reduction through tokenization with concrete audit cost savings",
+      "Well-designed key hierarchy with KEK/DEK model and practical HSM performance considerations",
+      "Thorough token lifecycle management including account updater integration and secure deletion"
+    ],
+    "weaknesses": [
+      "Did not discuss network tokenization (Visa/Mastercard network tokens) as an alternative to vault tokenization",
+      "Scalability of the token vault under high transaction volume was only briefly touched"
+    ]
+  }
+}

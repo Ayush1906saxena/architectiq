@@ -1,0 +1,192 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "staff",
+    "candidate_profile": "mediocre",
+    "total_exchanges": 22,
+    "generation_id": "seed_006"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a distributed rate limiter today. This is a staff-level interview, so I'll be looking for depth on distributed systems challenges, trade-off reasoning, and production-readiness. What clarifying questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Sure. Is this for external API rate limiting or internal service-to-service? What's the scale — number of unique clients and total request rate?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["rate_limiting", "qps"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "External API rate limiting at an API gateway. 2 million unique API keys, 1 million QPS across 20 gateway nodes. Each user gets 500 requests per minute. What else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "capacity_estimation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Should we support different rate limit tiers? And what's the desired behavior — hard reject or should we have some burst allowance?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["rate_limit_rules", "burst_handling"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Multiple tiers, and yes, some burst allowance is desired. Let's design it.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Okay, I'll use a token bucket algorithm. It's good for allowing bursts while maintaining an average rate. Each API key gets a bucket with a max capacity — let's say 500 tokens for the standard tier — and a refill rate of 500 per minute, so about 8.3 tokens per second. When a request comes in, we check if there's a token available, decrement if yes, reject if no.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["token_bucket", "burst_handling"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now, this is across 20 gateway nodes. Where does the bucket state live?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "In Redis. We'd store the token count and last update timestamp for each API key. Redis is fast enough for this — sub-millisecond reads. Each gateway node would call Redis on every request to check and update the bucket.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["redis_caching", "distributed_rate_limiting"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "At 1 million QPS, that's 1 million Redis operations per second. How does your Redis cluster handle that?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "redis_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "A single Redis instance can do maybe 100-200K ops per second. So we'd need a Redis cluster with... maybe 10 shards? We can shard by API key — hash the key to determine which Redis shard handles it. That distributes the load evenly.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["redis_cluster", "sharding_strategy"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Here's the hard part. Two requests from the same API key arrive at two different gateway nodes at the exact same time. Both read the token count as 1 from Redis. Both decrement. The user makes 2 requests when they should have been limited to 1. How do you handle this?",
+      "annotation": { "action": "challenge", "phase": "deep_dive", "target_concept": "race_condition" }
+    },
+    {
+      "role": "candidate",
+      "content": "Ah, the race condition. Right. We could use Redis transactions — MULTI/EXEC — to make the read and write atomic. Or we could use WATCH to do optimistic locking. Like, WATCH the key, read the value, check if there are tokens, then MULTI, DECR, EXEC. If another client modified the key between WATCH and EXEC, the transaction fails and we retry.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["race_condition", "optimistic_locking", "redis_transactions"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "WATCH/MULTI works but has problems at high concurrency — high contention keys will cause lots of retries. What's a better approach in Redis for atomic read-modify-write?",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "lua_script" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh, Lua scripts. Redis can execute Lua scripts atomically. So we'd write the entire check-and-decrement logic as a Lua script. That way it's a single atomic operation — no race condition. I haven't written one before but the concept makes sense... you'd pass the key, max tokens, and refill rate as arguments, and the script does the calculation and update in one go.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["lua_script", "atomic_operations"], "depth": "shallow", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Can you walk through what the Lua script would do step by step?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "lua_script" }
+    },
+    {
+      "role": "candidate",
+      "content": "Um, sure. The script would... get the current token count from the key. Check if it's greater than zero. If yes, decrement by one and return allowed. If no, return rejected. And we'd need to handle the refill somehow... maybe store the last refill timestamp and calculate how many tokens should have been added since then. I'm honestly not sure about the exact Lua syntax for this.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["lua_script", "token_bucket"], "depth": "shallow", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "The syntax isn't important — pseudocode is fine. But you're missing a key piece: how does the refill calculation work inside the script? You need to handle the case where the last request was 30 seconds ago.",
+      "annotation": { "action": "hint", "phase": "deep_dive", "target_concept": "token_bucket" }
+    },
+    {
+      "role": "candidate",
+      "content": "Right. So when the script runs, it calculates: time_elapsed = current_time - last_refill_time. Tokens to add = time_elapsed * refill_rate. New token count = min(max_tokens, current_tokens + tokens_to_add). Then check if new_count >= 1, decrement and save. That makes the refill lazy instead of needing a background process. We'd need to pass the current timestamp into the script as an argument.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["token_bucket", "lazy_evaluation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Now, at the staff level, I'd want to hear about alternatives to the centralized Redis approach. What if Redis becomes a bottleneck or a single point of failure?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "We could do local rate limiting on each gateway node. Each node gets an equal share — with 20 nodes and a 500/min limit, each node allows 25 requests per minute per user. No Redis needed. The problem is... if a user's requests aren't evenly distributed across nodes, they might hit the limit on one node while others have unused capacity. A sticky session approach could help — route all requests from the same API key to the same node. But that creates hot spots if some users are much more active than others.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["local_rate_limiting", "sticky_sessions"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good trade-off analysis there. What about a hybrid approach?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "hybrid_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm... a hybrid could work. Use local rate limiting for an initial fast check — each node tracks its own counts. Periodically sync with Redis to get the global picture. If a user is way under their limit locally, no need to check Redis. Only when they're approaching the threshold do we do the precise Redis check. This reduces Redis load significantly while still maintaining accuracy for users near their limits.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["hybrid_rate_limiting", "distributed_rate_limiting"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you define 'approaching the threshold'? What's the sync protocol?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "hybrid_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "I... hmm. Maybe each node reports its local count to Redis every 5 seconds? And if the local count is above 80% of the per-node allocation, it starts checking Redis on every request. I'm not sure this is fully thought through. There might be edge cases where a user exactly hits the threshold across multiple nodes simultaneously and we still over-admit. I think the Redis Lua approach is more straightforward and correct, even if it has higher latency.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["hybrid_rate_limiting"], "depth": "shallow", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair enough — knowing when a solution isn't fully baked is important. Let's talk about failure modes. Redis cluster is down. What's your strategy?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "redis_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If Redis is down, I'd fail open — allow all requests through. It's better to temporarily lose rate limiting than to block all API traffic. Meanwhile, we'd fall back to the local per-node rate limiting as a safety net. It won't be perfectly accurate, but it prevents any single user from hammering a single gateway node.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["fail_open", "graceful_degradation", "local_rate_limiting"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How do you handle rate limit rules updates? Say the product team wants to change the free tier from 500 to 300 requests per minute.",
+      "annotation": { "action": "probe", "phase": "scaling_failures", "target_concept": "configuration_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "Store the rules in a database and have each gateway poll for updates, maybe every 30 seconds. Or use a pub/sub mechanism — publish the update to a channel and all gateways subscribe. I'd prefer the polling approach because it's simpler and more resilient. If a gateway misses a pub/sub message, it's out of sync until it restarts.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["configuration_management", "pub_sub"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "We're running out of time. What would you say are the key trade-offs in this design?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The main trade-off is accuracy versus performance. A centralized Redis approach gives us exact rate limiting but adds latency to every request and creates a dependency. Local rate limiting is faster but approximate. The other trade-off is fail-open versus fail-closed — availability versus protection. For most API use cases, approximate rate limiting and fail-open is the right default.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["accuracy_vs_performance", "fail_open", "distributed_rate_limiting"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Thanks for the discussion. You covered the fundamentals well. Appreciate your time.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 48,
+    "passed": false,
+    "dimensions": {
+      "requirements_gathering": 6,
+      "capacity_estimation": 5,
+      "api_design": 5,
+      "database_design": 5,
+      "caching_strategy": 6,
+      "scalability": 5,
+      "failure_handling": 5,
+      "communication": 6
+    },
+    "strengths": [
+      "Correctly identified token bucket as the right algorithm with burst rationale",
+      "Honest about limitations — admitted the hybrid approach wasn't fully thought through",
+      "Good trade-off analysis on local vs centralized rate limiting"
+    ],
+    "weaknesses": [
+      "Could not write or pseudocode the Lua script despite it being critical for the design",
+      "Got stuck on the race condition — needed a hint to reach Lua scripts",
+      "Hybrid rate limiting proposal was half-baked with undefined sync protocol",
+      "No discussion of monitoring, alerting, or operational concerns — expected at staff level",
+      "Did not discuss alternative algorithms like sliding window in depth"
+    ]
+  }
+}

@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "chat-system",
+    "level": "sde2",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_455"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a real-time chat application — think WhatsApp or Slack. Users can send messages in 1:1 conversations and group chats. What questions do you have?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few questions: How many users and concurrent connections? What's the max group size? Do we need features like read receipts, typing indicators, and message history? Is there an offline mode — can users receive messages when they come back online?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["concurrency", "group_size", "read_receipts", "typing_indicators", "offline_mode"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "100 million DAU, 10 million concurrent connections. Max group size of 500 members. Yes to read receipts and typing indicators. Users should receive any messages they missed when they were offline. Anything else?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "scale" }
+    },
+    {
+      "role": "candidate",
+      "content": "Do messages need to be encrypted end-to-end? And what's the latency target — how quickly should a sent message appear on the receiver's screen?",
+      "annotation": { "quality": "good", "concepts_mentioned": ["encryption", "message_latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "E2E encryption is a nice-to-have but not required for this interview. Message delivery should feel instant — under 200ms when both users are online. Let's start.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "The core challenge is real-time bidirectional communication. HTTP isn't great for this because it's request-response — the server can't push a message to the client without the client asking first. So I'd use WebSockets. When a user opens the app, they establish a persistent WebSocket connection to our server. Messages flow through this connection in both directions. The server acts as the relay — when User A sends a message to User B, the server receives it and pushes it down User B's WebSocket connection.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["websockets", "bidirectional_communication", "server_relay"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. 10 million concurrent WebSocket connections — how do you handle that? One server can't hold all of them.",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "websocket_scaling" }
+    },
+    {
+      "role": "candidate",
+      "content": "We'd have a fleet of WebSocket servers behind a load balancer. Each server holds, say, 100K-200K connections. With 10M concurrent, we'd need 50-100 WebSocket servers. The problem is routing: when User A sends a message to User B, User A's WebSocket server needs to find which server holds User B's connection. I'd use a connection registry — a Redis hash map that maps user_id → websocket_server_id. When a connection is established, the server registers it. When a message needs to be delivered, we look up the target server and route the message there.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["websocket_fleet", "load_balancer", "connection_registry", "message_routing", "redis"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good approach. How do the WebSocket servers communicate with each other to relay messages? User A is on Server 1, User B is on Server 7.",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "inter_server_communication" }
+    },
+    {
+      "role": "candidate",
+      "content": "A few options. Direct server-to-server RPC — Server 1 calls Server 7 directly. Or we could use a pub/sub system like Redis Pub/Sub or a message queue. Each WebSocket server subscribes to a channel for the users it's currently connected to. When a message arrives for User B, it gets published to User B's channel, and Server 7 (which is subscribed) receives and delivers it. I'd go with the pub/sub approach because it decouples the servers and handles the 'user reconnects to a different server' case gracefully — the new server just subscribes to the user's channel.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["pub_sub", "redis_pubsub", "server_decoupling", "reconnection_handling"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Nice reasoning. Now, where do messages get stored? Users need message history and offline delivery.",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "message_storage" }
+    },
+    {
+      "role": "candidate",
+      "content": "Every message is persisted to a database before delivery. Even if the user is online and we deliver in real-time, we still write to storage for history and offline cases. I'd use a database optimized for the access pattern: messages are written once and read in sequence — 'show me the last 50 messages in this conversation.' That's a time-series-like pattern. I'd use Cassandra — it handles high write throughput well and its partition key model works perfectly: partition by conversation_id, cluster by timestamp. Each partition is one conversation's messages in order.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["message_persistence", "cassandra", "partition_key", "time_series_pattern", "sequential_reads"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Cassandra is a reasonable choice. How do you handle offline message delivery? User B's phone was off for 3 hours and they missed 50 messages across different conversations.",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "offline_delivery" }
+    },
+    {
+      "role": "candidate",
+      "content": "When User B comes back online and establishes a WebSocket connection, we need to sync them. Approach: we track a 'last seen message ID' or 'last sync timestamp' per user per conversation. When the client reconnects, it sends its last known state for each conversation. The server queries Cassandra for any messages newer than that and sends them down the WebSocket. For efficiency, we could also maintain a per-user 'undelivered messages' queue — when a message can't be delivered in real-time (user offline), we add it to this queue. On reconnect, drain the queue. This is faster than scanning all conversations for new messages.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["sync_on_reconnect", "last_seen_tracking", "undelivered_queue", "incremental_sync"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Let's talk about group messages. A group of 500 members — User A sends a message. How does it reach all 500?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "group_messaging" }
+    },
+    {
+      "role": "candidate",
+      "content": "When User A sends a message to a group, the server writes the message once to the group conversation in Cassandra. Then it needs to deliver to all 500 members. For online members, look up their WebSocket servers from the connection registry and push the message. For offline members, add to their undelivered queue. With 500 members, this fan-out is manageable — it's not like Twitter's millions of followers. We could process it synchronously or use a small fan-out worker if we want to keep the sender's response time fast.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["single_write", "group_fanout", "online_vs_offline_delivery", "fanout_worker"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What about message ordering? Can messages arrive out of order? How do you ensure messages in a conversation are displayed in the right sequence?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "message_ordering" }
+    },
+    {
+      "role": "candidate",
+      "content": "Messages can definitely arrive out of order — network delays, different server paths. For ordering, I'd assign each message a monotonically increasing sequence number per conversation. The server maintains a counter per conversation — each new message gets the next number. Clients display messages sorted by sequence number, not by the time they arrived. If message 42 arrives before message 41 (out of order delivery), the client buffers 42 and waits briefly for 41 before displaying. The sequence number is also used for gap detection — if the client has messages 1-40 and receives 42, it knows it missed 41 and can request it.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["sequence_numbers", "monotonic_counter", "client_ordering", "gap_detection"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "How about read receipts and typing indicators? These are high-frequency ephemeral signals.",
+      "annotation": { "action": "redirect", "phase": "scaling_failures", "target_concept": "presence_system" }
+    },
+    {
+      "role": "candidate",
+      "content": "Typing indicators are fire-and-forget — they don't need to be persisted or delivered reliably. If a typing indicator is lost, the worst case is the other person doesn't see the 'typing...' animation for a moment. I'd send them through the same WebSocket/pub-sub path but skip database persistence entirely. Read receipts are slightly more important — they should be persisted so the sender can see blue checkmarks even after restarting the app. But they're still lightweight — just an update: 'User B has read messages up to sequence number 41 in conversation X.' We store the per-user-per-conversation read pointer and broadcast it to other participants.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["typing_indicators", "ephemeral_signals", "read_receipts", "read_pointer", "fire_and_forget"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "What happens if one of your WebSocket servers crashes? 200K users suddenly lose their connection.",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "server_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "The clients detect the lost connection and reconnect — the load balancer routes them to healthy servers. The connection registry gets updated as they re-register. Messages that were in-flight during the crash might be lost for real-time delivery, but since we persist all messages to Cassandra before acknowledging the sender, the reconnected clients can sync any missed messages through the offline delivery mechanism. The sender already got an acknowledgment, and the receiver catches up on reconnect. The UX impact is a few seconds of reconnection delay.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["automatic_reconnection", "registry_update", "message_durability", "offline_sync_recovery"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good recovery story. We're out of time. Anything to add?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Push notifications — when a user is offline, we should send push notifications through APNs and FCM so they know they have new messages. Also, media messages — images and videos would be uploaded to S3 and we'd store the URL in the message. And rate limiting to prevent spam in groups.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["push_notifications", "media_storage", "rate_limiting"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Great interview. You showed good understanding of real-time messaging architecture and thought through the important edge cases. Nice job.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 66,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 5,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 6,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 7
+    },
+    "strengths": [
+      "Solid WebSocket architecture with pub/sub routing and connection registry",
+      "Good distinction between ephemeral (typing) and persistent (read receipts) signals",
+      "Clean offline delivery design with undelivered queue and incremental sync"
+    ],
+    "weaknesses": [
+      "Capacity estimation was minimal — didn't calculate message storage, bandwidth, or WebSocket memory",
+      "Didn't discuss E2E encryption architecture even at a high level",
+      "Message ordering solution was straightforward but didn't address the distributed counter problem — who generates the sequence number if multiple servers handle the same conversation?"
+    ]
+  }
+}

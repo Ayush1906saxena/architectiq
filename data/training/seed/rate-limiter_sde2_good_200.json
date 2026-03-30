@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "rate-limiter",
+    "level": "sde2",
+    "candidate_profile": "good",
+    "total_exchanges": 20,
+    "generation_id": "seed_200"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design a rate limiter. This is a component that controls how many requests a user or client can make to an API within a given time window. How would you approach this?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I've dealt with rate limiting from the consumer side — I've gotten 429 errors from APIs before. So the idea is to limit each user to, say, 100 requests per minute, and reject anything over that. Let me ask: are we building this for a single API server or for a distributed system with multiple servers?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting", "distributed_systems"], "depth": "applied", "has_reasoning": false, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good question. Let's start with a single server and then think about making it work across multiple servers. What other requirements would you want to clarify?",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": "requirements_gathering" }
+    },
+    {
+      "role": "candidate",
+      "content": "What's the rate limit — is it per user, per IP, or per API key? And is the limit the same for everyone, or do different users have different limits? Also, what happens when someone is rate limited — do we just reject the request, or queue it?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Per API key. Different tiers get different limits — free users get 100 requests per minute, paid users get 1000. Just reject excess requests, no queueing. Go ahead with the design.",
+      "annotation": { "action": "transition", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "For a single server, my initial idea is simple: I'd use a hash map in memory where the key is the API key and the value is a counter and a timestamp. When a request comes in, I check if the current minute is the same as the stored timestamp. If yes, increment the counter. If we're in a new minute, reset the counter to 1. If the counter exceeds the limit, reject with a 429.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["rate_limiting", "in_memory_storage"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That works. Do you see any problems with this fixed window approach?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "rate_limiting_algorithms" }
+    },
+    {
+      "role": "candidate",
+      "content": "Hmm... I think there's an edge case. If someone makes 100 requests at 1:00:59 and then another 100 at 1:01:01, they've made 200 requests in 2 seconds but both windows say they're within the limit. The boundary between windows creates a burst.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["rate_limiting_algorithms"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly — that's the boundary problem with fixed windows. How would you fix it?",
+      "annotation": { "action": "probe", "phase": "high_level_design", "target_concept": "rate_limiting_algorithms" }
+    },
+    {
+      "role": "candidate",
+      "content": "I could use a sliding window? Instead of fixed minute boundaries, I'd look at the last 60 seconds from right now. But tracking every individual request timestamp per user could use a lot of memory. Maybe I could use a sliding window log — store the timestamps of all requests in a list, and when checking, remove timestamps older than 60 seconds, then count what's left.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["rate_limiting_algorithms", "sliding_window"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "You're right that the sliding window log can use a lot of memory. There's also a sliding window counter approach that approximates. But let me ask — what happens when we go from one server to multiple servers?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "distributed_rate_limiting" }
+    },
+    {
+      "role": "candidate",
+      "content": "Oh right, if we have multiple servers, each one has its own in-memory counter. So a user could send 100 requests to server A and another 100 to server B, and neither would reject them. We need a shared counter somewhere.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["distributed_rate_limiting"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Exactly. What shared store would you use?",
+      "annotation": { "action": "guide", "phase": "deep_dive", "target_concept": "redis_caching" }
+    },
+    {
+      "role": "candidate",
+      "content": "Redis would be perfect for this. It's fast, in-memory, and all our servers can talk to the same Redis instance. I'd store the counter in Redis with the key being something like 'rate:api_key:current_minute'. I can use Redis's INCR command which is atomic, so even concurrent requests won't cause race conditions. And I'd set a TTL of 60 seconds so old keys auto-expire.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["redis_caching", "distributed_rate_limiting", "atomicity"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. What if Redis is temporarily unreachable? Should we block all requests or allow all requests?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "failure_handling" }
+    },
+    {
+      "role": "candidate",
+      "content": "That's a good question. I think we should allow requests through if Redis is down. It's better to temporarily have no rate limiting than to block all legitimate users. We could fall back to local in-memory counters on each server — not perfect, but better than nothing. And we'd alert on it so we can fix Redis quickly.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["failure_handling", "graceful_degradation"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good instinct — fail open for rate limiting. Now, when you do reject a request, what information should you include in the response?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "api_design" }
+    },
+    {
+      "role": "candidate",
+      "content": "A 429 status code obviously. In the response body, I'd include a message saying the rate limit was exceeded. I'd also include headers like X-RateLimit-Limit showing their max, X-RateLimit-Remaining showing how many requests are left, and X-RateLimit-Reset showing when the window resets. I've seen these in APIs I've used.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["api_design", "rate_limiting"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Where in the system should the rate limiter live? As middleware? In the application? Somewhere else?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "system_architecture" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd put it as middleware — so it runs before the actual API handler. That way it's clean, reusable across all endpoints, and the API code doesn't need to know about rate limiting. If a request is over the limit, the middleware returns 429 immediately without bothering the application layer. Alternatively, it could be at the API gateway level if we have one.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["system_architecture", "middleware"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "How would you store the rate limit configurations — the different tiers and their limits?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "configuration_management" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd store the tier configurations in a database table — tier name, requests per minute, and any other limits. The API key table would have a foreign key to the tier. On startup, the middleware loads the configs into memory, and we'd have a refresh mechanism — either poll the database every few minutes or use a cache invalidation signal. This way we can change limits without redeploying.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["configuration_management", "database_choice"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Alright, we're running low on time. Any final thoughts?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd want logging on rate-limited requests so we can monitor for abuse patterns. Also, we might want different rate limits per endpoint — like a login endpoint should have a lower limit to prevent brute force attacks. And we should have dashboards showing rate limit hits per user so our team can identify issues.",
+      "annotation": { "quality": "moderate", "concepts_mentioned": ["monitoring", "security"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good points. Thanks for your time today.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 55,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 7,
+      "capacity_estimation": 4,
+      "api_design": 7,
+      "database_design": 5,
+      "caching_strategy": 7,
+      "scalability": 6,
+      "failure_handling": 6,
+      "communication": 7
+    },
+    "strengths": [
+      "Real-world experience with rate limits from the consumer side added credibility",
+      "Identified the fixed window boundary problem independently",
+      "Good Redis usage with atomic INCR and TTL for distributed rate limiting"
+    ],
+    "weaknesses": [
+      "No capacity estimation — didn't calculate how much memory or Redis throughput needed",
+      "Sliding window discussion was surface-level — didn't implement a concrete algorithm",
+      "Didn't discuss latency impact of adding Redis hop to every request"
+    ]
+  }
+}

@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "problem_id": "twitter-feed",
+    "level": "senior",
+    "candidate_profile": "good",
+    "total_exchanges": 22,
+    "generation_id": "seed_023"
+  },
+  "conversation": [
+    {
+      "role": "interviewer",
+      "content": "Let's design Twitter's home timeline — the feed that shows tweets from accounts you follow. What do you want to clarify first?",
+      "annotation": { "action": "opening", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. What's our scale — DAU, tweets per day? Should the timeline be strictly chronological or ranked? Do we need to support retweets and quote tweets, or just original tweets? And what's the latency target for loading the timeline?",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["requirements_gathering", "scale", "latency"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "300 million DAU, 500 million tweets per day. Chronological with a relevance boost. Include retweets. Timeline load under 200ms at p99. Go ahead.",
+      "annotation": { "action": "answer_requirements", "phase": "requirements", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "Let me do the math. 500M tweets/day is about 5,800 tweets per second. Average user follows 200 people. For timeline reads — if each DAU checks their feed 10 times per day, that's 3 billion timeline reads per day, or about 35K reads per second. The key insight is that this is a read-heavy system — about 6000:1 read-to-write ratio on the timeline.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["capacity_estimation", "qps_calculation", "read_write_ratio"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good math. Walk me through the architecture.",
+      "annotation": { "action": "transition", "phase": "high_level_design", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd use a hybrid fan-out approach. For regular users — say under 50K followers — we fan out on write. When they tweet, a fan-out service pushes the tweet ID into each follower's pre-computed timeline in Redis. For high-follower accounts — celebrities, news outlets — we skip the fan-out. At read time, the timeline service fetches the user's pre-computed timeline from Redis, then also fetches recent tweets from the celebrity accounts the user follows, and merges them in chronological order. This avoids the write amplification problem where a celebrity tweet with 30M followers would cause 30 million cache writes.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["hybrid_fanout", "fan_out_on_write", "fan_out_on_read", "redis_caching", "write_amplification"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Solid approach. How do you handle the fan-out service? What does it look like internally?",
+      "annotation": { "action": "deepen", "phase": "high_level_design", "target_concept": "fan_out_on_write" }
+    },
+    {
+      "role": "candidate",
+      "content": "The fan-out service consumes from a Kafka topic that the tweet creation service publishes to. When a new tweet event arrives, the fan-out worker looks up the tweeter's follower list from a follower graph service — this is cached in memory since it changes infrequently. Then for each follower, it does an LPUSH of the tweet ID to that follower's timeline list in Redis, followed by an LTRIM to cap the list at 800 entries. The workers are stateless and horizontally scalable — we partition the Kafka topic by tweeter_id so all followers of the same user are handled by the same consumer, which helps with batching. At 5,800 tweets/sec with an average of 200 followers each, we're doing about 1.16M Redis writes per second across the cluster.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["kafka", "fan_out_on_write", "redis_caching", "horizontal_scaling", "partitioning"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good detail. Now let's talk about the caching strategy more broadly. You have timeline caches — what else would you cache?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "caching_strategy" }
+    },
+    {
+      "role": "candidate",
+      "content": "Three cache layers. First, the timeline cache in Redis — sorted lists of tweet IDs per user, as described. Second, a tweet object cache — when a user loads their timeline, we have a list of tweet IDs but need the full tweet data. We cache hot tweets in a Memcached cluster keyed by tweet_id. Since popular tweets get fetched millions of times, the hit rate should be very high — I'd estimate 95%+. Third, a user profile cache — each tweet renders with the author's name, avatar, and handle. We cache user profiles in Memcached as well. For cache sizing: 300M DAU with 800 tweet IDs each at 8 bytes per ID is about 1.9TB for timeline caches. Tweet objects — if we cache the last 7 days of tweets, that's 3.5B tweets at 1KB each, roughly 3.5TB. We'd only cache the hot subset.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["caching_strategy", "redis_caching", "memcached", "cache_sizing", "capacity_estimation"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good layered caching. What about cache invalidation? When a user deletes a tweet, how does that propagate?",
+      "annotation": { "action": "probe", "phase": "deep_dive", "target_concept": "cache_invalidation" }
+    },
+    {
+      "role": "candidate",
+      "content": "Tweet deletion is tricky because the tweet ID has been fanned out to potentially thousands of follower timelines. We can't efficiently remove it from every timeline cache — that would be as expensive as the original fan-out. Instead, I'd use a lazy approach: delete the tweet from the tweet object cache and the database. When a follower's timeline is rendered, we batch-fetch the tweet objects for the visible tweet IDs. If a tweet ID returns null (deleted), we skip it in rendering. We can also maintain a small bloom filter or set of recently deleted tweet IDs to filter them out before the fetch. This means a deleted tweet might briefly appear as a placeholder before the client refreshes, which is acceptable.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_invalidation", "lazy_deletion", "bloom_filter"], "depth": "deep", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Smart approach. Now, let's say we want to add a trending topics feature — showing what's trending right now. How would you design that?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "trending_topics" }
+    },
+    {
+      "role": "candidate",
+      "content": "For trending topics... I'd track hashtag and keyword frequencies over a sliding window. When a tweet is created, we extract hashtags and publish them to a stream processing pipeline — maybe Kafka Streams or Flink. We count occurrences in, say, 5-minute tumbling windows, and compare the current count to the historical average for that hashtag. A trending topic is one where the current count is significantly higher than the baseline — some kind of z-score threshold. The results get cached and refreshed every minute or so.",
+      "annotation": { "quality": "mediocre", "concepts_mentioned": ["trending_topics", "stream_processing", "sliding_window", "kafka"], "depth": "applied", "has_reasoning": true, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "That's the right direction. How would you handle the volume? 500 million tweets per day means a lot of hashtag events. And how do you prevent gaming — someone creating bots to make a hashtag trend?",
+      "annotation": { "action": "deepen", "phase": "deep_dive", "target_concept": "trending_topics" }
+    },
+    {
+      "role": "candidate",
+      "content": "For volume, the stream processing handles it — Flink or Kafka Streams can process millions of events per second with horizontal scaling. As for gaming... that's harder. I'd probably deduplicate by user — each user only counts once toward a trending topic. And maybe weight by account age or reputation. But honestly, I'm not deeply familiar with the anti-gaming algorithms used for trending. I know it's a significant problem — bots and coordinated campaigns can manipulate trends — but I'd need to research the specific techniques used to combat it.",
+      "annotation": { "quality": "weak", "concepts_mentioned": ["trending_topics", "anti_gaming", "deduplication"], "depth": "shallow", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Fair enough. Let's move to reliability. How do you handle a full Redis cluster failure for timeline caches?",
+      "annotation": { "action": "failure_probe", "phase": "scaling_failures", "target_concept": "cache_failure" }
+    },
+    {
+      "role": "candidate",
+      "content": "If the timeline cache is fully down, we fall back to fan-out on read for everyone — fetch the list of accounts the user follows, query each account's recent tweets from the database, and merge them. This is much slower — maybe 500ms-1s instead of 50ms — but it keeps the service functional. We'd also want to degrade gracefully: show a shorter timeline (last 50 tweets instead of 200), disable retweets to reduce the query surface, and show a 'limited experience' banner to users. Redis recovery priority is critical — we'd use Redis Cluster with replicas in each shard, and AOF persistence for durability so we don't have to rebuild all timelines from scratch after a restart.",
+      "annotation": { "quality": "strong", "concepts_mentioned": ["cache_failure", "graceful_degradation", "fan_out_on_read", "redis_persistence", "redis_cluster"], "depth": "deep", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": true }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good degradation strategy. How about the database layer? What do you use for storing tweets?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "database_choice" }
+    },
+    {
+      "role": "candidate",
+      "content": "For tweets, I'd use MySQL sharded by tweet_id. The tweet table: tweet_id (snowflake ID), user_id, content (text), created_at (timestamp), reply_to_id (nullable), retweet_of_id (nullable), media_urls (JSON). Sharded by tweet_id using hash-based sharding — say 256 shards. Each shard is a MySQL instance with a replica. For the social graph — who follows whom — a separate MySQL cluster sharded by user_id. Follows table: follower_id, followee_id, created_at. Indexed both ways for efficient lookup of followers and followees.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["database_choice", "database_schema", "sharding_strategy", "social_graph"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "You mentioned relevance-boosted timeline earlier. How would you add a relevance score to the chronological feed?",
+      "annotation": { "action": "redirect", "phase": "deep_dive", "target_concept": "ranking" }
+    },
+    {
+      "role": "candidate",
+      "content": "I'd add a lightweight ranking layer on top of the chronological timeline. When we fetch the top 200 tweet IDs for a user's timeline, we pass them through a ranking model that adjusts the order based on signals: engagement metrics (likes, retweets, replies on the tweet so far), affinity score (how often this user interacts with the tweet author), recency, and content type (tweets with media tend to get more engagement). The model would be a simple logistic regression or gradient-boosted tree — something fast enough to score 200 items in under 20ms. The ranking happens at read time after we've fetched the candidate tweets but before we return the response.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["ranking", "ml_model", "engagement_metrics", "affinity_score"], "depth": "applied", "has_reasoning": true, "has_numbers": true, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good. Anything you'd add to the design if we had more time?",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    },
+    {
+      "role": "candidate",
+      "content": "A few things. Push notifications — when a tweet from someone you have notifications on for gets posted, send a push via a notification service. Search — a separate inverted index (Elasticsearch) for full-text tweet search. Direct messages would be a separate system with different consistency requirements. I'd also add rate limiting on tweet creation and follow actions to prevent spam. And monitoring — cache hit rates, fan-out lag, timeline load latency at p50/p95/p99.",
+      "annotation": { "quality": "good", "concepts_mentioned": ["push_notifications", "search", "rate_limiting", "monitoring"], "depth": "applied", "has_reasoning": false, "has_numbers": false, "has_tradeoffs": false }
+    },
+    {
+      "role": "interviewer",
+      "content": "Good interview. Strong on core architecture and caching, with room for deeper exploration on trending topics and ranking. Thank you.",
+      "annotation": { "action": "wrap_up", "phase": "wrap_up", "target_concept": null }
+    }
+  ],
+  "scorecard": {
+    "overall": 68,
+    "passed": true,
+    "dimensions": {
+      "requirements_gathering": 8,
+      "capacity_estimation": 8,
+      "api_design": 6,
+      "database_design": 7,
+      "caching_strategy": 9,
+      "scalability": 7,
+      "failure_handling": 7,
+      "communication": 7
+    },
+    "strengths": [
+      "Knew the hybrid fan-out pattern immediately without guidance — strong for senior level",
+      "Excellent multi-layer caching strategy with concrete sizing math",
+      "Smart lazy deletion approach for tweet deletions across fan-out timelines"
+    ],
+    "weaknesses": [
+      "Trending topics knowledge was shallow — couldn't articulate anti-gaming strategies",
+      "Ranking discussion was generic — didn't discuss specific ML pipeline or feature engineering",
+      "Didn't discuss API design (pagination, cursor-based vs offset) in detail"
+    ]
+  }
+}
