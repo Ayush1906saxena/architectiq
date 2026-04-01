@@ -45,7 +45,9 @@ class InterviewSpeaker:
         system = _build_system(tracker.level)
         action_type = action.action_type
 
-        if action_type == "give_hint" or action_type == "give_strong_hint":
+        if action_type == "llm_followup":
+            return await self._speak_llm_followup(action.data, system)
+        elif action_type == "give_hint" or action_type == "give_strong_hint":
             return await self._speak_hint(action.data, system, strong=action_type == "give_strong_hint")
         elif action_type == "catch_contradiction":
             return await self._speak_contradiction(action.data, system)
@@ -67,6 +69,22 @@ class InterviewSpeaker:
             return await self._speak_open(action.data, system)
         else:
             return action.data.get("prompt", "Tell me more about your design.")
+
+    async def _speak_llm_followup(self, data: dict, system: str) -> str:
+        """Deliver an LLM-generated follow-up question that's specific to what the candidate said."""
+        followup = data.get("followup", "")
+        gaps = data.get("gaps", [])
+        gaps_context = f"\nGaps identified in their answer: {', '.join(gaps)}" if gaps else ""
+
+        prompt = (
+            f"ACTION: Ask a follow-up question based on what the candidate just said.\n"
+            f"The analysis identified this follow-up: \"{followup}\""
+            f"{gaps_context}\n\n"
+            "Say this naturally as a conversational follow-up. Don't read it verbatim — "
+            "rephrase it in your voice. You can combine it with a brief acknowledgment of "
+            "what they said. 2-3 sentences."
+        )
+        return await ollama_client.generate(prompt, system=system, temperature=0.7)
 
     async def _speak_contradiction(self, data: dict, system: str) -> str:
         prompt = (

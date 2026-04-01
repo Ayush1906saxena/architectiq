@@ -1,57 +1,55 @@
 """
 Layer 1: Response Analyzer
-Extracts structured meaning from candidate's text using LLM + keyword fallback.
+Extracts structured meaning from candidate's text.
+
+Primary: LLM-powered structured extraction that actually understands what the candidate said.
+Fallback: Keyword-based analysis when LLM is unavailable.
+
+The LLM call returns per-concept depth assessment, specific claims, reasoning gaps,
+and a suggested follow-up question — all in one call to minimize latency.
 """
 import json
 import re
-from services.ollama_client import ollama_client
+from pathlib import Path
 
-# Known concepts across all system design problems
+from config import settings
+from services.ollama_client import ollama_client
+from middleware.security import sanitize_for_prompt
+
+# ── Keyword fallback data (used when LLM is unavailable) ─────
+
 KNOWN_KEYWORDS = {
-    # Databases
     "postgresql": "postgresql", "postgres": "postgresql", "mysql": "mysql",
     "dynamodb": "dynamodb", "cassandra": "cassandra", "mongodb": "mongodb",
     "redis": "redis", "memcached": "memcached", "sqlite": "sqlite",
     "cockroachdb": "cockroachdb", "spanner": "spanner", "hbase": "hbase",
-    # Caching
     "cache": "caching", "lru": "lru_eviction", "lfu": "lfu_eviction",
     "ttl": "cache_ttl", "write-through": "write_through", "write-behind": "write_behind",
     "cache-aside": "cache_aside", "cdn": "cdn_caching",
-    # Load Balancing
     "load balancer": "load_balancing", "nginx": "load_balancing",
-    "round robin": "round_robin", "round-robin": "round_robin",
     "consistent hashing": "consistent_hashing", "hash ring": "consistent_hashing",
     "virtual nodes": "virtual_nodes", "vnodes": "virtual_nodes",
-    # Messaging
     "kafka": "kafka", "rabbitmq": "rabbitmq", "sqs": "sqs",
     "message queue": "message_queue", "pub-sub": "pubsub", "pub/sub": "pubsub",
     "event sourcing": "event_sourcing", "cqrs": "cqrs",
-    # Scaling
     "horizontal scaling": "horizontal_scaling", "vertical scaling": "vertical_scaling",
     "sharding": "sharding", "partition": "partitioning", "replication": "replication",
     "read replica": "read_replicas", "leader-follower": "leader_follower",
-    # Encoding
     "base62": "base62_encoding", "base64": "base64_encoding",
-    "base58": "base58_encoding", "md5": "md5_hashing", "sha": "sha_hashing",
+    "md5": "md5_hashing", "sha": "sha_hashing",
     "uuid": "uuid_generation", "snowflake": "snowflake_id",
-    # Networking
     "websocket": "websocket", "http": "http", "grpc": "grpc",
-    "rest": "rest_api", "graphql": "graphql", "tcp": "tcp",
-    # Patterns
+    "rest": "rest_api", "graphql": "graphql",
     "circuit breaker": "circuit_breaker", "rate limit": "rate_limiting",
     "token bucket": "token_bucket", "sliding window": "sliding_window",
     "saga": "saga_pattern", "idempotency": "idempotency",
     "api gateway": "api_gateway", "reverse proxy": "reverse_proxy",
-    # Infrastructure
-    "docker": "docker", "kubernetes": "kubernetes", "k8s": "kubernetes",
-    # Misc
-    "cap theorem": "cap_theorem", "acid": "acid", "base": "base_properties",
+    "cap theorem": "cap_theorem", "acid": "acid",
     "eventual consistency": "eventual_consistency", "strong consistency": "strong_consistency",
     "geohash": "geohashing", "quadtree": "quadtree",
     "bloom filter": "bloom_filter", "merkle tree": "merkle_tree",
 }
 
-# Number patterns
 NUMBER_PATTERN = re.compile(
     r'(\d+(?:\.\d+)?)\s*(?:million|mil|M|billion|bil|B|thousand|K|hundred|%|'
     r'ms|millisecond|second|sec|minute|min|hour|hr|day|'
@@ -61,27 +59,6 @@ NUMBER_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-DECISION_PATTERNS = [
-    re.compile(r"(?:i(?:'d| would)|we (?:can|could|should)|let'?s) use (\w[\w\s]*?)(?:\.|,|because|for|$)", re.I),
-    re.compile(r"(?:i(?:'d| would)|we should) (?:go with|pick|choose) (\w[\w\s]*?)(?:\.|,|$)", re.I),
-    re.compile(r"(\w[\w\s]*?) (?:is|would be) (?:a good|the best|the right) (?:choice|option|fit)", re.I),
-]
-
-REASONING_SIGNALS = [
-    "because", "since", "the reason", "trade-off", "tradeoff", "trade off",
-    "downside", "advantage", "disadvantage", "pro ", "con ", "alternatively",
-    "compared to", "instead of", "rather than", "on the other hand",
-    "the problem with", "the issue", "the benefit",
-]
-
-FAILURE_SIGNALS = [
-    "fail", "crash", "goes down", "dies", "outage", "partition",
-    "timeout", "retry", "fallback", "graceful degradation", "circuit breaker",
-    "single point of failure", "spof", "redundan", "fault toleran",
-    "disaster recovery", "failover", "backup",
-]
-
-
 STUCK_PHRASES = [
     "i don't know", "i dont know", "not sure", "no idea", "idk",
     "i'm not sure", "im not sure", "i have no idea", "pass",
@@ -89,13 +66,83 @@ STUCK_PHRASES = [
     "no", "nope", "skip", "next",
 ]
 
+# ── LLM Analysis Prompt ──────────────────────────────────────
+
+_ANALYSIS_SYSTEM = """You are an expert system design interview evaluator. Your job is to analyze a candidate's response and extract structured information.
+
+You must respond with ONLY valid JSON. No markdown, no code fences, no explanation outside the JSON.
+
+Be precise and honest in your depth assessments:
+- "none": They didn't address this concept at all
+- "buzzword": They named a technology but showed no understanding (e.g., "I'd use Kafka" with no reasoning)
+- "surface": Basic correct understanding but no depth (e.g., "Kafka is a message queue for async processing")
+- "applied": Shows practical understanding with reasoning, numbers, or trade-offs (e.g., "Kafka because we need ordering per partition key, and at 1M msgs/sec we'd need ~10 partitions")
+- "deep": Demonstrates internals, failure modes, or production experience (e.g., "Kafka's ISR replication with acks=all gives us durability, but if ISR shrinks to just the leader we risk data loss — that's why we set min.insync.replicas=2")
+
+Be strict. Most responses are "surface" or "applied". "Deep" is rare and requires genuine insight."""
+
+
+def _build_analysis_prompt(text: str, problem_id: str, knowledge_graph: dict) -> str:
+    """Build the analysis prompt with problem context."""
+    # Get concept names from knowledge graph for context
+    concepts = knowledge_graph.get("concepts", {})
+    concept_list = [
+        f"- {cid}: {cdata.get('name', cid)}"
+        for cid, cdata in concepts.items()
+    ]
+    concept_context = "\n".join(concept_list[:25])  # Cap to avoid token bloat
+
+    return f"""Analyze this system design interview response for the problem: {problem_id}
+
+KNOWN CONCEPTS FOR THIS PROBLEM:
+{concept_context}
+
+CANDIDATE'S RESPONSE:
+\"\"\"{sanitize_for_prompt(text)}\"\"\"
+
+Respond with this exact JSON structure:
+{{
+  "concepts": [
+    {{
+      "id": "concept_id_from_list_above",
+      "depth": "none|buzzword|surface|applied|deep",
+      "summary": "one sentence describing what they said about this concept"
+    }}
+  ],
+  "claims": [
+    {{
+      "text": "the specific claim they made",
+      "concept": "related_concept_id",
+      "justified": true/false,
+      "reasoning_given": "their reasoning if any, or empty string"
+    }}
+  ],
+  "has_numbers": true/false,
+  "has_tradeoffs": true/false,
+  "has_failure_discussion": true/false,
+  "overall_depth": "buzzword|surface|applied|deep",
+  "gaps": ["specific thing they should have addressed but didn't"],
+  "suggested_followup": "A specific follow-up question based on the weakest part of their answer. Reference what they actually said.",
+  "is_asking_question": true/false,
+  "is_stuck": true/false
+}}
+
+IMPORTANT:
+- Only include concepts they ACTUALLY discussed. Don't infer concepts they didn't mention.
+- "suggested_followup" should be a question a real interviewer would ask based on THIS specific response. Not generic.
+- "gaps" should be things relevant to what they were discussing, not a wish list of everything they could have said.
+- If the response is very short or says "I don't know", set is_stuck=true and keep concepts list empty."""
+
+
+# ── Response Analysis Result ──────────────────────────────────
 
 class ResponseAnalysis:
     def __init__(self):
         self.concepts_mentioned: list[str] = []
+        self.concept_depths: dict[str, str] = {}     # concept_id → depth string
+        self.concept_summaries: dict[str, str] = {}   # concept_id → what they said
         self.claims: list[dict] = []
         self.numbers: list[dict] = []
-        self.decisions: list[dict] = []
         self.depth_signals = {
             "gave_reasoning": False,
             "mentioned_tradeoffs": False,
@@ -103,6 +150,9 @@ class ResponseAnalysis:
             "referenced_alternatives": False,
             "discussed_failure_modes": False,
         }
+        self.overall_depth: str = "surface"
+        self.gaps: list[str] = []
+        self.suggested_followup: str = ""
         self.is_stuck: bool = False
         self.is_short_answer: bool = False
         self.is_asking_question: bool = False
@@ -110,48 +160,57 @@ class ResponseAnalysis:
     def to_dict(self):
         return {
             "concepts_mentioned": self.concepts_mentioned,
+            "concept_depths": self.concept_depths,
+            "concept_summaries": self.concept_summaries,
             "claims": self.claims,
             "numbers": self.numbers,
-            "decisions": self.decisions,
             "depth_signals": self.depth_signals,
+            "overall_depth": self.overall_depth,
+            "gaps": self.gaps,
+            "suggested_followup": self.suggested_followup,
             "is_stuck": self.is_stuck,
             "is_short_answer": self.is_short_answer,
             "is_asking_question": self.is_asking_question,
         }
 
 
+# ── Knowledge Graph Cache ─────────────────────────────────────
+
+_kg_cache: dict[str, dict] = {}
+
+def _get_knowledge_graph(problem_id: str) -> dict:
+    """Load and cache knowledge graph for a problem."""
+    if problem_id not in _kg_cache:
+        path = Path(settings.content_dir) / "knowledge-graphs" / f"{problem_id}.json"
+        if path.exists():
+            with open(path) as f:
+                _kg_cache[problem_id] = json.load(f)
+        else:
+            _kg_cache[problem_id] = {"concepts": {}}
+    return _kg_cache[problem_id]
+
+
+# ── Analyzer ──────────────────────────────────────────────────
+
 class ResponseAnalyzer:
     async def analyze(self, text: str, problem_id: str = "") -> ResponseAnalysis:
-        """Analyze candidate response. Uses keyword extraction + LLM enrichment."""
-        result = self._keyword_analysis(text)
-
-        # Try LLM enrichment for better extraction
-        llm_result = await self._llm_analysis(text)
-        if llm_result:
-            self._merge_llm_result(result, llm_result)
-
-        return result
-
-    def _keyword_analysis(self, text: str) -> ResponseAnalysis:
-        """Fast keyword-based analysis. Always works, no LLM needed."""
+        """Analyze candidate response. LLM-first with keyword fallback."""
         result = ResponseAnalysis()
-        text_lower = text.lower().strip()
+        text_stripped = text.strip()
+        text_lower = text_stripped.lower()
 
-        # Detect stuck/short answers FIRST
-        result.is_short_answer = len(text_lower.split()) < 5
-        result.is_stuck = any(phrase in text_lower for phrase in STUCK_PHRASES) or (result.is_short_answer and not any(kw in text_lower for kw in KNOWN_KEYWORDS))
-        result.is_asking_question = text_lower.endswith("?")
+        # Quick checks that don't need LLM
+        result.is_short_answer = len(text_stripped.split()) < 5
+        result.is_asking_question = text_stripped.endswith("?")
+        result.is_stuck = (
+            any(phrase in text_lower for phrase in STUCK_PHRASES) or
+            (result.is_short_answer and not any(kw in text_lower for kw in KNOWN_KEYWORDS))
+        )
 
-        # If stuck, return early — no concepts to extract
         if result.is_stuck:
             return result
 
-        # Extract concepts
-        for keyword, concept_id in KNOWN_KEYWORDS.items():
-            if keyword in text_lower and concept_id not in result.concepts_mentioned:
-                result.concepts_mentioned.append(concept_id)
-
-        # Extract numbers
+        # Extract numbers (always useful, fast)
         for match in NUMBER_PATTERN.finditer(text):
             result.numbers.append({
                 "raw": match.group(0),
@@ -159,92 +218,119 @@ class ResponseAnalyzer:
                 "context": text[max(0, match.start() - 30):match.end() + 30].strip(),
             })
 
-        # Extract decisions
-        for pattern in DECISION_PATTERNS:
-            for match in pattern.finditer(text):
-                choice = match.group(1).strip()
-                # Find reasoning (text after "because" etc)
-                reasoning = ""
-                for signal in ["because", "since", "as it", "for its"]:
-                    idx = text_lower.find(signal, match.end())
-                    if idx != -1 and idx < match.end() + 200:
-                        end = text.find(".", idx)
-                        reasoning = text[idx:end if end != -1 else idx + 150].strip()
-                        break
+        # Try LLM analysis (primary path)
+        kg = _get_knowledge_graph(problem_id) if problem_id else {"concepts": {}}
+        llm_result = await self._llm_analysis(text, problem_id, kg)
 
-                result.decisions.append({
-                    "choice": choice,
-                    "reasoning": reasoning,
-                    "has_reasoning": bool(reasoning),
-                })
-                result.claims.append({
-                    "claim": f"Would use {choice}",
-                    "type": "design_choice",
-                    "concept": self._match_concept(choice),
-                    "justified": bool(reasoning),
-                })
-
-        # Depth signals
-        result.depth_signals["gave_reasoning"] = any(
-            s in text_lower for s in REASONING_SIGNALS
-        )
-        result.depth_signals["mentioned_tradeoffs"] = any(
-            s in text_lower for s in ["trade-off", "tradeoff", "trade off", "downside",
-                                       "alternatively", "on the other hand", "compared to"]
-        )
-        result.depth_signals["used_specific_numbers"] = len(result.numbers) > 0
-        result.depth_signals["referenced_alternatives"] = any(
-            s in text_lower for s in ["instead of", "rather than", "alternatively",
-                                       "another option", "we could also", "compared to"]
-        )
-        result.depth_signals["discussed_failure_modes"] = any(
-            s in text_lower for s in FAILURE_SIGNALS
-        )
+        if llm_result:
+            self._apply_llm_result(result, llm_result)
+        else:
+            # Fallback to keyword analysis
+            self._keyword_fallback(result, text_lower)
 
         return result
 
-    def _match_concept(self, text: str) -> str:
-        """Match a piece of text to a known concept."""
-        text_lower = text.lower().strip()
-        for keyword, concept_id in KNOWN_KEYWORDS.items():
-            if keyword in text_lower:
-                return concept_id
-        return text_lower.replace(" ", "_")
-
-    async def _llm_analysis(self, text: str) -> dict | None:
-        """Use LLM for richer extraction. Falls back gracefully."""
-        prompt = (
-            "Extract technical content from this system design interview response.\n"
-            "Respond ONLY with valid JSON:\n"
-            "{\n"
-            '  "components": ["list of technologies/components mentioned"],\n'
-            '  "claims": [{"claim": "what they stated", "concept": "related_concept"}],\n'
-            '  "is_asking_question": false\n'
-            "}\n\n"
-            f'Candidate said: "{text}"'
-        )
+    async def _llm_analysis(self, text: str, problem_id: str, kg: dict) -> dict | None:
+        """Primary analysis path: structured LLM extraction."""
+        prompt = _build_analysis_prompt(text, problem_id, kg)
 
         try:
-            raw = await ollama_client.generate(prompt, json_mode=True, temperature=0.1)
-            return json.loads(raw)
-        except Exception:
+            raw = await ollama_client.generate(
+                prompt,
+                system=_ANALYSIS_SYSTEM,
+                json_mode=True,
+                temperature=0.1,
+            )
+            parsed = json.loads(raw)
+
+            # Basic validation — must have concepts list
+            if not isinstance(parsed.get("concepts"), list):
+                return None
+            return parsed
+
+        except (json.JSONDecodeError, TypeError, KeyError):
             return None
 
-    def _merge_llm_result(self, result: ResponseAnalysis, llm: dict):
-        """Merge LLM extractions into keyword results."""
-        for component in llm.get("components", []):
-            concept = self._match_concept(component)
-            if concept and concept not in result.concepts_mentioned:
-                result.concepts_mentioned.append(concept)
+    def _apply_llm_result(self, result: ResponseAnalysis, llm: dict):
+        """Apply LLM analysis to the result object."""
+        # Concepts with per-concept depth
+        for concept in llm.get("concepts", []):
+            cid = concept.get("id", "")
+            depth = concept.get("depth", "surface")
+            if cid and depth != "none":
+                result.concepts_mentioned.append(cid)
+                result.concept_depths[cid] = depth
+                result.concept_summaries[cid] = concept.get("summary", "")
 
+        # Claims
         for claim in llm.get("claims", []):
-            if claim.get("claim"):
+            if claim.get("text"):
                 result.claims.append({
-                    "claim": claim["claim"],
-                    "type": "assertion",
+                    "claim": claim["text"],
+                    "type": "design_choice",
                     "concept": claim.get("concept", ""),
-                    "justified": False,
+                    "justified": claim.get("justified", False),
+                    "reasoning": claim.get("reasoning_given", ""),
                 })
+
+        # Depth signals (from LLM assessment, not pattern matching)
+        result.depth_signals["used_specific_numbers"] = llm.get("has_numbers", False) or len(result.numbers) > 0
+        result.depth_signals["mentioned_tradeoffs"] = llm.get("has_tradeoffs", False)
+        result.depth_signals["discussed_failure_modes"] = llm.get("has_failure_discussion", False)
+        result.depth_signals["gave_reasoning"] = any(c.get("justified") for c in llm.get("claims", []))
+        result.depth_signals["referenced_alternatives"] = result.depth_signals["mentioned_tradeoffs"]
+
+        # Overall depth from LLM
+        result.overall_depth = llm.get("overall_depth", "surface")
+
+        # Gaps and follow-up
+        result.gaps = llm.get("gaps", [])[:3]  # Cap at 3
+        result.suggested_followup = llm.get("suggested_followup", "")
+
+        # Stuck detection from LLM
+        if llm.get("is_stuck"):
+            result.is_stuck = True
+
+    def _keyword_fallback(self, result: ResponseAnalysis, text_lower: str):
+        """Fallback analysis using keyword matching. Used when LLM is unavailable."""
+        # Extract concepts
+        for keyword, concept_id in KNOWN_KEYWORDS.items():
+            if keyword in text_lower and concept_id not in result.concepts_mentioned:
+                result.concepts_mentioned.append(concept_id)
+                result.concept_depths[concept_id] = "surface"  # Can't assess depth without LLM
+
+        # Depth signals from patterns
+        reasoning_signals = [
+            "because", "since", "the reason", "trade-off", "tradeoff",
+            "downside", "advantage", "disadvantage", "alternatively",
+            "compared to", "instead of", "rather than", "on the other hand",
+        ]
+        failure_signals = [
+            "fail", "crash", "goes down", "dies", "outage", "timeout",
+            "retry", "fallback", "graceful degradation", "circuit breaker",
+            "single point of failure", "spof", "failover",
+        ]
+
+        result.depth_signals["gave_reasoning"] = any(s in text_lower for s in reasoning_signals)
+        result.depth_signals["mentioned_tradeoffs"] = any(
+            s in text_lower for s in ["trade-off", "tradeoff", "downside", "alternatively", "compared to"]
+        )
+        result.depth_signals["used_specific_numbers"] = len(result.numbers) > 0
+        result.depth_signals["referenced_alternatives"] = any(
+            s in text_lower for s in ["instead of", "rather than", "alternatively", "another option"]
+        )
+        result.depth_signals["discussed_failure_modes"] = any(s in text_lower for s in failure_signals)
+
+        # Estimate overall depth from signals
+        signal_count = sum(1 for v in result.depth_signals.values() if v)
+        if signal_count == 0:
+            result.overall_depth = "buzzword"
+        elif signal_count == 1:
+            result.overall_depth = "surface"
+        elif signal_count <= 3:
+            result.overall_depth = "applied"
+        else:
+            result.overall_depth = "deep"
 
 
 response_analyzer = ResponseAnalyzer()

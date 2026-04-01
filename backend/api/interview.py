@@ -55,7 +55,7 @@ async def send_message(request: InterviewMessageRequest) -> InterviewMessageResp
 @router.post("/interview/{session_id}/end")
 async def end_interview(session_id: str):
     """End an interview early and get the scorecard."""
-    scorecard = interview_engine.get_scorecard(session_id)
+    scorecard = await interview_engine.get_scorecard(session_id)
     if not scorecard:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"is_complete": True, "scorecard": scorecard}
@@ -64,7 +64,7 @@ async def end_interview(session_id: str):
 @router.get("/interview/{session_id}/scorecard")
 async def get_scorecard(session_id: str):
     """Get scorecard for a completed interview."""
-    scorecard = interview_engine.get_scorecard(session_id)
+    scorecard = await interview_engine.get_scorecard(session_id)
     if not scorecard:
         raise HTTPException(status_code=404, detail="Session not found")
     return scorecard

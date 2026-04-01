@@ -142,7 +142,7 @@ class InterviewEngine:
 
         # Enforce max messages per session
         if len(session["messages"]) >= MAX_MESSAGES_PER_SESSION:
-            scorecard = interview_scorer.score(tracker)
+            scorecard = await interview_scorer.score(tracker)
             return {
                 "reply": "We've reached the end of our time. Let me put together your evaluation.",
                 "state": tracker.to_state_dict(),
@@ -158,7 +158,7 @@ class InterviewEngine:
 
         # Check if interview is complete
         if tracker.is_interview_complete():
-            scorecard = interview_scorer.score(tracker)
+            scorecard = await interview_scorer.score(tracker)
             return {
                 "reply": "Thank you for walking me through your design. Let me put together your evaluation.",
                 "state": tracker.to_state_dict(),
@@ -178,7 +178,7 @@ class InterviewEngine:
 
         # Check if action is end_interview
         if action.action_type == "end_interview":
-            scorecard = interview_scorer.score(tracker)
+            scorecard = await interview_scorer.score(tracker)
             reply = action.data.get("message", "That's all the time we have. Thank you.")
             session["messages"].append({"role": "assistant", "content": reply})
             return {
@@ -201,11 +201,11 @@ class InterviewEngine:
             "scorecard": None,
         }
 
-    def get_scorecard(self, session_id: str) -> dict | None:
+    async def get_scorecard(self, session_id: str) -> dict | None:
         session = _sessions.get(session_id)
         if not session:
             return None
-        return interview_scorer.score(session["tracker"])
+        return await interview_scorer.score(session["tracker"])
 
     def get_session_state(self, session_id: str) -> dict | None:
         session = _sessions.get(session_id)

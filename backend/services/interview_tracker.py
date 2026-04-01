@@ -2,6 +2,13 @@
 Layer 2: Interview Tracker
 Maintains complete interview state — claims, coverage, contradictions, depth, rubric scores.
 Pure deterministic code, zero LLM.
+
+Key changes from v1:
+- Per-concept depth from LLM (not signal counting)
+- Content-driven phase transitions (not just timer-based)
+- Per-phase exchange tracking
+- Proper contradiction detection
+- Stores candidate's actual words per concept for feedback
 """
 import time
 from enum import IntEnum
@@ -14,6 +21,15 @@ class Depth(IntEnum):
     SURFACE = 2     # Named + basic reasoning
     APPLIED = 3     # Understanding + numbers or trade-offs
     DEEP = 4        # Internals, failure modes, math, alternatives
+
+
+DEPTH_FROM_STRING = {
+    "none": Depth.NONE,
+    "buzzword": Depth.BUZZWORD,
+    "surface": Depth.SURFACE,
+    "applied": Depth.APPLIED,
+    "deep": Depth.DEEP,
+}
 
 
 class Phase(str):
@@ -32,16 +48,37 @@ PHASE_ORDER = [
     Phase.WRAP_UP,
 ]
 
-# Max minutes per phase per career level
-PHASE_DURATIONS = {
-    Phase.REQUIREMENTS:      {"sde2": 5, "senior": 5, "staff": 5, "principal": 7, "vp": 10},
-    Phase.HIGH_LEVEL:        {"sde2": 15, "senior": 15, "staff": 15, "principal": 15, "vp": 12},
-    Phase.DEEP_DIVE:         {"sde2": 8, "senior": 12, "staff": 15, "principal": 15, "vp": 15},
+# Hard time caps per phase (safety net — content-driven transitions should fire first)
+PHASE_MAX_MINUTES = {
+    Phase.REQUIREMENTS:      {"sde2": 7, "senior": 6, "staff": 5, "principal": 8, "vp": 10},
+    Phase.HIGH_LEVEL:        {"sde2": 15, "senior": 15, "staff": 12, "principal": 15, "vp": 12},
+    Phase.DEEP_DIVE:         {"sde2": 8, "senior": 12, "staff": 18, "principal": 15, "vp": 15},
     Phase.SCALING_FAILURES:  {"sde2": 5, "senior": 8, "staff": 10, "principal": 10, "vp": 10},
     Phase.WRAP_UP:           {"sde2": 2, "senior": 2, "staff": 2, "principal": 3, "vp": 5},
 }
 
-# Expected depth per career level
+# Content-based transition thresholds
+TRANSITION_CRITERIA = {
+    Phase.REQUIREMENTS: {
+        # Move to HLD when candidate has asked enough clarifying questions
+        "min_exchanges": 2,
+        "min_questions_asked": 1,  # At least 1 clarifying question
+    },
+    Phase.HIGH_LEVEL: {
+        # Move to deep dive when enough high-level concepts are touched
+        "min_exchanges": 3,
+        "min_concepts_covered_pct": 0.35,  # 35% of concepts touched
+    },
+    Phase.DEEP_DIVE: {
+        # Move to scaling when deep-dived enough
+        "min_exchanges": 3,
+        "min_deep_or_applied": 2,  # At least 2 concepts at APPLIED+ depth
+    },
+    Phase.SCALING_FAILURES: {
+        "min_exchanges": 2,
+    },
+}
+
 EXPECTED_DEPTH = {
     "sde2": Depth.SURFACE,
     "senior": Depth.APPLIED,
@@ -69,6 +106,7 @@ class Claim:
     exchange: int
     justified: bool = False
     tested: bool = False
+    reasoning: str = ""
     timestamp: float = 0.0
 
 
@@ -86,17 +124,21 @@ class InterviewTracker:
         self.level = career_level
         self.problem_id = knowledge_graph.get("problem", "unknown")
 
-        # Phase
+        # Phase management
         self.phase = Phase.REQUIREMENTS
         self.phase_index = 0
         self.phase_start_time = time.time()
         self.interview_start_time = time.time()
 
-        # Exchange counter
+        # Per-phase exchange tracking (fixes the bug where exchange_count was global)
         self.exchange_count = 0
+        self.phase_exchange_counts: dict[str, int] = {p: 0 for p in PHASE_ORDER}
+        self.questions_asked_in_requirements = 0
 
         # Concept coverage: concept_id → Depth
         self.covered_concepts: dict[str, Depth] = {}
+        # What the candidate actually said about each concept (for feedback)
+        self.concept_summaries: dict[str, str] = {}
 
         # Rubric scores: dimension → score (0-10)
         self.rubric_scores: dict[str, float] = {d: 0.0 for d in RUBRIC_DIMENSIONS}
@@ -111,41 +153,54 @@ class InterviewTracker:
         self.consecutive_deep = 0
         self.consecutive_shallow = 0
 
-        # Deep dive target (set when transitioning to deep_dive phase)
+        # Stuck tracking (was dynamically set before — now proper attribute)
+        self._consecutive_stuck = 0
+
+        # Deep dive target
         self.deep_dive_target: str | None = None
 
-        # Conversation log
+        # Suggested follow-up from analyzer (used by speaker)
+        self.last_suggested_followup: str = ""
+        self.last_gaps: list[str] = []
+
+        # Conversation log for the scorer
         self.messages: list[dict] = []
 
     def _base_difficulty(self) -> int:
         levels = {"sde2": 1, "senior": 2, "staff": 3, "principal": 4, "vp": 5}
         return levels.get(self.level, 2)
 
-    def classify_depth(self, depth_signals: dict) -> Depth:
-        """Classify response depth from analyzer signals."""
-        score = 0
-        if depth_signals.get("gave_reasoning"):         score += 1
-        if depth_signals.get("used_specific_numbers"):   score += 1
-        if depth_signals.get("mentioned_tradeoffs"):     score += 1
-        if depth_signals.get("referenced_alternatives"): score += 1
-        if depth_signals.get("discussed_failure_modes"):  score += 1
-
-        if score == 0: return Depth.BUZZWORD
-        if score == 1: return Depth.SURFACE
-        if score <= 3: return Depth.APPLIED
-        return Depth.DEEP
-
     def update(self, analysis: dict):
         """Update tracker state with new analysis from Layer 1."""
         self.exchange_count += 1
+        self.phase_exchange_counts[self.phase] = self.phase_exchange_counts.get(self.phase, 0) + 1
         now = time.time()
 
-        depth = self.classify_depth(analysis.get("depth_signals", {}))
+        # Track questions asked during requirements phase
+        if self.phase == Phase.REQUIREMENTS and analysis.get("is_asking_question"):
+            self.questions_asked_in_requirements += 1
 
-        # 1. Update concept coverage
+        # Store LLM-provided follow-up and gaps
+        self.last_suggested_followup = analysis.get("suggested_followup", "")
+        self.last_gaps = analysis.get("gaps", [])
+
+        # 1. Update concept coverage with per-concept depth from LLM
+        concept_depths = analysis.get("concept_depths", {})
+        concept_summaries = analysis.get("concept_summaries", {})
+
         for concept_id in analysis.get("concepts_mentioned", []):
+            # Get LLM-assessed depth for this specific concept
+            depth_str = concept_depths.get(concept_id, "surface")
+            depth = DEPTH_FROM_STRING.get(depth_str, Depth.SURFACE)
+
+            # Only upgrade, never downgrade
             current = self.covered_concepts.get(concept_id, Depth.NONE)
             self.covered_concepts[concept_id] = max(current, depth)
+
+            # Store what they said (latest summary wins)
+            summary = concept_summaries.get(concept_id, "")
+            if summary:
+                self.concept_summaries[concept_id] = summary
 
         # 2. Record claims
         for claim_data in analysis.get("claims", []):
@@ -154,6 +209,7 @@ class InterviewTracker:
                 concept=claim_data.get("concept", ""),
                 exchange=self.exchange_count,
                 justified=claim_data.get("justified", False),
+                reasoning=claim_data.get("reasoning", ""),
                 timestamp=now,
             )
             self.claims.append(claim)
@@ -167,47 +223,74 @@ class InterviewTracker:
         self._update_rubric(analysis)
 
         # 5. Adjust adaptive difficulty
-        self._adjust_difficulty(depth)
+        overall_depth_str = analysis.get("overall_depth", "surface")
+        overall_depth = DEPTH_FROM_STRING.get(overall_depth_str, Depth.SURFACE)
+        self._adjust_difficulty(overall_depth)
 
     def _check_contradictions(self):
-        """Check if recent claims contradict earlier ones."""
+        """Check if recent claims contradict earlier ones on the same concept."""
         if len(self.claims) < 2:
             return
 
         recent = self.claims[-1]
+        if not recent.concept:
+            return
+
         for old in self.claims[:-1]:
-            if old.concept == recent.concept and old.concept:
-                # Same concept, different claim — potential contradiction
-                if (old.text.lower() != recent.text.lower() and
-                        old.exchange != recent.exchange):
-                    self.contradictions.append(Contradiction(
-                        old_claim=old,
-                        new_claim=recent,
-                        exchange=self.exchange_count,
-                    ))
+            if old.concept == recent.concept and old.exchange != recent.exchange:
+                # Same concept, different exchange — check if claims differ
+                old_lower = old.text.lower().strip()
+                recent_lower = recent.text.lower().strip()
+
+                # Skip if texts are very similar (not a contradiction)
+                if old_lower == recent_lower:
+                    continue
+
+                # Skip if both are very short (likely not meaningful contradictions)
+                if len(old_lower) < 10 or len(recent_lower) < 10:
+                    continue
+
+                # Record as potential contradiction — the strategist decides whether to act
+                self.contradictions.append(Contradiction(
+                    old_claim=old,
+                    new_claim=recent,
+                    exchange=self.exchange_count,
+                ))
 
     def _update_rubric(self, analysis: dict):
         """Update rubric dimension scores based on what was covered."""
-        concepts = analysis.get("concepts_mentioned", [])
-        depth = analysis.get("depth_signals", {})
-
-        # Map concepts to rubric dimensions
         concept_rubric_map = self.graph.get("concept_rubric_map", {})
-        for concept_id in concepts:
+        concept_depths = analysis.get("concept_depths", {})
+
+        for concept_id in analysis.get("concepts_mentioned", []):
             dimension = concept_rubric_map.get(concept_id)
             if dimension and dimension in self.rubric_scores:
-                concept_depth = self.covered_concepts.get(concept_id, Depth.BUZZWORD)
-                score_add = concept_depth.value * 1.5  # 0-6 points per concept
+                # Use the LLM-assessed per-concept depth, not a global signal count
+                depth_str = concept_depths.get(concept_id, "surface")
+                depth = DEPTH_FROM_STRING.get(depth_str, Depth.SURFACE)
+
+                # Score contribution depends on depth:
+                # BUZZWORD: +1.0, SURFACE: +2.0, APPLIED: +3.5, DEEP: +5.0
+                score_map = {
+                    Depth.BUZZWORD: 1.0,
+                    Depth.SURFACE: 2.0,
+                    Depth.APPLIED: 3.5,
+                    Depth.DEEP: 5.0,
+                }
+                score_add = score_map.get(depth, 1.5)
                 self.rubric_scores[dimension] = min(10, self.rubric_scores[dimension] + score_add)
 
-        # Communication score increases with reasoning/trade-offs
-        if depth.get("gave_reasoning"):
+        # Communication score based on reasoning quality
+        depth_signals = analysis.get("depth_signals", {})
+        if depth_signals.get("gave_reasoning"):
             self.rubric_scores["communication"] = min(10, self.rubric_scores["communication"] + 0.5)
-        if depth.get("mentioned_tradeoffs"):
+        if depth_signals.get("mentioned_tradeoffs"):
             self.rubric_scores["communication"] = min(10, self.rubric_scores["communication"] + 0.7)
+        # Asking clarifying questions in requirements shows good communication
+        if analysis.get("is_asking_question") and self.phase == Phase.REQUIREMENTS:
+            self.rubric_scores["communication"] = min(10, self.rubric_scores["communication"] + 1.0)
 
     def _adjust_difficulty(self, depth: Depth):
-        """Adapt interview difficulty based on answer quality."""
         if depth >= Depth.DEEP:
             self.consecutive_deep += 1
             self.consecutive_shallow = 0
@@ -224,21 +307,54 @@ class InterviewTracker:
             self.consecutive_deep = 0
             self.consecutive_shallow = 0
 
+    # ── Phase Transition Logic (Content-Driven) ───────────────
+
     def should_transition_phase(self) -> bool:
-        """Check if we should move to the next phase."""
+        """Check if we should move to the next phase.
+        Uses content coverage as primary signal, time as safety net.
+        """
         if self.phase == Phase.WRAP_UP:
             return False
 
+        phase_exchanges = self.phase_exchange_counts.get(self.phase, 0)
         elapsed_min = (time.time() - self.phase_start_time) / 60
-        max_duration = PHASE_DURATIONS.get(self.phase, {}).get(self.level, 10)
+        max_minutes = PHASE_MAX_MINUTES.get(self.phase, {}).get(self.level, 10)
+        criteria = TRANSITION_CRITERIA.get(self.phase, {})
 
-        # Time exceeded
-        if elapsed_min >= max_duration:
+        # Safety net: always transition if time exceeded
+        if elapsed_min >= max_minutes:
             return True
 
-        # Minimum exchanges before transition
-        min_exchanges_in_phase = 2 if self.phase == Phase.REQUIREMENTS else 3
-        phase_exchanges = self.exchange_count  # Simplified — track per-phase later
+        # Minimum exchanges must be met
+        min_exchanges = criteria.get("min_exchanges", 2)
+        if phase_exchanges < min_exchanges:
+            return False
+
+        # Content-driven criteria per phase
+        if self.phase == Phase.REQUIREMENTS:
+            # Transition when candidate has asked clarifying questions
+            min_questions = criteria.get("min_questions_asked", 1)
+            return self.questions_asked_in_requirements >= min_questions
+
+        elif self.phase == Phase.HIGH_LEVEL:
+            # Transition when enough concepts are touched
+            total_concepts = len(self.graph.get("concepts", {}))
+            if total_concepts == 0:
+                return phase_exchanges >= 4
+            covered_pct = len(self.covered_concepts) / total_concepts
+            min_pct = criteria.get("min_concepts_covered_pct", 0.35)
+            return covered_pct >= min_pct
+
+        elif self.phase == Phase.DEEP_DIVE:
+            # Transition when enough depth is achieved
+            applied_or_deeper = sum(
+                1 for d in self.covered_concepts.values() if d >= Depth.APPLIED
+            )
+            min_deep = criteria.get("min_deep_or_applied", 2)
+            return applied_or_deeper >= min_deep
+
+        elif self.phase == Phase.SCALING_FAILURES:
+            return phase_exchanges >= criteria.get("min_exchanges", 2)
 
         return False
 
@@ -252,33 +368,30 @@ class InterviewTracker:
 
         self.phase_start_time = time.time()
 
-        # If entering deep dive, pick the weakest rubric dimension
         if self.phase == Phase.DEEP_DIVE:
             self.deep_dive_target = self._find_weakest_dimension()
 
         return self.phase
 
     def _find_weakest_dimension(self) -> str:
-        """Find the rubric dimension with the lowest score."""
         scorable = {k: v for k, v in self.rubric_scores.items() if k != "communication"}
         if not scorable:
             return "database_design"
         return min(scorable, key=scorable.get)
 
+    # ── Query Methods ─────────────────────────────────────────
+
     def get_uncovered_concepts(self) -> list[str]:
-        """Get concepts from the knowledge graph not yet mentioned."""
         all_concepts = set(self.graph.get("concepts", {}).keys())
         covered = set(self.covered_concepts.keys())
         return list(all_concepts - covered)
 
     def get_shallow_concepts(self) -> list[tuple[str, Depth]]:
-        """Get concepts mentioned but at insufficient depth for the career level."""
         expected = EXPECTED_DEPTH.get(self.level, Depth.SURFACE)
-        shallow = []
-        for concept_id, depth in self.covered_concepts.items():
-            if depth < expected:
-                shallow.append((concept_id, depth))
-        return shallow
+        return [
+            (cid, depth) for cid, depth in self.covered_concepts.items()
+            if depth < expected
+        ]
 
     def get_unaddressed_contradictions(self) -> list[Contradiction]:
         return [c for c in self.contradictions if not c.addressed]
@@ -294,14 +407,16 @@ class InterviewTracker:
         return durations.get(self.level, 45)
 
     def is_interview_complete(self) -> bool:
-        return (self.phase == Phase.WRAP_UP and self.get_phase_elapsed_minutes() > 1) or \
-               self.get_elapsed_minutes() >= self.get_total_duration_minutes()
+        return (
+            (self.phase == Phase.WRAP_UP and self.get_phase_elapsed_minutes() > 1) or
+            self.get_elapsed_minutes() >= self.get_total_duration_minutes()
+        )
 
     def to_state_dict(self) -> dict:
-        """Serialize state for API response."""
         return {
             "phase": self.phase,
             "exchange_count": self.exchange_count,
+            "phase_exchanges": self.phase_exchange_counts.get(self.phase, 0),
             "elapsed_minutes": round(self.get_elapsed_minutes(), 1),
             "total_minutes": self.get_total_duration_minutes(),
             "effective_difficulty": self.effective_difficulty,

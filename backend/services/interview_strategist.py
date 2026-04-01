@@ -150,6 +150,20 @@ class InterviewStrategist:
                 data={"message": "Thank you for walking me through your design. That's all the time we have."},
             ))
 
+        # PRIORITY 75: Use LLM-suggested follow-up (context-aware, specific to what was said)
+        if tracker.last_suggested_followup and len(tracker.last_suggested_followup) > 20:
+            # The analyzer suggested a specific follow-up based on the candidate's actual words
+            candidates.append(InterviewAction(
+                priority=75,
+                action_type="llm_followup",
+                data={
+                    "followup": tracker.last_suggested_followup,
+                    "gaps": tracker.last_gaps,
+                },
+            ))
+            # Clear so we don't reuse it
+            tracker.last_suggested_followup = ""
+
         # PRIORITY 70: Test untested claims (anti-BS)
         if tracker.untested_claims:
             claim = tracker.untested_claims[0]
