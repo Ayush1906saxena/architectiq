@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.2"
 
+    # JWT auth
+    jwt_secret: str = "change-me-in-production"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 10080  # 7 days
+
     cors_origins: list[str] = [
         "http://localhost:3000", "http://localhost:3001", "http://localhost:3002",
         "http://localhost:3003", "http://localhost:3004", "http://localhost:3005",

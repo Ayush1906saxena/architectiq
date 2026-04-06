@@ -1,11 +1,43 @@
+import hashlib
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from config import settings
 from models.lesson import TTSRequest, TTSResponse
 from services.tts_service import tts_service
 
 router = APIRouter()
+
+
+class InterviewTTSRequest(BaseModel):
+    text: str
+
+
+class InterviewTTSResponse(BaseModel):
+    audio_url: str
+    duration_ms: int
+
+
+@router.post("/tts/interview")
+async def generate_interview_tts(request: InterviewTTSRequest) -> InterviewTTSResponse:
+    """Generate TTS for an interviewer response. Uses content-hash for caching."""
+    text_hash = hashlib.md5(request.text.encode()).hexdigest()[:12]
+    try:
+        audio_path, duration_ms, _ = await tts_service.generate(
+            text=request.text,
+            topic_id="interview",
+            lesson_id="responses",
+            segment_id=text_hash,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS generation failed: {str(e)}")
+
+    return InterviewTTSResponse(
+        audio_url=f"/api/tts/audio/interview/responses/{text_hash}.wav",
+        duration_ms=duration_ms,
+    )
 
 
 @router.post("/tts")

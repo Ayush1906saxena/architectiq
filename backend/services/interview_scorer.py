@@ -199,6 +199,7 @@ Respond with this JSON:
                 system=_SCORER_SYSTEM,
                 json_mode=True,
                 temperature=0.2,
+                max_tokens=2048,
             )
             parsed = json.loads(raw)
 

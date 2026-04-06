@@ -39,36 +39,50 @@ def _build_system(level: str) -> str:
     )
 
 
+def _clean_response(text: str) -> str:
+    """Strip meta-commentary, stage directions, and framing the LLM sometimes adds."""
+    import re
+    # Remove parenthetical notes: (Note: ...), (I'm keeping...), etc.
+    text = re.sub(r'\((?:Note|I\'m|This|My|Here|Keep)[^)]*\)', '', text)
+    # Remove asterisk actions: *pauses*, *smiles*, *nods*
+    text = re.sub(r'\*[^*]+\*', '', text)
+    # Remove "Here's my response:" or "Here's my attempt:" prefixes
+    text = re.sub(r'^(?:Here\'?s?\s+(?:my|the|an?)\s+\w+[:\-—]\s*)+', '', text, flags=re.IGNORECASE)
+    # Remove wrapping quotes if the entire response is quoted
+    text = text.strip()
+    if text.startswith('"') and text.endswith('"') and text.count('"') == 2:
+        text = text[1:-1]
+    return text.strip()
+
+
 class InterviewSpeaker:
     async def generate_response(self, action: dict, tracker: InterviewTracker) -> str:
         """Generate natural interviewer speech from a structured action."""
         system = _build_system(tracker.level)
         action_type = action.action_type
 
-        if action_type == "llm_followup":
-            return await self._speak_llm_followup(action.data, system)
-        elif action_type == "give_hint" or action_type == "give_strong_hint":
-            return await self._speak_hint(action.data, system, strong=action_type == "give_strong_hint")
-        elif action_type == "catch_contradiction":
-            return await self._speak_contradiction(action.data, system)
-        elif action_type == "transition_phase":
-            return await self._speak_transition(action.data, system)
-        elif action_type == "probe_claim":
-            return await self._speak_probe(action.data, system)
-        elif action_type == "deepen":
-            return await self._speak_deepen(action.data, system)
-        elif action_type == "redirect":
-            return await self._speak_redirect(action.data, system)
-        elif action_type == "challenge":
-            return await self._speak_challenge(action.data, system)
-        elif action_type == "scaling_probe":
-            return await self._speak_scaling(action.data, system)
-        elif action_type == "end_interview":
-            return await self._speak_closing(action.data, system, tracker)
-        elif action_type == "open_ended":
-            return await self._speak_open(action.data, system)
+        handlers = {
+            "llm_followup": lambda: self._speak_llm_followup(action.data, system),
+            "give_hint": lambda: self._speak_hint(action.data, system, strong=False),
+            "give_strong_hint": lambda: self._speak_hint(action.data, system, strong=True),
+            "catch_contradiction": lambda: self._speak_contradiction(action.data, system),
+            "transition_phase": lambda: self._speak_transition(action.data, system),
+            "probe_claim": lambda: self._speak_probe(action.data, system),
+            "deepen": lambda: self._speak_deepen(action.data, system),
+            "redirect": lambda: self._speak_redirect(action.data, system),
+            "challenge": lambda: self._speak_challenge(action.data, system),
+            "scaling_probe": lambda: self._speak_scaling(action.data, system),
+            "end_interview": lambda: self._speak_closing(action.data, system, tracker),
+            "open_ended": lambda: self._speak_open(action.data, system),
+        }
+
+        handler = handlers.get(action_type)
+        if handler:
+            raw = await handler()
         else:
-            return action.data.get("prompt", "Tell me more about your design.")
+            raw = action.data.get("prompt", "Tell me more about your design.")
+
+        return _clean_response(raw)
 
     async def _speak_llm_followup(self, data: dict, system: str) -> str:
         """Deliver an LLM-generated follow-up question that's specific to what the candidate said."""
@@ -206,7 +220,8 @@ class InterviewSpeaker:
             "'Before we start designing, what questions do you have about the requirements?'\n"
             "Keep it to 3-4 sentences total. Be natural — this is the first thing the candidate hears."
         )
-        return await ollama_client.generate(prompt, system=system, temperature=0.7)
+        raw = await ollama_client.generate(prompt, system=system, temperature=0.7)
+        return _clean_response(raw)
 
 
 interview_speaker = InterviewSpeaker()

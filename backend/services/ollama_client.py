@@ -35,10 +35,11 @@ class LLMClient:
         system: str = "",
         temperature: float = 0.7,
         json_mode: bool = False,
+        max_tokens: int = 1024,
     ) -> str:
         """Generate a completion. Works with both Groq and Ollama."""
         if self._provider == "groq":
-            return await self._groq_generate(prompt, system, temperature, json_mode)
+            return await self._groq_generate(prompt, system, temperature, json_mode, max_tokens)
         else:
             return await self._ollama_generate(prompt, system, temperature, json_mode)
 
@@ -56,7 +57,8 @@ class LLMClient:
     # ── Groq (OpenAI-compatible) ──────────────────────────────
 
     async def _groq_generate(
-        self, prompt: str, system: str, temperature: float, json_mode: bool
+        self, prompt: str, system: str, temperature: float, json_mode: bool,
+        max_tokens: int = 1024,
     ) -> str:
         messages = []
         if system:
@@ -67,13 +69,13 @@ class LLMClient:
             "model": self._model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": 1024,
+            "max_tokens": max_tokens,
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(
                     f"{self._base_url}/chat/completions",
                     headers={
@@ -100,7 +102,7 @@ class LLMClient:
             "max_tokens": 1024,
         }
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(
                     f"{self._base_url}/chat/completions",
                     headers={
@@ -135,7 +137,7 @@ class LLMClient:
             payload["format"] = "json"
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=120.0) as client:
                 resp = await client.post(
                     f"{self._base_url}/api/generate",
                     json=payload,
@@ -153,7 +155,7 @@ class LLMClient:
             "options": {"temperature": temperature},
         }
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=120.0) as client:
                 resp = await client.post(
                     f"{self._base_url}/api/chat",
                     json=payload,

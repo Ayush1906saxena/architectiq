@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from middleware.auth import get_optional_user
 from models.interview import (
     InterviewStartRequest,
     InterviewStartResponse,
@@ -20,7 +21,10 @@ async def list_problems() -> list[InterviewProblem]:
 
 
 @router.post("/interview/start")
-async def start_interview(request: InterviewStartRequest) -> InterviewStartResponse:
+async def start_interview(
+    request: InterviewStartRequest,
+    user: dict | None = Depends(get_optional_user),
+) -> InterviewStartResponse:
     """Start a new interview session."""
     if request.career_level not in ("sde2", "senior", "staff", "principal", "vp"):
         raise HTTPException(status_code=400, detail="Invalid career level")
@@ -32,6 +36,20 @@ async def start_interview(request: InterviewStartRequest) -> InterviewStartRespo
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    # Save to history if user is logged in
+    if user:
+        from db.database import get_db
+
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO interview_history (user_id, session_id, problem_id, career_level) VALUES (?, ?, ?, ?)",
+                (user["id"], result["session_id"], request.problem_id, request.career_level),
+            )
+            await db.commit()
+        finally:
+            await db.close()
 
     return InterviewStartResponse(**result)
 
@@ -53,11 +71,36 @@ async def send_message(request: InterviewMessageRequest) -> InterviewMessageResp
 
 
 @router.post("/interview/{session_id}/end")
-async def end_interview(session_id: str):
+async def end_interview(session_id: str, user: dict | None = Depends(get_optional_user)):
     """End an interview early and get the scorecard."""
     scorecard = await interview_engine.get_scorecard(session_id)
     if not scorecard:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # Update history with results if user is logged in
+    if user:
+        import json
+        from db.database import get_db
+
+        db = await get_db()
+        try:
+            await db.execute(
+                "UPDATE interview_history SET overall_score = ?, passed = ?, badge = ?, "
+                "scorecard_json = ?, completed_at = CURRENT_TIMESTAMP "
+                "WHERE session_id = ? AND user_id = ?",
+                (
+                    scorecard.get("overall_score"),
+                    scorecard.get("passed"),
+                    scorecard.get("badge"),
+                    json.dumps(scorecard),
+                    session_id,
+                    user["id"],
+                ),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
     return {"is_complete": True, "scorecard": scorecard}
 
 

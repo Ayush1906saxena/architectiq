@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings
-from api import health, lessons, tts, quiz, progress, curriculum, design_challenge, ask, interview
+from api import health, lessons, tts, quiz, progress, curriculum, design_challenge, ask, interview, auth, history
 from db.database import init_db
 from middleware.security import RateLimitMiddleware, RequestSizeLimitMiddleware
 
@@ -37,3 +37,5 @@ app.include_router(curriculum.router, prefix="/api", tags=["curriculum"])
 app.include_router(design_challenge.router, prefix="/api", tags=["design-challenge"])
 app.include_router(ask.router, prefix="/api", tags=["ask"])
 app.include_router(interview.router, prefix="/api", tags=["interview"])
+app.include_router(auth.router, prefix="/api", tags=["auth"])
+app.include_router(history.router, prefix="/api", tags=["history"])

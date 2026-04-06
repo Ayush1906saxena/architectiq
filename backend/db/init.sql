@@ -56,4 +56,28 @@ CREATE TABLE IF NOT EXISTS design_challenge_results (
     completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT UNIQUE NOT NULL,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    display_name TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS interview_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    session_id TEXT NOT NULL,
+    problem_id TEXT NOT NULL,
+    career_level TEXT NOT NULL,
+    overall_score INTEGER,
+    passed BOOLEAN,
+    badge TEXT,
+    scorecard_json TEXT,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
 INSERT OR IGNORE INTO user_profile (id) VALUES (1);

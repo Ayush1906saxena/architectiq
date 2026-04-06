@@ -240,6 +240,7 @@ class ResponseAnalyzer:
                 system=_ANALYSIS_SYSTEM,
                 json_mode=True,
                 temperature=0.1,
+                max_tokens=2048,
             )
             parsed = json.loads(raw)
 
