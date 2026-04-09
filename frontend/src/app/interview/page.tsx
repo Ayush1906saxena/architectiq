@@ -3,9 +3,27 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-import { fetchInterviewProblems } from "@/lib/api";
+import { fetchInterviewProblems, fetchRecommendations } from "@/lib/api";
+import { useAuthStore } from "@/store/useAuthStore";
 import Button from "@/components/ui/Button";
 import PageTransition from "@/components/ui/PageTransition";
+
+interface WeakDimension {
+  name: string;
+  avg_score: number;
+  recommendation: string;
+}
+
+interface RecommendedProblem {
+  problem_id: string;
+  reason: string;
+}
+
+interface Recommendations {
+  weak_dimensions: WeakDimension[];
+  suggested_level: string | null;
+  recommended_problems: RecommendedProblem[];
+}
 
 const stagger = {
   hidden: { opacity: 0 } as const,
@@ -27,16 +45,27 @@ const CAREER_LEVELS = [
 
 export default function InterviewSelectionPage() {
   const router = useRouter();
+  const { token } = useAuthStore();
   const [problemCount, setProblemCount] = useState(0);
   const [selectedLevel, setSelectedLevel] = useState<string>("senior");
   const [isStarting, setIsStarting] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
+  const [recommendations, setRecommendations] = useState<Recommendations | null>(null);
 
   useEffect(() => {
     fetchInterviewProblems()
       .then((data) => setProblemCount(data.length))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!token) return;
+    fetchRecommendations()
+      .then((data) => {
+        if (data) setRecommendations(data);
+      })
+      .catch(() => {});
+  }, [token]);
 
   const handleStart = () => {
     setIsStarting(true);
@@ -103,6 +132,102 @@ export default function InterviewSelectionPage() {
             </motion.div>
           ))}
         </motion.div>
+
+        {/* Recommendations Section */}
+        {recommendations && (recommendations.recommended_problems.length > 0 || recommendations.suggested_level || recommendations.weak_dimensions.length > 0) && (
+          <motion.div
+            className="mt-10"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.3, duration: 0.5 }}
+          >
+            <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-4">
+              Recommended for You
+            </div>
+
+            {/* Suggested Level Banner */}
+            {recommendations.suggested_level && (
+              <motion.div
+                className="mb-4 p-4 rounded-xl bg-gradient-to-r from-blue-500/10 via-purple-500/10 to-blue-500/10 border border-blue-500/30"
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ delay: 0.4 }}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-purple-500 flex items-center justify-center text-white text-sm font-bold">
+                    &#8593;
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-white">
+                      You&apos;re ready for{" "}
+                      <span className="text-blue-400 capitalize">{recommendations.suggested_level}</span>
+                      {" "}&mdash; you&apos;ve been acing{" "}
+                      <span className="text-purple-400 capitalize">{selectedLevel}</span>!
+                    </p>
+                    <p className="text-[11px] text-gray-400 mt-0.5">
+                      Consider leveling up your next interview.
+                    </p>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {/* Weak Dimensions Chips */}
+            {recommendations.weak_dimensions.length > 0 && (
+              <div className="mb-4 flex flex-wrap gap-2">
+                {recommendations.weak_dimensions.map((dim) => (
+                  <span
+                    key={dim.name}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium bg-gray-800/80 border border-gray-700/50 text-gray-300"
+                    title={dim.recommendation}
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                    {dim.name.replace(/_/g, " ")}
+                    <span className="text-gray-500">{dim.avg_score.toFixed(1)}/10</span>
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Recommended Problem Cards */}
+            {recommendations.recommended_problems.length > 0 && (
+              <div className="space-y-2">
+                {recommendations.recommended_problems.map((prob) => (
+                  <motion.div
+                    key={prob.problem_id}
+                    className="p-4 rounded-xl bg-gray-900 border border-transparent bg-clip-padding relative"
+                    style={{
+                      backgroundImage:
+                        "linear-gradient(rgb(17 24 39), rgb(17 24 39)), linear-gradient(135deg, rgba(59,130,246,0.3), rgba(139,92,246,0.3))",
+                      backgroundOrigin: "border-box",
+                      backgroundClip: "padding-box, border-box",
+                      border: "1px solid transparent",
+                    }}
+                    initial={{ opacity: 0, x: -10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: 0.5 }}
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className="mt-0.5 w-6 h-6 rounded-md bg-blue-500/15 flex items-center justify-center flex-shrink-0">
+                        <svg className="w-3.5 h-3.5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-semibold text-gray-200 capitalize">
+                          {prob.problem_id.replace(/-/g, " ")}
+                        </p>
+                        <p className="text-[11px] text-gray-400 mt-0.5 leading-relaxed">
+                          {prob.reason}
+                        </p>
+                      </div>
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+            )}
+          </motion.div>
+        )}
 
         {/* Level Selector */}
         <motion.div

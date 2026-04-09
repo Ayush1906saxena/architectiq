@@ -70,3 +70,33 @@ async def create_user(email: str, username: str, password: str) -> dict:
         return {"id": cursor.lastrowid, "email": email, "username": username, "display_name": username}
     finally:
         await db.close()
+
+
+async def get_or_create_oauth_user(email: str, display_name: str, provider: str) -> dict:
+    """Find user by email or create a new one for OAuth login (no password needed)."""
+    user = await get_user_by_email(email)
+    if user:
+        return {k: v for k, v in user.items() if k != "password_hash"}
+
+    # Create new user — generate a username from email, use empty password hash (OAuth-only)
+    base_username = email.split("@")[0]
+    username = base_username
+    db = await get_db()
+    try:
+        # Ensure unique username
+        suffix = 0
+        while True:
+            cursor = await db.execute("SELECT id FROM users WHERE username = ?", (username,))
+            if not await cursor.fetchone():
+                break
+            suffix += 1
+            username = f"{base_username}{suffix}"
+
+        cursor = await db.execute(
+            "INSERT INTO users (email, username, password_hash, display_name) VALUES (?, ?, ?, ?)",
+            (email, username, "", display_name or username),
+        )
+        await db.commit()
+        return {"id": cursor.lastrowid, "email": email, "username": username, "display_name": display_name or username}
+    finally:
+        await db.close()

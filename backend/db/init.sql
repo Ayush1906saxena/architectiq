@@ -75,8 +75,24 @@ CREATE TABLE IF NOT EXISTS interview_history (
     passed BOOLEAN,
     badge TEXT,
     scorecard_json TEXT,
+    transcript_json TEXT,
     started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS daily_challenges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    challenge_date DATE NOT NULL UNIQUE,
+    problem_id TEXT NOT NULL,
+    career_level TEXT NOT NULL DEFAULT 'senior'
+);
+
+CREATE TABLE IF NOT EXISTS user_streaks (
+    user_id INTEGER PRIMARY KEY,
+    current_streak INTEGER DEFAULT 0,
+    longest_streak INTEGER DEFAULT 0,
+    last_challenge_date DATE,
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 

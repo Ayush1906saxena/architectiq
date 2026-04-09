@@ -9,6 +9,7 @@ import Button from "@/components/ui/Button";
 import PhaseIndicator from "@/components/interview/PhaseIndicator";
 import InterviewTimer from "@/components/interview/InterviewTimer";
 import RubricPanel from "@/components/interview/RubricPanel";
+import DiagramCanvas from "@/components/interview/DiagramCanvas";
 import Scorecard from "@/components/interview/Scorecard";
 
 interface Message {
@@ -55,6 +56,8 @@ export default function LiveInterviewPage() {
     contradictions_found: 0,
   });
   const [isComplete, setIsComplete] = useState(false);
+  const [rightTab, setRightTab] = useState<"assessment" | "whiteboard">("assessment");
+  const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
   const [scorecard, setScorecard] = useState<Record<string, unknown> | null>(null);
   const [problemTitle, setProblemTitle] = useState(challengeId.replace(/-/g, " "));
 
@@ -63,6 +66,42 @@ export default function LiveInterviewPage() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const { isListening, transcript, isSupported, startListening, stopListening } = useSpeechRecognition();
+
+  // Score change toasts
+  const prevRubricRef = useRef<Record<string, number>>({});
+  const [scoreToasts, setScoreToasts] = useState<
+    { id: string; dimension: string; from: number; to: number }[]
+  >([]);
+
+  useEffect(() => {
+    const prev = prevRubricRef.current;
+    const current = interviewState.rubric_scores || {};
+    const newToasts: { id: string; dimension: string; from: number; to: number }[] = [];
+
+    for (const [key, value] of Object.entries(current)) {
+      const prevVal = prev[key] ?? 0;
+      if (prevVal !== 0 && value !== prevVal) {
+        const label = key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+        newToasts.push({
+          id: `${key}-${Date.now()}`,
+          dimension: label,
+          from: prevVal,
+          to: value,
+        });
+      }
+    }
+
+    prevRubricRef.current = { ...current };
+
+    if (newToasts.length > 0) {
+      setScoreToasts((prev) => [...prev, ...newToasts]);
+      // Auto-remove after 3 seconds
+      const ids = newToasts.map((t) => t.id);
+      setTimeout(() => {
+        setScoreToasts((prev) => prev.filter((t) => !ids.includes(t.id)));
+      }, 3000);
+    }
+  }, [interviewState.rubric_scores]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -194,13 +233,15 @@ export default function LiveInterviewPage() {
   return (
     <div className="fixed inset-0 bg-gray-950 flex flex-col">
       {/* Top Bar */}
-      <div className="flex items-center justify-between px-6 py-3 border-b border-gray-800 bg-gray-900/95 backdrop-blur-sm">
-        <div className="flex items-center gap-4">
-          <h1 className="text-sm font-semibold text-gray-200 capitalize">{problemTitle}</h1>
-          <div className="w-px h-5 bg-gray-700" />
-          <PhaseIndicator currentPhase={interviewState.phase} />
+      <div className="flex flex-wrap items-center justify-between px-3 md:px-6 py-2 md:py-3 gap-2 border-b border-gray-800 bg-gray-900/95 backdrop-blur-sm">
+        <div className="flex items-center gap-2 md:gap-4 min-w-0">
+          <h1 className="text-xs md:text-sm font-semibold text-gray-200 capitalize truncate">{problemTitle}</h1>
+          <div className="w-px h-5 bg-gray-700 hidden md:block" />
+          <div className="hidden md:block">
+            <PhaseIndicator currentPhase={interviewState.phase} />
+          </div>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2 md:gap-4">
           {/* Voice toggle */}
           <button
             onClick={() => {
@@ -234,9 +275,9 @@ export default function LiveInterviewPage() {
             </svg>
             Voice {voiceEnabled ? "On" : "Off"}
           </button>
-          <div className="w-px h-5 bg-gray-700" />
-          {/* Difficulty meter */}
-          <div className="flex items-center gap-2">
+          <div className="w-px h-5 bg-gray-700 hidden md:block" />
+          {/* Difficulty meter — hidden on mobile */}
+          <div className="hidden md:flex items-center gap-2">
             <span className="text-[10px] text-gray-500 uppercase">Diff</span>
             <div className="w-16 h-1.5 bg-gray-800 rounded-full overflow-hidden">
               <motion.div
@@ -246,7 +287,7 @@ export default function LiveInterviewPage() {
               />
             </div>
           </div>
-          <div className="w-px h-5 bg-gray-700" />
+          <div className="w-px h-5 bg-gray-700 hidden md:block" />
           <InterviewTimer
             totalMinutes={interviewState.total_minutes}
             elapsedMinutes={interviewState.elapsed_minutes}
@@ -268,15 +309,26 @@ export default function LiveInterviewPage() {
           >
             End Interview
           </button>
+          {/* Mobile panel toggle */}
+          <button
+            onClick={() => setMobilePanelOpen(!mobilePanelOpen)}
+            className={`md:hidden text-[10px] font-medium px-2 py-1 rounded transition-colors ${
+              mobilePanelOpen
+                ? "text-blue-400 bg-blue-500/10"
+                : "text-gray-500 hover:text-gray-400 hover:bg-gray-800"
+            }`}
+          >
+            {mobilePanelOpen ? "Chat" : "Panel"}
+          </button>
         </div>
       </div>
 
       {/* Main content */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Chat area - 60% */}
-        <div className="flex-[3] flex flex-col border-r border-gray-800">
+      <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
+        {/* Chat area - 60% on desktop, full on mobile (hidden when panel open) */}
+        <div className={`flex-[3] flex flex-col border-r border-gray-800 relative ${mobilePanelOpen ? "hidden md:flex" : "flex"}`}>
           {/* Messages */}
-          <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+          <div className="flex-1 overflow-y-auto px-3 md:px-6 py-4 space-y-4">
             {isStarting && (
               <div className="flex justify-center py-12">
                 <div className="flex items-center gap-2 text-gray-500 text-sm">
@@ -333,7 +385,7 @@ export default function LiveInterviewPage() {
           {/* Input */}
           <form
             onSubmit={handleSend}
-            className="border-t border-gray-800 px-6 py-3 flex gap-3 items-center"
+            className="border-t border-gray-800 px-3 md:px-6 py-3 flex gap-2 md:gap-3 items-center"
           >
             {/* Mic button */}
             {isSupported && (
@@ -376,16 +428,72 @@ export default function LiveInterviewPage() {
               Send
             </Button>
           </form>
+
+          {/* Score change toasts */}
+          <div className="absolute bottom-16 right-6 flex flex-col gap-2 z-20 pointer-events-none">
+            <AnimatePresence>
+              {scoreToasts.map((toast) => {
+                const isUp = toast.to > toast.from;
+                return (
+                  <motion.div
+                    key={toast.id}
+                    initial={{ opacity: 0, y: 20, scale: 0.9 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -10, scale: 0.95 }}
+                    transition={{ duration: 0.3 }}
+                    className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 shadow-lg"
+                  >
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="text-gray-400">{toast.dimension}</span>
+                      <span className="font-mono text-gray-500">{toast.from.toFixed(1)}</span>
+                      <span className="text-gray-600">&rarr;</span>
+                      <span
+                        className={`font-mono font-semibold ${
+                          isUp ? "text-green-400" : "text-red-400"
+                        }`}
+                      >
+                        {toast.to.toFixed(1)}
+                      </span>
+                      {isUp && (
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="text-green-400">
+                          <polyline points="18 15 12 9 6 15" />
+                        </svg>
+                      )}
+                    </div>
+                  </motion.div>
+                );
+              })}
+            </AnimatePresence>
+          </div>
         </div>
 
-        {/* State panel - 40% */}
-        <div className="flex-[2] bg-gray-900/50 overflow-hidden">
-          <div className="border-b border-gray-800 px-4 py-3">
-            <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider">
-              Live Assessment
-            </h2>
+        {/* State panel - 40% on desktop, full on mobile (hidden by default) */}
+        <div className={`flex-[2] bg-gray-900/50 overflow-hidden flex-col ${mobilePanelOpen ? "flex" : "hidden md:flex"}`}>
+          <div className="border-b border-gray-800 px-4 py-0 flex gap-0">
+            {(["assessment", "whiteboard"] as const).map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setRightTab(tab)}
+                className={`relative px-3 py-3 text-[11px] font-medium uppercase tracking-wider transition-colors ${
+                  rightTab === tab
+                    ? "text-blue-400"
+                    : "text-gray-500 hover:text-gray-400"
+                }`}
+              >
+                {tab === "assessment" ? "Assessment" : "Whiteboard"}
+                {rightTab === tab && (
+                  <span className="absolute bottom-0 left-0 right-0 h-[2px] bg-blue-500 rounded-full" />
+                )}
+              </button>
+            ))}
           </div>
-          <RubricPanel state={interviewState} />
+          <div className="flex-1 overflow-hidden">
+            {rightTab === "assessment" ? (
+              <RubricPanel state={interviewState} />
+            ) : (
+              <DiagramCanvas />
+            )}
+          </div>
         </div>
       </div>
 

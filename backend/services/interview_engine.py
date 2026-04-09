@@ -207,6 +207,13 @@ class InterviewEngine:
             return None
         return await interview_scorer.score(session["tracker"])
 
+    def get_transcript(self, session_id: str) -> list[dict] | None:
+        """Return the full message transcript for a session."""
+        session = _sessions.get(session_id)
+        if not session:
+            return None
+        return list(session["messages"])
+
     def get_session_state(self, session_id: str) -> dict | None:
         session = _sessions.get(session_id)
         if not session:

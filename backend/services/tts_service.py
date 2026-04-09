@@ -1,5 +1,8 @@
+"""
+TTS Service — uses gTTS (Google Text-to-Speech) for cross-platform audio generation.
+Falls back to silent WAV when offline or gTTS fails.
+"""
 import hashlib
-import io
 import wave
 from pathlib import Path
 
@@ -8,45 +11,12 @@ from models.lesson import WordTiming
 
 
 class TTSService:
-    def __init__(self):
-        self._voice = None
-
-    def _get_voice(self):
-        if self._voice is None:
-            try:
-                from piper import PiperVoice
-
-                # Try model path directly, then look in data/piper-models/
-                model_name = settings.tts_model
-                model_path = Path(model_name)
-
-                if not model_path.exists():
-                    # Look in standard locations
-                    data_dir = Path(__file__).parent.parent.parent / "data" / "piper-models"
-                    for candidate in [
-                        data_dir / f"{model_name}.onnx",
-                        data_dir / model_name,
-                    ]:
-                        if candidate.exists():
-                            model_path = candidate
-                            break
-
-                if model_path.exists():
-                    config_path = Path(str(model_path) + ".json")
-                    if config_path.exists():
-                        self._voice = PiperVoice.load(str(model_path), config_path=str(config_path))
-                    else:
-                        self._voice = PiperVoice.load(str(model_path))
-                    print(f"[TTS] Loaded voice model: {model_path}")
-                else:
-                    print(f"[TTS] Voice model not found: {model_name}")
-                    self._voice = None
-            except Exception as e:
-                print(f"[TTS] Failed to load voice: {e}")
-                self._voice = None
-        return self._voice
-
     def _get_cache_path(self, topic_id: str, lesson_id: str, segment_id: str) -> Path:
+        cache_dir = Path(settings.tts_cache_dir) / topic_id / lesson_id
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir / f"{segment_id}.mp3"
+
+    def _get_wav_cache_path(self, topic_id: str, lesson_id: str, segment_id: str) -> Path:
         cache_dir = Path(settings.tts_cache_dir) / topic_id / lesson_id
         cache_dir.mkdir(parents=True, exist_ok=True)
         return cache_dir / f"{segment_id}.wav"
@@ -76,6 +46,12 @@ class TTSService:
 
         return timings
 
+    def _estimate_mp3_duration_ms(self, mp3_path: Path) -> int:
+        """Estimate MP3 duration from file size (rough: ~16KB/s for gTTS output)."""
+        size_bytes = mp3_path.stat().st_size
+        # gTTS typically outputs ~16KB per second at default quality
+        return max(int((size_bytes / 16000) * 1000), 500)
+
     def _get_wav_duration_ms(self, wav_path: Path) -> int:
         with wave.open(str(wav_path), "rb") as wf:
             frames = wf.getnframes()
@@ -86,28 +62,31 @@ class TTSService:
         self, text: str, topic_id: str, lesson_id: str, segment_id: str
     ) -> tuple[Path, int, list[WordTiming]]:
         """Generate TTS audio. Returns (audio_path, duration_ms, word_timings)."""
-        cache_path = self._get_cache_path(topic_id, lesson_id, segment_id)
+        mp3_path = self._get_cache_path(topic_id, lesson_id, segment_id)
 
-        if cache_path.exists():
-            duration_ms = self._get_wav_duration_ms(cache_path)
+        if mp3_path.exists():
+            duration_ms = self._estimate_mp3_duration_ms(mp3_path)
             timings = self._estimate_word_timings(text, duration_ms)
-            return cache_path, duration_ms, timings
+            return mp3_path, duration_ms, timings
 
-        voice = self._get_voice()
-        if voice is None:
-            # Fallback: generate a silent WAV file for development without Piper
-            duration_ms = max(len(text.split()) * 400, 2000)  # ~400ms per word
-            self._generate_silent_wav(cache_path, duration_ms)
+        try:
+            from gtts import gTTS
+
+            tts = gTTS(text=text, lang="en", slow=False)
+            tts.save(str(mp3_path))
+            duration_ms = self._estimate_mp3_duration_ms(mp3_path)
             timings = self._estimate_word_timings(text, duration_ms)
-            return cache_path, duration_ms, timings
+            print(f"[TTS] Generated: {mp3_path}")
+            return mp3_path, duration_ms, timings
 
-        # Generate with Piper
-        with wave.open(str(cache_path), "wb") as wav_file:
-            voice.synthesize_wav(text, wav_file)
-        duration_ms = self._get_wav_duration_ms(cache_path)
-        timings = self._estimate_word_timings(text, duration_ms)
-
-        return cache_path, duration_ms, timings
+        except Exception as e:
+            print(f"[TTS] gTTS failed ({e}), generating silent fallback")
+            # Fallback: generate a silent WAV file
+            wav_path = self._get_wav_cache_path(topic_id, lesson_id, segment_id)
+            duration_ms = max(len(text.split()) * 400, 2000)
+            self._generate_silent_wav(wav_path, duration_ms)
+            timings = self._estimate_word_timings(text, duration_ms)
+            return wav_path, duration_ms, timings
 
     def _generate_silent_wav(self, path: Path, duration_ms: int):
         """Generate a silent WAV file for development/testing."""

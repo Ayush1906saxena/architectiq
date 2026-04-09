@@ -82,17 +82,20 @@ async def end_interview(session_id: str, user: dict | None = Depends(get_optiona
         import json
         from db.database import get_db
 
+        transcript = interview_engine.get_transcript(session_id)
+
         db = await get_db()
         try:
             await db.execute(
                 "UPDATE interview_history SET overall_score = ?, passed = ?, badge = ?, "
-                "scorecard_json = ?, completed_at = CURRENT_TIMESTAMP "
+                "scorecard_json = ?, transcript_json = ?, completed_at = CURRENT_TIMESTAMP "
                 "WHERE session_id = ? AND user_id = ?",
                 (
                     scorecard.get("overall_score"),
                     scorecard.get("passed"),
                     scorecard.get("badge"),
                     json.dumps(scorecard),
+                    json.dumps(transcript) if transcript else None,
                     session_id,
                     user["id"],
                 ),

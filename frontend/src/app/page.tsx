@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { motion } from "framer-motion";
-import { fetchCurriculum } from "@/lib/api";
+import { fetchCurriculum, fetchDailyChallenge, fetchStreak } from "@/lib/api";
 import { useProgressStore } from "@/store/useProgressStore";
+import { useAuthStore } from "@/store/useAuthStore";
 import MasteryBadge from "@/components/curriculum/MasteryBadge";
 import PageTransition from "@/components/ui/PageTransition";
 import Card from "@/components/ui/Card";
@@ -21,10 +22,20 @@ const fadeUp = {
 
 export default function Home() {
   const { curriculum, setCurriculum } = useProgressStore();
+  const { user } = useAuthStore();
+  const [dailyChallenge, setDailyChallenge] = useState<{ problem_id: string; career_level: string; challenge_date: string } | null>(null);
+  const [dailyStreak, setDailyStreak] = useState<{ current_streak: number; completed_today: boolean } | null>(null);
 
   useEffect(() => {
     fetchCurriculum().then(setCurriculum).catch(() => {});
   }, [setCurriculum]);
+
+  useEffect(() => {
+    if (user) {
+      fetchDailyChallenge().then(setDailyChallenge).catch(() => {});
+      fetchStreak().then(setDailyStreak).catch(() => {});
+    }
+  }, [user]);
 
   return (
     <PageTransition>
@@ -73,6 +84,62 @@ export default function Home() {
             ))}
           </div>
         </motion.div>
+
+        {/* Daily Challenge Card */}
+        {user && dailyChallenge && (
+          <motion.div
+            className="px-8 pb-6"
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.25, duration: 0.4 }}
+          >
+            <div className="relative overflow-hidden rounded-xl border border-gray-800 bg-gradient-to-r from-gray-900 via-gray-900 to-orange-950/20 p-5">
+              <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-orange-500 via-amber-500 to-yellow-500" />
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center gap-4 min-w-0">
+                  <div className="flex items-center gap-2">
+                    {(dailyStreak?.current_streak ?? 0) > 0 && (
+                      <motion.div
+                        animate={{ scale: [1, 1.12, 1] }}
+                        transition={{ duration: 1.5, repeat: Infinity, repeatDelay: 2 }}
+                      >
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-orange-400" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M17.657 18.657A8 8 0 016.343 7.343S7 9 9 10c0-2 .5-5 2.986-7C14 5 16.09 5.777 17.656 7.343A7.975 7.975 0 0120 13a7.975 7.975 0 01-2.343 5.657z" />
+                        </svg>
+                      </motion.div>
+                    )}
+                    {(dailyStreak?.current_streak ?? 0) > 0 && (
+                      <span className="text-lg font-bold text-orange-400">{dailyStreak?.current_streak}</span>
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-mono uppercase tracking-wider text-orange-400">Daily Challenge</span>
+                    </div>
+                    <h3 className="text-sm font-semibold text-white truncate">
+                      {dailyChallenge.problem_id.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
+                    </h3>
+                  </div>
+                </div>
+                {dailyStreak?.completed_today ? (
+                  <div className="flex items-center gap-1.5 px-3 py-1.5 bg-green-500/10 border border-green-500/30 rounded-lg flex-shrink-0">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-green-400" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                    <span className="text-xs font-medium text-green-400">Completed</span>
+                  </div>
+                ) : (
+                  <Link
+                    href={`/interview/${dailyChallenge.problem_id}?level=${dailyChallenge.career_level}&daily=true`}
+                    className="px-4 py-1.5 bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 text-white text-xs font-semibold rounded-lg shadow shadow-orange-500/20 transition-all flex-shrink-0"
+                  >
+                    Start
+                  </Link>
+                )}
+              </div>
+            </div>
+          </motion.div>
+        )}
 
         {/* Lessons by Tier */}
         <div className="px-8 pb-12 flex-1">

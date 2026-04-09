@@ -159,42 +159,52 @@ export default function HistoryPage() {
         ) : (
           <div className="space-y-3">
             {interviews.map((interview, i) => (
-              <motion.div
-                key={interview.id}
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: i * 0.04 }}
-                className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-center justify-between gap-4"
-              >
-                <div className="flex-1 min-w-0">
-                  <h3 className="text-sm font-medium text-gray-200 truncate">
-                    {interview.problem_title || interview.problem_id}
-                  </h3>
-                  <div className="flex items-center gap-3 mt-1">
-                    <span className="text-xs text-gray-500 capitalize">
-                      {interview.career_level}
-                    </span>
-                    <span className="text-xs text-gray-600">
-                      {new Date(interview.created_at).toLocaleDateString()}
-                    </span>
+              <Link key={interview.id} href={`/history/${interview.id}`}>
+                <motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: i * 0.04 }}
+                  className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-center justify-between gap-4 hover:border-blue-500/40 hover:shadow-lg hover:shadow-blue-500/5 transition-all cursor-pointer"
+                >
+                  <div className="flex-1 min-w-0">
+                    <h3 className="text-sm font-medium text-gray-200 truncate">
+                      {interview.problem_title || interview.problem_id}
+                    </h3>
+                    <div className="flex items-center gap-3 mt-1">
+                      <span className="text-xs text-gray-500 capitalize">
+                        {interview.career_level}
+                      </span>
+                      <span className="text-xs text-gray-600">
+                        {new Date(interview.created_at).toLocaleDateString()}
+                      </span>
+                    </div>
                   </div>
-                </div>
 
-                <div className="flex items-center gap-3">
-                  {interview.score !== null && (
-                    <span className="text-sm font-semibold text-gray-200">
-                      {interview.score}%
-                    </span>
-                  )}
-                  {interview.badge && (
-                    <span
-                      className={`text-xs font-medium px-2.5 py-1 rounded-full border capitalize ${badgeColor(interview.badge)}`}
+                  <div className="flex items-center gap-3">
+                    {interview.score !== null && (
+                      <span className="text-sm font-semibold text-gray-200">
+                        {interview.score}%
+                      </span>
+                    )}
+                    {interview.badge && (
+                      <span
+                        className={`text-xs font-medium px-2.5 py-1 rounded-full border capitalize ${badgeColor(interview.badge)}`}
+                      >
+                        {interview.badge}
+                      </span>
+                    )}
+                    <svg
+                      className="w-4 h-4 text-gray-600"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth="2"
                     >
-                      {interview.badge}
-                    </span>
-                  )}
-                </div>
-              </motion.div>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                    </svg>
+                  </div>
+                </motion.div>
+              </Link>
             ))}
           </div>
         )}

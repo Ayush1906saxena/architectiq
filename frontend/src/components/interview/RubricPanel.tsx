@@ -1,6 +1,7 @@
 "use client";
 
-import { motion } from "framer-motion";
+import { useRef, useEffect, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 
 const RUBRIC_DIMENSIONS = [
   "Requirements Gathering",
@@ -45,6 +46,43 @@ function getBarBg(score: number): string {
 
 export default function RubricPanel({ state }: RubricPanelProps) {
   const scores = state.rubric_scores || {};
+  const prevScoresRef = useRef<Record<string, number>>({});
+  const [changedDims, setChangedDims] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    const prev = prevScoresRef.current;
+    const changes: Record<string, number> = {};
+
+    for (const dim of RUBRIC_DIMENSIONS) {
+      const key = dim.toLowerCase().replace(/[\s-]/g, "_");
+      const current = scores[key] ?? scores[dim] ?? 0;
+      const previous = prev[key] ?? 0;
+      if (previous !== 0 && current !== previous) {
+        changes[key] = current - previous;
+      }
+    }
+
+    if (Object.keys(changes).length > 0) {
+      setChangedDims(changes);
+      const timer = setTimeout(() => setChangedDims({}), 2000);
+      // Save current scores as previous
+      const snapshot: Record<string, number> = {};
+      for (const dim of RUBRIC_DIMENSIONS) {
+        const key = dim.toLowerCase().replace(/[\s-]/g, "_");
+        snapshot[key] = scores[key] ?? scores[dim] ?? 0;
+      }
+      prevScoresRef.current = snapshot;
+      return () => clearTimeout(timer);
+    }
+
+    // Always update previous scores
+    const snapshot: Record<string, number> = {};
+    for (const dim of RUBRIC_DIMENSIONS) {
+      const key = dim.toLowerCase().replace(/[\s-]/g, "_");
+      snapshot[key] = scores[key] ?? scores[dim] ?? 0;
+    }
+    prevScoresRef.current = snapshot;
+  }, [scores]);
 
   return (
     <div className="flex flex-col gap-4 h-full overflow-y-auto p-4">
@@ -109,13 +147,44 @@ export default function RubricPanel({ state }: RubricPanelProps) {
           {RUBRIC_DIMENSIONS.map((dim) => {
             const key = dim.toLowerCase().replace(/[\s-]/g, "_");
             const score = scores[key] ?? scores[dim] ?? 0;
+            const delta = changedDims[key];
+            const hasChanged = delta !== undefined;
+            const isIncrease = hasChanged && delta > 0;
             return (
-              <div key={dim}>
+              <motion.div
+                key={dim}
+                animate={
+                  hasChanged && isIncrease
+                    ? { backgroundColor: ["rgba(34,197,94,0.15)", "rgba(34,197,94,0)"] }
+                    : hasChanged
+                    ? { backgroundColor: ["rgba(239,68,68,0.12)", "rgba(239,68,68,0)"] }
+                    : {}
+                }
+                transition={{ duration: 1.5 }}
+                className="rounded-md px-1.5 py-1 -mx-1.5"
+              >
                 <div className="flex justify-between items-center mb-1">
                   <span className="text-[11px] text-gray-400">{dim}</span>
-                  <span className="text-[11px] font-mono text-gray-500">
-                    {score.toFixed(1)}/10
-                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <AnimatePresence>
+                      {hasChanged && (
+                        <motion.span
+                          initial={{ opacity: 0, x: 6, scale: 0.8 }}
+                          animate={{ opacity: 1, x: 0, scale: 1 }}
+                          exit={{ opacity: 0, x: -4, scale: 0.8 }}
+                          transition={{ duration: 0.3 }}
+                          className={`text-[10px] font-mono font-semibold ${
+                            isIncrease ? "text-green-400" : "text-red-400"
+                          }`}
+                        >
+                          {isIncrease ? `+${delta.toFixed(1)}` : delta.toFixed(1)}
+                        </motion.span>
+                      )}
+                    </AnimatePresence>
+                    <span className="text-[11px] font-mono text-gray-500">
+                      {score.toFixed(1)}/10
+                    </span>
+                  </div>
                 </div>
                 <div className={`h-2 rounded-full overflow-hidden ${getBarBg(score)}`}>
                   <motion.div
@@ -125,7 +194,7 @@ export default function RubricPanel({ state }: RubricPanelProps) {
                     transition={{ duration: 0.6, ease: "easeOut" }}
                   />
                 </div>
-              </div>
+              </motion.div>
             );
           })}
         </div>

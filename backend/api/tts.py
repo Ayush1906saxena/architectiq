@@ -1,4 +1,5 @@
 import hashlib
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
@@ -34,8 +35,10 @@ async def generate_interview_tts(request: InterviewTTSRequest) -> InterviewTTSRe
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"TTS generation failed: {str(e)}")
 
+    # Return URL matching the actual file extension
+    ext = audio_path.suffix  # .mp3 or .wav
     return InterviewTTSResponse(
-        audio_url=f"/api/tts/audio/interview/responses/{text_hash}.wav",
+        audio_url=f"/api/tts/audio/interview/responses/{text_hash}{ext}",
         duration_ms=duration_ms,
     )
 
@@ -52,7 +55,8 @@ async def generate_tts(request: TTSRequest) -> TTSResponse:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"TTS generation failed: {str(e)}")
 
-    audio_url = f"/api/tts/audio/{request.topic_id}/{request.lesson_id}/{request.segment_id}.wav"
+    ext = audio_path.suffix
+    audio_url = f"/api/tts/audio/{request.topic_id}/{request.lesson_id}/{request.segment_id}{ext}"
 
     return TTSResponse(
         audio_url=audio_url,
@@ -61,14 +65,11 @@ async def generate_tts(request: TTSRequest) -> TTSResponse:
     )
 
 
-@router.get("/tts/audio/{topic_id}/{lesson_id}/{segment_id}.wav")
-async def serve_audio(topic_id: str, lesson_id: str, segment_id: str):
-    from pathlib import Path
-
-    audio_path = (
-        Path(settings.tts_cache_dir) / topic_id / lesson_id / f"{segment_id}.wav"
-    )
+@router.get("/tts/audio/{topic_id}/{lesson_id}/{filename}")
+async def serve_audio(topic_id: str, lesson_id: str, filename: str):
+    audio_path = Path(settings.tts_cache_dir) / topic_id / lesson_id / filename
     if not audio_path.exists():
         raise HTTPException(status_code=404, detail="Audio file not found")
 
-    return FileResponse(str(audio_path), media_type="audio/wav")
+    media_type = "audio/mpeg" if filename.endswith(".mp3") else "audio/wav"
+    return FileResponse(str(audio_path), media_type=media_type)

@@ -26,4 +26,13 @@ async def init_db():
         await db.executescript(schema)
         await db.commit()
 
+        # Migrations for existing databases
+        try:
+            await db.execute(
+                "ALTER TABLE interview_history ADD COLUMN transcript_json TEXT"
+            )
+            await db.commit()
+        except Exception:
+            pass  # Column already exists
+
     _db_initialized = True

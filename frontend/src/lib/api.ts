@@ -126,6 +126,16 @@ export async function askProfArch(request: AskRequest): Promise<AskResponse> {
   return res.json();
 }
 
+// --- Recommendations ---
+
+export async function fetchRecommendations() {
+  const res = await fetch(`${API_BASE}/api/recommendations`, {
+    headers: { ...authHeaders() },
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
 // --- Interview ---
 
 export async function fetchInterviewProblems() {
@@ -181,6 +191,46 @@ export async function generateInterviewTTS(text: string): Promise<{ audio_url: s
   return res.json();
 }
 
+// --- Daily Challenge ---
+
+export async function fetchDailyChallenge() {
+  const res = await fetch(`${API_BASE}/api/daily/challenge`, { headers: { ...authHeaders() } });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function fetchStreak() {
+  const res = await fetch(`${API_BASE}/api/daily/streak`, { headers: { ...authHeaders() } });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function completeDailyChallenge(sessionId: string) {
+  const res = await fetch(`${API_BASE}/api/daily/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  if (!res.ok) throw new Error("Failed to complete challenge");
+  return res.json();
+}
+
+// --- Leaderboard ---
+
+export async function fetchLeaderboard() {
+  const res = await fetch(`${API_BASE}/api/leaderboard`);
+  if (!res.ok) throw new Error("Failed to fetch leaderboard");
+  return res.json();
+}
+
+export async function fetchMyRank() {
+  const res = await fetch(`${API_BASE}/api/leaderboard/me`, {
+    headers: { ...authHeaders() },
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
 export { API_BASE };
 
 // --- History ---
@@ -190,6 +240,14 @@ export async function fetchInterviewHistory() {
     headers: { ...authHeaders() },
   });
   if (!res.ok) throw new Error(`Failed to fetch history: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchInterviewReplay(historyId: number) {
+  const res = await fetch(`${API_BASE}/api/history/interviews/${historyId}/replay`, {
+    headers: { ...authHeaders() },
+  });
+  if (!res.ok) throw new Error(`Failed to fetch replay: ${res.status}`);
   return res.json();
 }
 
