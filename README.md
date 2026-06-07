@@ -105,8 +105,8 @@ AI-generated quiz questions that adapt to your knowledge level. Get a question w
                     +-----+-----+
                           |
                     +-----v-----+
-                    |  Ollama   |  Local LLM inference
-                    |  :11434   |  llama3.2 (default)
+                    |    LLM    |  Groq (cloud, free key) by default
+                    |  provider |  or Ollama (local) — set LLM_PROVIDER
                     +-----------+
 ```
 
@@ -125,41 +125,68 @@ The key insight: **the LLM makes the interviewer sound human, but deterministic 
 
 ## Quick Start
 
-### Docker (recommended)
+### 1. Get an LLM key (default: Groq — free)
+
+Create a free key at [console.groq.com](https://console.groq.com), then:
 
 ```bash
 git clone <repo-url> && cd architectiq
-docker compose up
+cp .env.example .env          # then set GROQ_API_KEY=gsk_...
 ```
 
-Open `http://localhost:3000`. The first run pulls the Ollama model (~2GB).
+> Prefer fully local? Set `LLM_PROVIDER=ollama`, run `ollama serve`, and
+> `ollama pull llama3.2` — no cloud key needed.
 
-### Manual Setup
+### 2. Backend
 
-**Backend:**
 ```bash
 cd backend
 pip install -r requirements.txt
-# Start Ollama separately: ollama serve
-# Pull a model: ollama pull llama3.2
 uvicorn main:app --reload --port 8000
 ```
 
-**Frontend:**
+### 3. Frontend
+
 ```bash
 cd frontend
 npm install
-npm run dev
+npm run dev          # http://localhost:3000
 ```
+
+The frontend proxies `/api/*` to the backend (see `next.config.mjs`), so the auth
+cookie stays first-party.
 
 ### Environment Variables
 
+See `.env.example` for the full list. The ones that matter most:
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Backend URL for frontend |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama inference endpoint |
-| `CONTENT_DIR` | `./content` | Path to curriculum and knowledge graphs |
-| `DB_PATH` | `./data/architectiq.db` | SQLite database for progress tracking |
+| `LLM_PROVIDER` | `groq` | `groq` (cloud) or `ollama` (local) |
+| `GROQ_API_KEY` | — | Required when `LLM_PROVIDER=groq` |
+| `GROQ_MODEL` | `llama-3.1-8b-instant` | Groq model id |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint (local mode) |
+| `JWT_SECRET` | `change-me-...` | **App refuses to start in production unless this is strong (32+ chars)** |
+| `APP_ENV` | `development` | `production` enables the JWT fail-fast |
+| `FRONTEND_URL` | `http://localhost:3000` | Used for OAuth redirects |
+| `GOOGLE_CLIENT_ID/SECRET`, `GITHUB_CLIENT_ID/SECRET` | — | OAuth (optional) |
+| `cookie_secure` / `cookie_samesite` | `false` / `lax` | Auth cookie flags (use `true`/`none` for cross-site) |
+| `CONTENT_DIR` | `./content` | Curriculum and knowledge graphs |
+| `DB_PATH` | `./data/architectiq.db` | SQLite database |
+| `NEXT_PUBLIC_API_URL` | _(empty)_ | Leave empty for the same-origin proxy; set only for a cross-site backend |
+| `BACKEND_INTERNAL_URL` | — | Frontend → backend proxy target (must be set **at build time**) |
+
+---
+
+## Authentication
+
+Accounts use **JWT sessions delivered as an httpOnly cookie** (not readable by JS):
+
+- **Email / password** — `POST /api/auth/signup`, `/api/auth/login`, `/api/auth/logout`
+- **OAuth** — Google and GitHub (`/api/auth/google`, `/api/auth/github`), CSRF-guarded
+  with a short-lived signed `state`
+- The whole app is gated behind login; the auth middleware accepts the cookie or an
+  `Authorization: Bearer` header.
 
 ---
 
@@ -201,22 +228,27 @@ architectiq/
       interview_tracker.py    Layer 2 — deterministic state machine
       interview_strategist.py Layer 3 — priority-based action selection
       interview_speaker.py    Layer 4 — LLM-powered natural speech
-      interview_scorer.py     8-dimension rubric scoring
-      ollama_client.py        Ollama API client
+      interview_scorer.py     8-dimension rubric scoring (LLM-judged + fallback)
+      ollama_client.py        LLM client — Groq + Ollama, with retries + JSON repair
+      auth_service.py         JWT, password hashing, OAuth users
+    middleware/
+      auth.py                 Cookie/Bearer auth dependency
+      security.py             Rate limiting, request-size limit, input sanitization
     prompts/
       interviewer_system.md   Core behavioral constraints for the LLM
       personas.py             Level-calibrated interviewer personas
     models/                 Pydantic request/response models
-    db/                     SQLite for progress tracking
+    db/                     SQLite (WAL) + versioned migrations
+    tests/                  pytest suite for the engine + auth + db
     config.py               Pydantic Settings configuration
 
   frontend/
-    src/app/
-      interview/            Mock interview UI (selection + live chat)
-      curriculum/           Lesson browser
-      quiz/                 Adaptive quizzes
-      design-challenge/     Design challenge walkthroughs
-      ask/                  Ask Prof. Arch (Q&A)
+    src/
+      app/                  Routes (interview, curriculum, quiz, login, ...)
+      lib/api.ts            Central API client (cookie auth + 401 handling)
+      store/                Zustand stores (auth, progress, quiz)
+      types/                Shared TypeScript types
+      components/           UI, diagrams, interview, avatar, ...
 
   content/
     curriculum.json         Full curriculum tree (7 tiers, 41 modules, 174 lessons)
@@ -227,6 +259,27 @@ architectiq/
   data/
     training/seed/          456 hand-crafted interview conversations for evaluation
     architectiq.db          User progress database
+
+  GO_LIVE.md                Launch plan: integrations, deployment, freemium, payments
+  HARDENING_PLAN.md         Backend/frontend hardening notes
+```
+
+---
+
+## Development & Testing
+
+**Backend tests** (pytest — covers the deterministic engine, auth, and DB):
+```bash
+cd backend
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+**Frontend checks:**
+```bash
+cd frontend
+npx tsc --noEmit     # type-check
+npm run build        # production build
 ```
 
 ---
@@ -256,11 +309,21 @@ The LLM receives a ~6KB system prompt on every call that enforces:
 
 | Component | Technology |
 |-----------|-----------|
-| Frontend | Next.js 14, React 18, TypeScript, Tailwind CSS |
+| Frontend | Next.js 14, React 18, TypeScript, Tailwind CSS, Zustand, Framer Motion, D3 |
 | Backend | FastAPI, Python 3.11+ |
-| LLM Inference | Ollama (local), llama3.2 default |
-| Database | SQLite (progress), JSON (content) |
-| Deployment | Docker Compose |
+| LLM | Groq (cloud, default) or Ollama (local) — pluggable via `LLM_PROVIDER` |
+| Auth | JWT in an httpOnly cookie; Google + GitHub OAuth |
+| Database | SQLite (WAL) + versioned migrations; JSON content |
+| Tests | pytest (backend) |
+| Deployment | Docker Compose (local); see `GO_LIVE.md` for production |
+
+---
+
+## Status & roadmap
+
+The product features above are built and working. Remaining work to take it live —
+LLM capacity, deployment, freemium gating, Razorpay payments, and more — is tracked
+in **[`GO_LIVE.md`](./GO_LIVE.md)** and as **GitHub issues** (labeled `P0`/`P1`/`P2`).
 
 ---
 
