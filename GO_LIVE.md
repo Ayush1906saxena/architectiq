@@ -37,7 +37,8 @@ It's a dead config. Either delete it or adopt Supabase as your managed Postgres
 | **Groq** (or other LLM) | Interview AI, scoring, quizzes, "Ask" | ✅ Yes — core product | Free tier too small; ~$0.05–0.10 / 1M tokens on paid |
 | **Google OAuth** | "Sign in with Google" | 🟡 If you want it at launch | Free |
 | **GitHub OAuth** | "Sign in with GitHub" | 🟡 Optional | Free |
-| **Stripe** | Payments / subscriptions | 🟡 Only if monetizing at launch | 2.9% + 30¢/txn |
+| **Razorpay** (primary, India) | Payments / subscriptions — UPI, cards, netbanking | 🟡 Only if monetizing at launch | ~2% domestic; needs business KYC |
+| **Stripe** (optional, international) | Cards for non-India users | 🟡 Only if you sell abroad | 2.9% + 30¢/txn |
 | **Email provider** (Resend/SES/Postmark) | Password reset, receipts | 🟡 Strongly recommended | ~Free–$20/mo |
 | **Hosting** (Vercel + Fly/Railway/Render) | Run the apps | ✅ Yes | ~$5–25/mo to start |
 | **Error tracking** (Sentry) | Catch prod errors | 🟡 Recommended | Free tier fine |
@@ -133,33 +134,63 @@ and add the frontend origin to `cors_origins`. Only if you can't use the proxy.
 ## 7. Payments (net-new — nothing exists yet)
 
 There is **no billing code, no plan/quota concept, and no paywall**. This is a
-greenfield feature. Stripe is the payment *rail*; the **free-vs-premium model and
-gating** it enforces are specced in **§12**. Before building, decide the model:
+greenfield feature. The gateway is just the *rail* that flips a user's `plan` to
+`premium`; the **free-vs-premium model and gating logic** are specced in **§12** and
+are **gateway-agnostic** — only checkout creation + webhook handling differ per
+gateway. Before building, decide the model:
 
 - **What's free vs. paid?** (e.g. free = curriculum + N interviews/month;
   paid = unlimited interviews + voice + history).
-- **Pricing shape:** monthly/annual subscription is the natural fit.
+- **Pricing shape:** monthly/annual subscription is the natural fit. **Price in INR (₹).**
 
-**Recommended stack: Stripe.** Implementation outline:
+### Primary: Razorpay (India-first)
+
+This is primarily an India product, so Razorpay is the primary rail — it covers
+**UPI** (the dominant method in India), cards, netbanking, and wallets, and settles
+in INR.
+
+**Prerequisites (start these early — they gate go-live):**
+- **Business KYC / activation** on Razorpay (PAN, bank account; GST optional but
+  recommended). Activation can take a few days — don't leave it to launch week.
+- Decide GST handling on prices (Razorpay can capture GST; you still own invoicing
+  and tax filing). Show prices inclusive/exclusive consistently.
 
 **Backend**
-1. Add `stripe` SDK; store `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET`.
-2. Add a `subscriptions` table (or columns on `users`): `plan`, `status`,
-   `stripe_customer_id`, `current_period_end`.
-3. Endpoints: `POST /api/billing/checkout` (create Checkout Session),
-   `POST /api/billing/portal` (Stripe customer portal), and
-   `POST /api/billing/webhook` (handle `checkout.session.completed`,
-   `customer.subscription.updated/deleted`).
-4. **Gating:** a dependency that checks the user's plan/quota before LLM-billed
-   actions (start interview, etc.). This is where the per-plan interview cap lives.
+1. Add the `razorpay` SDK; store `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`,
+   `RAZORPAY_WEBHOOK_SECRET`.
+2. Create **Plans** in the Razorpay dashboard (e.g. monthly/annual premium in INR).
+3. `plan`/`status`/`razorpay_customer_id`/`razorpay_subscription_id`/`current_period_end`
+   on `users` (or a `subscriptions` table) — the same fields §12 reads.
+4. Endpoints:
+   - `POST /api/billing/subscribe` → create a Razorpay **Subscription** (recurring;
+     UPI AutoPay / e-mandate / card) or an **Order** (one-time) and return the
+     `subscription_id`/`order_id` + `key_id` to the client.
+   - `POST /api/billing/webhook` → **verify the signature** with
+     `RAZORPAY_WEBHOOK_SECRET`, then handle `subscription.activated`,
+     `subscription.charged`, `subscription.halted`, `subscription.cancelled`
+     (and `payment.captured` / `payment.failed` for one-time). Flip `plan`/`status`.
+   - `POST /api/billing/cancel` → cancel at period end.
+5. **Gating dependency** (§12): one reusable check before LLM-billed actions.
 
 **Frontend**
-5. Pricing/upgrade page → calls checkout → redirects to Stripe.
-6. Billing section in settings → opens the customer portal.
-7. Reflect plan/quota in the UI (e.g. "3 of 5 interviews used").
+6. `/pricing` page (INR) → opens **Razorpay Checkout** (their JS SDK / hosted) with
+   the `subscription_id`/`order_id`; on success the webhook is the source of truth.
+7. Billing section in settings → show plan + a Cancel action.
+8. Reflect plan/quota in the UI (e.g. "3 of 5 interviews used").
 
-**Effort:** ~2–4 focused days including testing with Stripe test mode + webhook.
-Not required to launch a free product; required before charging.
+> **Verify payments server-side, not client-side.** Treat the webhook (signature-
+> verified) as the source of truth for entitlement — never grant premium off the
+> browser success callback alone.
+
+### Optional: Stripe (international cards)
+
+If you later sell to users outside India, add Stripe alongside Razorpay (Checkout +
+`checkout.session.completed` / `customer.subscription.*` webhooks). The §12 gating is
+shared; you just add a second checkout/webhook path and pick the gateway by user
+region. Skip this until international demand is real.
+
+**Effort:** Razorpay rail ~2–4 focused days (test mode + webhook), **excluding** KYC
+wait time. Not required to launch a free product; required before charging.
 
 ---
 
@@ -209,7 +240,9 @@ Not required to launch a free product; required before charging.
 - [ ] Basic analytics (Plausible/PostHog) to see what users do.
 
 ### P2 — when traffic justifies
-- [ ] **Payments** (Stripe) — unlocks premium once the §12 gates exist.
+- [ ] **Start Razorpay business KYC early** — it has multi-day lead time and gates
+      live payments, so kick it off well before you need to charge.
+- [ ] **Payments** (Razorpay, §7) — unlocks premium once the §12 gates exist.
 - [ ] **In-app guided tour** (§13b) for new users.
 - [ ] **Postgres** migration + Redis for sessions/rate-limit (multi-instance).
 - [ ] Production-grade **TTS** if voice becomes a selling point.
@@ -236,7 +269,9 @@ cookie_samesite=lax                    # "none" only if cross-site (see §5)
 cors_origins=["https://<your-domain>"]
 GOOGLE_CLIENT_ID=...  GOOGLE_CLIENT_SECRET=...
 GITHUB_CLIENT_ID=...  GITHUB_CLIENT_SECRET=...
-# Later: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, EMAIL_* / SENTRY_DSN
+# Later (payments): RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_WEBHOOK_SECRET
+#                   (optional intl) STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
+# Later (other):    EMAIL_* / SENTRY_DSN
 ```
 
 **Frontend**
@@ -258,7 +293,9 @@ BACKEND_INTERNAL_URL=https://<backend>  # new var for next.config proxy destinat
 | Email / Sentry / analytics | mostly free tiers |
 | **Total to launch** | **~$15–65/mo** |
 
-Payments + Postgres add cost only when you actually need them.
+Payments + Postgres add cost only when you actually need them. **Razorpay** has no
+monthly fee — it's ~2% per domestic transaction (UPI often cheaper), deducted at
+settlement, so it scales with revenue rather than adding fixed cost.
 
 ---
 
@@ -266,7 +303,9 @@ Payments + Postgres add cost only when you actually need them.
 
 Today **everything is gated behind login but nothing is gated behind a plan** — a
 logged-in user can do it all. Freemium = add a `plan` to each user and check it
-before premium actions. Stripe (§7) is just the rail that flips `plan` to `premium`.
+before premium actions. The payment gateway (**Razorpay**, §7) is just the rail that
+flips `plan` to `premium` — this gating is the same regardless of gateway. Price
+premium in **INR (₹)** for the India market.
 
 ### Suggested free vs. premium split (tune to taste)
 
