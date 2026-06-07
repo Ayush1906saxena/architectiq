@@ -1,9 +1,9 @@
 """Auth endpoints — signup, login, OAuth (Google/GitHub), and current-user retrieval."""
-import secrets
+import re
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
@@ -14,13 +14,29 @@ from services.auth_service import (
     verify_password,
     create_token,
     get_or_create_oauth_user,
+    create_state_token,
+    verify_state_token,
+    DuplicateUserError,
+    AUTH_COOKIE,
 )
 from middleware.auth import get_current_user
 
 router = APIRouter()
 
-# In-memory state store for CSRF protection (fine for single-process)
-_oauth_states: dict[str, str] = {}
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _set_auth_cookie(response: Response, token: str) -> None:
+    """Set the httpOnly auth cookie so the token is never exposed to JS."""
+    response.set_cookie(
+        AUTH_COOKIE,
+        token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite=settings.cookie_samesite,
+        max_age=settings.jwt_expire_minutes * 60,
+        path="/",
+    )
 
 
 class SignupRequest(BaseModel):
@@ -42,40 +58,43 @@ class AuthResponse(BaseModel):
 # ── Email/Password Auth ─────────────────────────────────────
 
 @router.post("/auth/signup")
-async def signup(req: SignupRequest):
-    if len(req.password) < 6:
-        raise HTTPException(400, "Password must be at least 6 characters")
+async def signup(req: SignupRequest, response: Response):
+    if not _EMAIL_RE.match(req.email):
+        raise HTTPException(400, "Invalid email address")
+    if len(req.password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
     if len(req.username) < 2:
         raise HTTPException(400, "Username must be at least 2 characters")
 
-    existing = await get_user_by_email(req.email)
-    if existing:
+    if await get_user_by_email(req.email):
         raise HTTPException(409, "Email already registered")
 
-    from db.database import get_db
-
-    db = await get_db()
     try:
-        cursor = await db.execute("SELECT id FROM users WHERE username = ?", (req.username,))
-        if await cursor.fetchone():
-            raise HTTPException(409, "Username already taken")
-    finally:
-        await db.close()
+        user = await create_user(req.email, req.username, req.password)
+    except DuplicateUserError as e:
+        raise HTTPException(409, str(e))
 
-    user = await create_user(req.email, req.username, req.password)
     token = create_token(user["id"])
+    _set_auth_cookie(response, token)
     return AuthResponse(token=token, user=user)
 
 
 @router.post("/auth/login")
-async def login(req: LoginRequest):
+async def login(req: LoginRequest, response: Response):
     user = await get_user_by_email(req.email)
     if not user or not user.get("password_hash") or not verify_password(req.password, user["password_hash"]):
         raise HTTPException(401, "Invalid email or password")
 
     token = create_token(user["id"])
     safe_user = {k: v for k, v in user.items() if k != "password_hash"}
+    _set_auth_cookie(response, token)
     return AuthResponse(token=token, user=safe_user)
+
+
+@router.post("/auth/logout")
+async def logout(response: Response):
+    response.delete_cookie(AUTH_COOKIE, path="/")
+    return {"ok": True}
 
 
 @router.get("/auth/me")
@@ -91,8 +110,7 @@ async def google_login():
     if not settings.google_client_id:
         raise HTTPException(501, "Google OAuth not configured")
 
-    state = secrets.token_urlsafe(32)
-    _oauth_states[state] = "google"
+    state = create_state_token("google")
 
     params = {
         "client_id": settings.google_client_id,
@@ -112,9 +130,8 @@ async def google_callback(code: str = "", state: str = "", error: str = ""):
     if error:
         return RedirectResponse(f"{settings.frontend_url}/login?error={error}")
 
-    if state not in _oauth_states:
+    if not verify_state_token(state, "google"):
         return RedirectResponse(f"{settings.frontend_url}/login?error=invalid_state")
-    _oauth_states.pop(state, None)
 
     # Exchange code for tokens
     async with httpx.AsyncClient() as client:
@@ -149,7 +166,9 @@ async def google_callback(code: str = "", state: str = "", error: str = ""):
     user = await get_or_create_oauth_user(email, name, "google")
     jwt_token = create_token(user["id"])
 
-    return RedirectResponse(f"{settings.frontend_url}/login?token={jwt_token}")
+    resp = RedirectResponse(f"{settings.frontend_url}/login?login=success")
+    _set_auth_cookie(resp, jwt_token)
+    return resp
 
 
 # ── GitHub OAuth ─────────────────────────────────────────────
@@ -160,8 +179,7 @@ async def github_login():
     if not settings.github_client_id:
         raise HTTPException(501, "GitHub OAuth not configured")
 
-    state = secrets.token_urlsafe(32)
-    _oauth_states[state] = "github"
+    state = create_state_token("github")
 
     params = {
         "client_id": settings.github_client_id,
@@ -178,9 +196,8 @@ async def github_callback(code: str = "", state: str = "", error: str = ""):
     if error:
         return RedirectResponse(f"{settings.frontend_url}/login?error={error}")
 
-    if state not in _oauth_states:
+    if not verify_state_token(state, "github"):
         return RedirectResponse(f"{settings.frontend_url}/login?error=invalid_state")
-    _oauth_states.pop(state, None)
 
     async with httpx.AsyncClient() as client:
         # Exchange code for access token
@@ -227,4 +244,6 @@ async def github_callback(code: str = "", state: str = "", error: str = ""):
     user = await get_or_create_oauth_user(email, name, "github")
     jwt_token = create_token(user["id"])
 
-    return RedirectResponse(f"{settings.frontend_url}/login?token={jwt_token}")
+    resp = RedirectResponse(f"{settings.frontend_url}/login?login=success")
+    _set_auth_cookie(resp, jwt_token)
+    return resp

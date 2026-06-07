@@ -1,6 +1,7 @@
 """Authentication service — JWT tokens + password hashing."""
 from datetime import datetime, timedelta, timezone
 
+import aiosqlite
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 
@@ -8,6 +9,13 @@ from config import settings
 from db.database import get_db
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Name of the httpOnly auth cookie.
+AUTH_COOKIE = "architectiq_token"
+
+
+class DuplicateUserError(Exception):
+    """Raised when an email/username already exists (DB UNIQUE violation)."""
 
 
 def hash_password(password: str) -> str:
@@ -33,6 +41,25 @@ def decode_token(token: str) -> int | None:
         return int(payload["sub"])
     except (JWTError, KeyError, ValueError):
         return None
+
+
+def create_state_token(provider: str) -> str:
+    """Short-lived signed token used as the OAuth `state` (stateless CSRF guard)."""
+    expire = datetime.now(timezone.utc) + timedelta(minutes=10)
+    return jwt.encode(
+        {"provider": provider, "purpose": "oauth_state", "exp": expire},
+        settings.jwt_secret,
+        algorithm=settings.jwt_algorithm,
+    )
+
+
+def verify_state_token(token: str, provider: str) -> bool:
+    """Validate an OAuth state token for the given provider."""
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    except JWTError:
+        return False
+    return payload.get("purpose") == "oauth_state" and payload.get("provider") == provider
 
 
 async def get_user_by_email(email: str) -> dict | None:
@@ -68,6 +95,10 @@ async def create_user(email: str, username: str, password: str) -> dict:
         )
         await db.commit()
         return {"id": cursor.lastrowid, "email": email, "username": username, "display_name": username}
+    except aiosqlite.IntegrityError as e:
+        # UNIQUE violation — the authoritative race guard (a concurrent signup may
+        # have inserted the same email/username after our pre-check).
+        raise DuplicateUserError("Email or username already taken") from e
     finally:
         await db.close()
 
