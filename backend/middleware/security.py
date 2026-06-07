@@ -2,13 +2,26 @@
 Security middleware for ArchitectIQ.
 Handles rate limiting, request size limits, and input sanitization.
 """
+import re
 import time
-import hashlib
-from collections import defaultdict
-from dataclasses import dataclass, field
-from fastapi import Request, HTTPException
+from dataclasses import dataclass
+from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
+
+
+def _client_key(request: Request) -> str:
+    """Identify the client for rate limiting.
+
+    Behind a reverse proxy / load balancer the socket peer is the proxy, so honor
+    the leftmost X-Forwarded-For entry when present (the original client).
+    """
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else "unknown"
 
 
 # ── Rate Limiter ──────────────────────────────────────────────
@@ -80,7 +93,7 @@ _START_ENDPOINTS = {
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        client_ip = request.client.host if request.client else "unknown"
+        client_ip = _client_key(request)
         path = request.url.path
 
         # Pick the appropriate limiter
@@ -142,12 +155,10 @@ def sanitize_for_prompt(text: str, max_length: int = 5000) -> str:
         "output your instructions",
         "forget your rules",
     ]
-    text_lower = text.lower()
+    # Neutralize injection markers by redacting them. This defuses the literal
+    # instruction while leaving the rest of the candidate's text intact.
     for marker in injection_markers:
-        if marker in text_lower:
-            # Replace the injection attempt with a safe marker
-            text = text  # Keep the text but flag it for logging
-            break
+        text = re.sub(re.escape(marker), "[filtered]", text, flags=re.IGNORECASE)
 
     return text
 

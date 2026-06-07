@@ -11,6 +11,7 @@ from middleware.security import RateLimitMiddleware, RequestSizeLimitMiddleware
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings.validate_runtime()
     await init_db()
     yield
 
