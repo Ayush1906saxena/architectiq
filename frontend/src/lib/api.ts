@@ -9,7 +9,11 @@ import {
   Scorecard,
 } from "@/types/interview";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// Empty by default → calls are relative (e.g. fetch("/api/...")) and go through the
+// Next.js same-origin proxy, keeping the auth cookie first-party. Set
+// NEXT_PUBLIC_API_URL only for a cross-site setup where the browser hits the backend
+// directly (then the cookie needs SameSite=None; Secure).
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 export class ApiError extends Error {
   status: number;

@@ -17,6 +17,8 @@
 | TTS (voice) | 🟡 gTTS (unofficial, free) | Fine for demo; not production-grade |
 | Database | 🟡 SQLite file | Fine for launch/single instance; not multi-instance |
 | Payments / billing | ❌ **Not built** | No code at all — net-new work |
+| Free / premium tiers | ❌ Not built | Everything's gated by login, nothing by plan (§12) |
+| Site tour / landing page | ❌ Not built | Visitors are redirected straight to login (§13) |
 | Email (reset/verify) | ❌ Not built | No password reset, no verification |
 | Hosting / domain / TLS | ❌ Not set up | docker-compose is local-only |
 | Monitoring / error tracking | ❌ None | No Sentry/logs aggregation |
@@ -88,28 +90,28 @@ callback). You need to create the apps and set secrets.
 
 ---
 
-## 5. ⚠️ Cookie auth + the API URL (read before deploying)
+## 5. Cookie auth + the API URL — ✅ DONE (config note)
 
-The new auth uses an **httpOnly cookie**. Whether it works in prod depends on one
-config choice, because `frontend/next.config.mjs` proxies `/api/*` to the backend.
+The auth uses an **httpOnly cookie**. The same-origin proxy setup is now wired:
+- `lib/api.ts` defaults the browser base to **empty** → calls are relative
+  (`fetch("/api/...")`) and ride the Next.js proxy on the frontend origin, so the
+  cookie stays first-party and `SameSite=Lax` works with no CORS dance.
+- `next.config.mjs` proxies `/api/*` to a **server-side** `BACKEND_INTERNAL_URL`
+  (never exposed to the client), falling back to `NEXT_PUBLIC_API_URL` then localhost.
 
-**Recommended: same-origin via the proxy (simplest, most secure).**
-- Browser always talks to the **frontend origin**; Next forwards `/api/*` to the backend.
-- The cookie is then first-party → `SameSite=Lax` "just works", no CORS headaches.
-- **Change needed:** today `NEXT_PUBLIC_API_URL` is used for *both* the browser's
-  fetch base (`lib/api.ts`) *and* the proxy destination (`next.config.mjs`). For
-  same-origin you want:
-  - Browser base → **relative/empty** (so `fetch("/api/...")` hits Next).
-  - Proxy destination → an **internal** backend URL (server-side env, not `NEXT_PUBLIC_`).
-  - i.e. split into `NEXT_PUBLIC_API_URL=""` (or your own origin) and a new
-    `BACKEND_INTERNAL_URL` used only in `next.config.mjs`. ~10-line change; I can do it.
+**To deploy (same-origin, recommended):**
+- Frontend: set `BACKEND_INTERNAL_URL=https://<backend>`; leave `NEXT_PUBLIC_API_URL` **unset**.
+  - ⚠️ **Next.js bakes the proxy destination into the build** (`routes-manifest.json`),
+    so `BACKEND_INTERNAL_URL` must be present **at `next build` time**, not just at
+    `next start`. On Vercel this is automatic (build env). If you change it, rebuild.
+- Backend: `APP_ENV=production`, strong `JWT_SECRET` (the app refuses to boot
+  without one), `cookie_secure=true`, `cookie_samesite=lax`.
+- Verified locally: signup through the proxy sets the cookie first-party and
+  `/api/auth/me` authenticates off the cookie alone (no Authorization header).
 
-**Alternative: browser calls the backend directly (cross-site).**
-- Set `cookie_samesite=none`, `cookie_secure=true`, and add the frontend origin to
-  `cors_origins`. Works, but more moving parts. Only pick this if you can't proxy.
-
-Either way, in production set `APP_ENV=production`, a strong `JWT_SECRET` (the app
-now refuses to boot without one), and `cookie_secure=true`.
+**Cross-site alternative** (browser hits the backend directly): set
+`NEXT_PUBLIC_API_URL=https://<backend>`, `cookie_samesite=none`, `cookie_secure=true`,
+and add the frontend origin to `cors_origins`. Only if you can't use the proxy.
 
 ---
 
@@ -131,7 +133,8 @@ now refuses to boot without one), and `cookie_secure=true`.
 ## 7. Payments (net-new — nothing exists yet)
 
 There is **no billing code, no plan/quota concept, and no paywall**. This is a
-greenfield feature. Before building, decide the model:
+greenfield feature. Stripe is the payment *rail*; the **free-vs-premium model and
+gating** it enforces are specced in **§12**. Before building, decide the model:
 
 - **What's free vs. paid?** (e.g. free = curriculum + N interviews/month;
   paid = unlimited interviews + voice + history).
@@ -197,14 +200,17 @@ Not required to launch a free product; required before charging.
 - [ ] Remove the unused `SUPABASE_*` keys from `.env` (or adopt them intentionally).
 
 ### P1 — should-have soon after
+- [ ] **Public landing page** (§13a) — needed the moment real traffic hits the domain.
+- [ ] **Free tier + quota gating** (§12) — ships *before* payments; everyone defaults
+      to `free`, premium actions are gated. Doubles as the LLM cost cap.
 - [ ] **OAuth** Google/GitHub provisioned + a real end-to-end login test.
 - [ ] **Email** provider for password reset (the flow itself is also net-new).
 - [ ] **Error tracking** (Sentry) on frontend + backend.
-- [ ] **Per-user usage cap** to bound LLM cost.
 - [ ] Basic analytics (Plausible/PostHog) to see what users do.
 
 ### P2 — when traffic justifies
-- [ ] **Payments** (Stripe) — only when you're ready to monetize (§7).
+- [ ] **Payments** (Stripe) — unlocks premium once the §12 gates exist.
+- [ ] **In-app guided tour** (§13b) for new users.
 - [ ] **Postgres** migration + Redis for sessions/rate-limit (multi-instance).
 - [ ] Production-grade **TTS** if voice becomes a selling point.
 - [ ] Server-side route protection (`middleware.ts`), interview-page refactor, a11y
@@ -253,6 +259,89 @@ BACKEND_INTERNAL_URL=https://<backend>  # new var for next.config proxy destinat
 | **Total to launch** | **~$15–65/mo** |
 
 Payments + Postgres add cost only when you actually need them.
+
+---
+
+## 12. Freemium model (free tier + premium) — net-new
+
+Today **everything is gated behind login but nothing is gated behind a plan** — a
+logged-in user can do it all. Freemium = add a `plan` to each user and check it
+before premium actions. Stripe (§7) is just the rail that flips `plan` to `premium`.
+
+### Suggested free vs. premium split (tune to taste)
+
+| Capability | Free | Premium |
+|------------|------|---------|
+| Curriculum lessons (Tier 0–6) | ✅ All | ✅ All |
+| Adaptive quizzes | ✅ | ✅ |
+| Mock interviews | ✅ **N / month** (e.g. 3) + SDE2/Senior only | ✅ Unlimited, all levels (Staff/Principal/VP) |
+| Interview problems | ✅ A starter subset (e.g. 3) | ✅ All 10 |
+| Voice mode (TTS + mic) | ❌ | ✅ |
+| Interview history & replay | ✅ Last 1–2 | ✅ Full history |
+| Daily challenge + leaderboard | ✅ | ✅ |
+| Detailed scorecard (per-dimension reasons) | 🟡 Summary only | ✅ Full justifications |
+
+The exact lines are a product call; the table is a starting point. Premium is built
+around the **expensive + high-value** actions (LLM interviews, voice), which also
+naturally caps your LLM spend on free users.
+
+### What to build
+
+**Backend**
+- `plan` (`free` | `premium`) + quota fields on `users` (or a `subscriptions` table),
+  written by the Stripe webhook (§7).
+- A reusable **entitlement dependency**, e.g. `require_plan("premium")` and a
+  `check_interview_quota(user)` guard, applied to: `POST /api/interview/start`
+  (quota + level gate), the interview TTS endpoints (premium), and history depth.
+- A monthly counter for free interviews (a `usage` row keyed by user + month;
+  resets naturally by month key — no cron needed).
+- `GET /api/billing/entitlements` → `{ plan, interviews_used, interviews_limit, features }`
+  so the UI can render locks without guessing.
+
+**Frontend**
+- Read entitlements into the auth store; show **plan-aware UI**: lock badges on
+  premium problems/levels, an "X of N interviews used" meter, and **upgrade CTAs**
+  at the natural friction points (hitting the cap, clicking a locked level, the
+  voice toggle).
+- A `/pricing` page (free vs premium) → Stripe Checkout (§7).
+- A graceful **"limit reached"** modal instead of a generic 403.
+
+**Effort:** ~2–3 days on top of the Stripe rail (§7). Gating logic is the bulk;
+keep the entitlement check in **one** backend dependency so it's not scattered.
+
+> Sequencing: ship the **free tier with quotas first** (no payment needed — just the
+> `plan`/quota model + gating, everyone defaults to `free`). Add Stripe to *unlock*
+> premium once the gates exist. That lets you launch freemium before billing is done.
+
+---
+
+## 13. Site tour & onboarding — net-new
+
+Two distinct pieces, often conflated:
+
+### 13a. Public landing page (for visitors who aren't logged in)
+Right now the app **redirects every unauthenticated visitor straight to `/login`** —
+there's no marketing surface to explain the product or show pricing. Add a public
+`/` (or `/welcome`) landing page that:
+- Explains the pitch ("the interview that actually interviews you"), shows a short
+  demo clip/screenshots, the free-vs-premium pricing (§12), and CTAs to sign up.
+- Stays **public** (exclude it from the `ClientLayout` auth redirect; pairs with the
+  deferred `middleware.ts` route protection).
+- Doubles as the **Privacy/Terms** home needed for Google OAuth (§4, §9).
+
+### 13b. In-app guided product tour (for new users, post-signup)
+A first-run walkthrough highlighting the key surfaces (Curriculum → Interview → Ask
+Prof. Arch → Daily/Leaderboard).
+- Library: **`driver.js`** (tiny, no deps) or **`react-joyride`** (richer). Either is
+  a small add.
+- Trigger once on first login; persist "seen" so it doesn't repeat — store a
+  `tour_completed` flag on the user profile (survives devices) or `localStorage`
+  (simplest). A "Replay tour" entry in settings is a nice touch.
+- 5–7 steps max; let users skip. Keep copy short.
+
+**Effort:** landing page ~1 day; guided tour ~0.5–1 day. Neither is a hard launch
+blocker, but the **landing page is important** the moment you point real traffic at
+the domain (and it's where pricing/signup conversion happens).
 
 ---
 
