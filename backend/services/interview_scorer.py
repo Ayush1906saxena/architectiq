@@ -6,8 +6,6 @@ The LLM reads the full conversation and scores each dimension with specific just
 referencing the candidate's actual words. The deterministic scorer provides a baseline
 and catches cases where the LLM might be too generous or too harsh.
 """
-import json
-
 from services.interview_tracker import InterviewTracker, Depth, EXPECTED_DEPTH
 from services.ollama_client import ollama_client
 
@@ -74,11 +72,13 @@ class InterviewScorer:
 
         if llm_scores:
             dimension_scores = llm_scores.get("dimensions", {})
+            dimension_reasons = llm_scores.get("dimension_reasons", {})
             strengths = llm_scores.get("strengths", [])
             weaknesses = llm_scores.get("weaknesses", [])
         else:
             # Fallback to deterministic scoring
             dimension_scores = self._deterministic_scores(tracker)
+            dimension_reasons = {}
             strengths = self._identify_strengths(dimension_scores, tracker)
             weaknesses = self._identify_weaknesses(dimension_scores, tracker)
 
@@ -123,6 +123,7 @@ class InterviewScorer:
             "level_attempted": LEVEL_NAMES.get(tracker.level, tracker.level),
             "level_assessed": self._assess_effective_level(overall),
             "dimension_scores": dimension_scores,
+            "dimension_reasons": dimension_reasons,
             "dimension_weights": RUBRIC_WEIGHTS,
             "strengths": strengths[:4],
             "weaknesses": weaknesses[:4],
@@ -193,37 +194,39 @@ Respond with this JSON:
   ]
 }}"""
 
-        try:
-            raw = await ollama_client.generate(
-                prompt,
-                system=_SCORER_SYSTEM,
-                json_mode=True,
-                temperature=0.2,
-                max_tokens=2048,
-            )
-            parsed = json.loads(raw)
-
-            # Validate structure
-            dims = parsed.get("dimensions", {})
-            if not isinstance(dims, dict):
-                return None
-
-            # Extract scores and reasons
-            result_dims = {}
-            for dim_name, dim_data in dims.items():
-                if isinstance(dim_data, dict):
-                    result_dims[dim_name] = dim_data.get("score", 5)
-                elif isinstance(dim_data, (int, float)):
-                    result_dims[dim_name] = dim_data
-
-            return {
-                "dimensions": result_dims,
-                "strengths": parsed.get("strengths", []),
-                "weaknesses": parsed.get("weaknesses", []),
-            }
-
-        except (json.JSONDecodeError, TypeError, KeyError):
+        parsed = await ollama_client.generate_json(
+            prompt,
+            system=_SCORER_SYSTEM,
+            temperature=0.2,
+            max_tokens=1536,
+        )
+        if not isinstance(parsed, dict):
             return None
+
+        # Validate structure
+        dims = parsed.get("dimensions", {})
+        if not isinstance(dims, dict):
+            return None
+
+        # Extract scores AND the per-dimension justifications (which quote the
+        # candidate) — the justifications are the most useful part of the feedback.
+        result_dims = {}
+        result_reasons = {}
+        for dim_name, dim_data in dims.items():
+            if isinstance(dim_data, dict):
+                result_dims[dim_name] = dim_data.get("score", 5)
+                reason = dim_data.get("reason", "")
+                if reason:
+                    result_reasons[dim_name] = reason
+            elif isinstance(dim_data, (int, float)):
+                result_dims[dim_name] = dim_data
+
+        return {
+            "dimensions": result_dims,
+            "dimension_reasons": result_reasons,
+            "strengths": parsed.get("strengths", []),
+            "weaknesses": parsed.get("weaknesses", []),
+        }
 
     def _deterministic_scores(self, tracker: InterviewTracker) -> dict:
         """Fallback deterministic scoring from tracker rubric scores."""

@@ -37,8 +37,18 @@ PHASE_TRANSITIONS = {
 
 class InterviewStrategist:
     def decide_next_action(self, tracker: InterviewTracker, analysis: dict | None = None) -> InterviewAction:
-        """Pick the highest-priority next action."""
+        """Pick the highest-priority next action.
+
+        Candidates are built as pure descriptions with NO side effects. Only after
+        the winner is chosen do we apply its state mutation (advancing a phase,
+        marking a contradiction addressed, consuming a follow-up or claim). Mutating
+        during candidate construction was a bug: losing candidates would still
+        advance the phase or consume a follow-up, silently corrupting later turns.
+        """
         candidates: list[InterviewAction] = []
+        # References needed to apply the winner's side effect after selection.
+        contradiction_to_address = None
+        claim_to_probe = None
 
         # PRIORITY 110: Handle stuck candidate — HIGHEST PRIORITY
         is_stuck = analysis.get("is_stuck", False) if analysis else False
@@ -109,6 +119,7 @@ class InterviewStrategist:
         contradictions = tracker.get_unaddressed_contradictions()
         if contradictions:
             c = contradictions[0]
+            contradiction_to_address = c
             candidates.append(InterviewAction(
                 priority=100,
                 action_type="catch_contradiction",
@@ -119,11 +130,9 @@ class InterviewStrategist:
                     "concept": c.old_claim.concept,
                 },
             ))
-            c.addressed = True
 
         # PRIORITY 90: Phase transitions
         if tracker.should_transition_phase():
-            next_phase = Phase.REQUIREMENTS  # Will be set by transition
             transitions = PHASE_TRANSITIONS.get(tracker.phase, {})
             transition_text = transitions.get("time", "Let's move on.")
 
@@ -132,12 +141,13 @@ class InterviewStrategist:
                 weak = tracker._find_weakest_dimension()
                 transition_text = transition_text.replace("{area}", weak.replace("_", " "))
 
+            # Peek the next phase for display — only actually advance if this wins.
             candidates.append(InterviewAction(
                 priority=90,
                 action_type="transition_phase",
                 data={
                     "from_phase": tracker.phase,
-                    "to_phase": tracker.transition_phase(),
+                    "to_phase": tracker.peek_next_phase(),
                     "transition_text": transition_text,
                 },
             ))
@@ -161,8 +171,6 @@ class InterviewStrategist:
                     "gaps": tracker.last_gaps,
                 },
             ))
-            # Clear so we don't reuse it
-            tracker.last_suggested_followup = ""
 
         # PRIORITY 70: Test untested claims (anti-BS)
         if tracker.untested_claims:
@@ -179,6 +187,7 @@ class InterviewStrategist:
 
             if probe_list:
                 probe_text = random.choice(probe_list) if isinstance(probe_list, list) else probe_list
+                claim_to_probe = claim
                 candidates.append(InterviewAction(
                     priority=70,
                     action_type="probe_claim",
@@ -189,8 +198,6 @@ class InterviewStrategist:
                         "depth": current_depth.name,
                     },
                 ))
-                claim.tested = True
-                tracker.untested_claims.remove(claim)
 
         # PRIORITY 60: Probe shallow areas
         shallow = tracker.get_shallow_concepts()
@@ -278,8 +285,21 @@ class InterviewStrategist:
             },
         ))
 
-        # Pick highest priority
-        return max(candidates, key=lambda x: x.priority)
+        # Pick highest priority, then apply ONLY the winner's side effect.
+        winner = max(candidates, key=lambda x: x.priority)
+
+        if winner.action_type == "catch_contradiction" and contradiction_to_address:
+            contradiction_to_address.addressed = True
+        elif winner.action_type == "transition_phase":
+            tracker.transition_phase()
+        elif winner.action_type == "llm_followup":
+            tracker.last_suggested_followup = ""  # consumed
+        elif winner.action_type == "probe_claim" and claim_to_probe:
+            claim_to_probe.tested = True
+            if claim_to_probe in tracker.untested_claims:
+                tracker.untested_claims.remove(claim_to_probe)
+
+        return winner
 
     def _filter_by_phase(self, concepts: list[str], tracker: InterviewTracker) -> list[str]:
         """Filter concepts to those relevant to the current phase."""

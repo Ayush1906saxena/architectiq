@@ -59,12 +59,22 @@ NUMBER_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# Phrases that signal the candidate has given up. Checked as substrings, so these
+# must be specific enough not to match inside real answers (e.g. "no" would match
+# "nosql"). Bare one-word give-ups are matched exactly via STUCK_EXACT instead.
 STUCK_PHRASES = [
-    "i don't know", "i dont know", "not sure", "no idea", "idk",
-    "i'm not sure", "im not sure", "i have no idea", "pass",
+    "i don't know", "i dont know", "not sure", "no idea",
+    "i'm not sure", "im not sure", "i have no idea",
     "can you help", "give me a hint", "i'm stuck", "im stuck",
-    "no", "nope", "skip", "next",
 ]
+STUCK_EXACT = {"no", "nope", "skip", "next", "pass", "idk"}
+
+
+def _is_explicit_stuck(text_lower: str) -> bool:
+    """True only for unambiguous give-up answers — never for terse technical ones."""
+    if text_lower in STUCK_EXACT:
+        return True
+    return any(phrase in text_lower for phrase in STUCK_PHRASES)
 
 # ── LLM Analysis Prompt ──────────────────────────────────────
 
@@ -202,12 +212,12 @@ class ResponseAnalyzer:
         # Quick checks that don't need LLM
         result.is_short_answer = len(text_stripped.split()) < 5
         result.is_asking_question = text_stripped.endswith("?")
-        result.is_stuck = (
-            any(phrase in text_lower for phrase in STUCK_PHRASES) or
-            (result.is_short_answer and not any(kw in text_lower for kw in KNOWN_KEYWORDS))
-        )
 
-        if result.is_stuck:
+        # Only short-circuit on an unambiguous give-up. Ambiguous short answers
+        # (e.g. "Shard by user_id") are sent to the LLM, which assesses is_stuck in
+        # context rather than guessing from word count alone.
+        if _is_explicit_stuck(text_lower):
+            result.is_stuck = True
             return result
 
         # Extract numbers (always useful, fast)
@@ -231,26 +241,23 @@ class ResponseAnalyzer:
         return result
 
     async def _llm_analysis(self, text: str, problem_id: str, kg: dict) -> dict | None:
-        """Primary analysis path: structured LLM extraction."""
+        """Primary analysis path: structured LLM extraction.
+
+        Returns None when the LLM is unavailable or the output is unusable, so the
+        caller falls back to keyword analysis.
+        """
         prompt = _build_analysis_prompt(text, problem_id, kg)
+        parsed = await ollama_client.generate_json(
+            prompt,
+            system=_ANALYSIS_SYSTEM,
+            temperature=0.1,
+            max_tokens=1024,
+        )
 
-        try:
-            raw = await ollama_client.generate(
-                prompt,
-                system=_ANALYSIS_SYSTEM,
-                json_mode=True,
-                temperature=0.1,
-                max_tokens=2048,
-            )
-            parsed = json.loads(raw)
-
-            # Basic validation — must have concepts list
-            if not isinstance(parsed.get("concepts"), list):
-                return None
-            return parsed
-
-        except (json.JSONDecodeError, TypeError, KeyError):
+        # Basic validation — must be an object with a concepts list
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("concepts"), list):
             return None
+        return parsed
 
     def _apply_llm_result(self, result: ResponseAnalysis, llm: dict):
         """Apply LLM analysis to the result object."""
@@ -288,7 +295,9 @@ class ResponseAnalyzer:
         result.gaps = llm.get("gaps", [])[:3]  # Cap at 3
         result.suggested_followup = llm.get("suggested_followup", "")
 
-        # Stuck detection from LLM
+        # Question + stuck detection from LLM (authoritative for ambiguous answers).
+        # OR with the punctuation heuristic so "How many users" still counts.
+        result.is_asking_question = result.is_asking_question or bool(llm.get("is_asking_question"))
         if llm.get("is_stuck"):
             result.is_stuck = True
 
@@ -332,6 +341,11 @@ class ResponseAnalyzer:
             result.overall_depth = "applied"
         else:
             result.overall_depth = "deep"
+
+        # Without the LLM, a short answer that surfaced no known concept is our best
+        # signal that the candidate is stuck.
+        if result.is_short_answer and not result.concepts_mentioned:
+            result.is_stuck = True
 
 
 response_analyzer = ResponseAnalyzer()

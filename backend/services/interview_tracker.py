@@ -118,6 +118,37 @@ class Contradiction:
     addressed: bool = False
 
 
+# Mutually-exclusive design stances. A real contradiction is when a candidate
+# asserts one side and later asserts the other on the same concept. This keeps the
+# interviewer from "catching" contradictions that are just two different sentences
+# about the same topic (the old behavior flagged any differing text).
+CONFLICT_PAIRS = [
+    ({"strong consistency", "strongly consistent", "linearizable", "linearizability"},
+     {"eventual consistency", "eventually consistent"}),
+    ({"sql", "relational", "rdbms", "acid"}, {"nosql", "non-relational"}),
+    ({"synchronous", "sync ", "blocking"}, {"asynchronous", "async ", "non-blocking"}),
+    ({"monolith", "monolithic"}, {"microservice", "microservices"}),
+    ({"normalized", "normalize", "normalization"}, {"denormalized", "denormalize", "denormalization"}),
+    ({"stateless"}, {"stateful"}),
+    ({"push"}, {"pull"}),
+    ({"single region", "single-region", "one region"}, {"multi region", "multi-region", "multiple regions"}),
+]
+
+
+def _claims_conflict(old_text: str, new_text: str) -> bool:
+    """True only when the two claims take opposite sides of a known design choice."""
+    a = old_text.lower()
+    b = new_text.lower()
+    for left, right in CONFLICT_PAIRS:
+        a_left = any(t in a for t in left)
+        a_right = any(t in a for t in right)
+        b_left = any(t in b for t in left)
+        b_right = any(t in b for t in right)
+        if (a_left and b_right) or (a_right and b_left):
+            return True
+    return False
+
+
 class InterviewTracker:
     def __init__(self, knowledge_graph: dict, career_level: str):
         self.graph = knowledge_graph
@@ -250,6 +281,11 @@ class InterviewTracker:
                 if len(old_lower) < 10 or len(recent_lower) < 10:
                     continue
 
+                # Only flag a genuine reversal of a design stance — not merely two
+                # different sentences about the same concept.
+                if not _claims_conflict(old.text, recent.text):
+                    continue
+
                 # Record as potential contradiction — the strategist decides whether to act
                 self.contradictions.append(Contradiction(
                     old_claim=old,
@@ -357,6 +393,13 @@ class InterviewTracker:
             return phase_exchanges >= criteria.get("min_exchanges", 2)
 
         return False
+
+    def peek_next_phase(self) -> str:
+        """Return the phase we'd move to next, without changing any state."""
+        next_index = self.phase_index + 1
+        if next_index >= len(PHASE_ORDER):
+            return Phase.WRAP_UP
+        return PHASE_ORDER[next_index]
 
     def transition_phase(self) -> str:
         """Move to next phase. Returns the new phase name."""

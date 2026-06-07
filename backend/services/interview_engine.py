@@ -113,11 +113,18 @@ class InterviewEngine:
             tracker=tracker,
         )
 
+        # The tracker shares the same transcript list the engine appends to, so the
+        # scorer (which reads tracker.messages) sees the full conversation. Without
+        # this the LLM-judged scorecard never ran — tracker.messages stayed empty
+        # and the scorer always fell back to the deterministic rubric.
+        messages = [{"role": "assistant", "content": opening}]
+        tracker.messages = messages
+
         _sessions[session_id] = {
             "tracker": tracker,
             "problem_id": problem_id,
             "challenge": challenge,
-            "messages": [{"role": "assistant", "content": opening}],
+            "messages": messages,
             "created_at": time.monotonic(),
         }
 
