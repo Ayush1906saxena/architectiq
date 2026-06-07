@@ -31,7 +31,7 @@ export default function DailyPage() {
       setLoading(false);
       return;
     }
-    Promise.all([fetchDailyChallenge(), fetchStreak()])
+    Promise.all([fetchDailyChallenge<DailyChallenge>(), fetchStreak<StreakData>()])
       .then(([c, s]) => {
         setChallenge(c);
         setStreak(s);

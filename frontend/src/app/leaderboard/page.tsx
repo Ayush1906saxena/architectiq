@@ -110,8 +110,8 @@ export default function LeaderboardPage() {
     async function load() {
       try {
         const [lb, rank] = await Promise.all([
-          fetchLeaderboard(),
-          user ? fetchMyRank() : Promise.resolve(null),
+          fetchLeaderboard<LeaderboardEntry[]>(),
+          user ? fetchMyRank<LeaderboardEntry>() : Promise.resolve(null),
         ]);
         setLeaderboard(lb);
         setMyRank(rank);

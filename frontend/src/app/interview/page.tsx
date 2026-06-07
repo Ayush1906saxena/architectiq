@@ -45,7 +45,7 @@ const CAREER_LEVELS = [
 
 export default function InterviewSelectionPage() {
   const router = useRouter();
-  const { token } = useAuthStore();
+  const { user } = useAuthStore();
   const [problemCount, setProblemCount] = useState(0);
   const [selectedLevel, setSelectedLevel] = useState<string>("senior");
   const [isStarting, setIsStarting] = useState(false);
@@ -59,13 +59,13 @@ export default function InterviewSelectionPage() {
   }, []);
 
   useEffect(() => {
-    if (!token) return;
-    fetchRecommendations()
+    if (!user) return;
+    fetchRecommendations<Recommendations>()
       .then((data) => {
         if (data) setRecommendations(data);
       })
       .catch(() => {});
-  }, [token]);
+  }, [user]);
 
   const handleStart = () => {
     setIsStarting(true);

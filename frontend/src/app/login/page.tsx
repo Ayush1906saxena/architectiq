@@ -18,14 +18,13 @@ export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  // Handle OAuth callback — token or error in URL params
+  // Handle OAuth callback — the backend has set the httpOnly cookie and redirected
+  // here with ?login=success (or ?error=...). We just re-check the session.
   useEffect(() => {
-    const token = searchParams.get("token");
+    const success = searchParams.get("login") === "success";
     const oauthError = searchParams.get("error");
 
-    if (token) {
-      localStorage.setItem("auth_token", token);
-      useAuthStore.setState({ token });
+    if (success) {
       loadUser().then(() => router.push("/"));
     } else if (oauthError) {
       setError(`OAuth login failed: ${oauthError.replace(/_/g, " ")}`);
@@ -74,6 +73,7 @@ export default function LoginPage() {
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 sm:p-6">
           {error && (
             <motion.div
+              role="alert"
               initial={{ opacity: 0, height: 0 }}
               animate={{ opacity: 1, height: "auto" }}
               className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm"

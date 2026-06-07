@@ -4,38 +4,23 @@ import { motion } from "framer-motion";
 import Link from "next/link";
 import Card from "@/components/ui/Card";
 import Button from "@/components/ui/Button";
-
-interface ScorecardData {
-  overall_score: number;
-  passed: boolean;
-  pass_threshold: number;
-  badge: string;
-  level_attempted: string;
-  level_assessed: string;
-  rubric_scores: Record<string, number>;
-  strengths: string[];
-  weaknesses: string[];
-  recommended_lessons: { topic_id: string; title: string }[];
-  exchange_count: number;
-  concepts_covered: number;
-  concepts_total: number;
-  duration_minutes: number;
-  contradictions_found: number;
-}
+import { Scorecard as ScorecardData } from "@/types/interview";
 
 interface ScorecardProps {
   scorecard: ScorecardData;
   onTryAgain: () => void;
 }
 
+// Labels map to the backend's 8 rubric dimensions. Each label's snake_case form
+// (see RadarChart) must match a key in scorecard.dimension_scores.
 const RUBRIC_LABELS = [
   "Requirements Gathering",
-  "High-Level Design",
-  "Data Model",
+  "Capacity Estimation",
   "API Design",
+  "Database Design",
+  "Caching Strategy",
   "Scalability",
-  "Reliability",
-  "Trade-off Analysis",
+  "Failure Handling",
   "Communication",
 ];
 
@@ -240,17 +225,17 @@ export default function Scorecard({ scorecard, onTryAgain }: ScorecardProps) {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <Card hover={false} className="p-6">
             <h3 className="text-sm font-medium text-gray-400 mb-3">Rubric Breakdown</h3>
-            <RadarChart scores={scorecard.rubric_scores} />
+            <RadarChart scores={scorecard.dimension_scores} />
           </Card>
 
           <Card hover={false} className="p-6">
             <h3 className="text-sm font-medium text-gray-400 mb-4">Interview Stats</h3>
             <div className="space-y-3">
               {[
-                { label: "Exchanges", value: scorecard.exchange_count },
-                { label: "Concepts Covered", value: `${scorecard.concepts_covered}/${scorecard.concepts_total}` },
-                { label: "Duration", value: `${scorecard.duration_minutes} min` },
-                { label: "Contradictions", value: scorecard.contradictions_found },
+                { label: "Exchanges", value: scorecard.stats.exchanges },
+                { label: "Concepts Covered", value: `${scorecard.stats.concepts_covered}/${scorecard.stats.concepts_total}` },
+                { label: "Duration", value: `${scorecard.stats.duration_minutes} min` },
+                { label: "Contradictions", value: scorecard.stats.contradictions_caught },
               ].map((stat) => (
                 <div key={stat.label} className="flex justify-between items-center">
                   <span className="text-sm text-gray-500">{stat.label}</span>
@@ -301,14 +286,14 @@ export default function Scorecard({ scorecard, onTryAgain }: ScorecardProps) {
         </div>
 
         {/* Recommended Lessons */}
-        {scorecard.recommended_lessons?.length > 0 && (
+        {scorecard.recommendations?.length > 0 && (
           <Card hover={false} className="p-6">
             <h3 className="text-sm font-medium text-gray-400 mb-3">Recommended Lessons</h3>
             <div className="flex flex-wrap gap-2">
-              {scorecard.recommended_lessons.map((lesson) => (
+              {scorecard.recommendations.map((lesson, i) => (
                 <Link
-                  key={lesson.topic_id}
-                  href={`/lesson/${lesson.topic_id}`}
+                  key={`${lesson.topic}-${i}`}
+                  href={`/lesson/${lesson.topic}`}
                   className="px-3 py-1.5 bg-blue-500/10 border border-blue-500/20 rounded-lg text-sm text-blue-400 hover:bg-blue-500/20 transition-colors"
                 >
                   {lesson.title}

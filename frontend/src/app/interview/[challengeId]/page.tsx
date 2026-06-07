@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { startInterview, sendInterviewMessage, endInterview, generateInterviewTTS, API_BASE } from "@/lib/api";
+import { InterviewState, Scorecard as ScorecardData } from "@/types/interview";
 import { useSpeechRecognition } from "@/lib/useSpeechRecognition";
 import Button from "@/components/ui/Button";
 import PhaseIndicator from "@/components/interview/PhaseIndicator";
@@ -15,20 +16,6 @@ import Scorecard from "@/components/interview/Scorecard";
 interface Message {
   role: "user" | "assistant";
   content: string;
-}
-
-interface InterviewState {
-  phase: string;
-  exchange_count: number;
-  elapsed_minutes: number;
-  total_minutes: number;
-  effective_difficulty: number;
-  level: string;
-  concepts_covered: number;
-  concepts_total: number;
-  rubric_scores: Record<string, number>;
-  deep_dive_target: string | null;
-  contradictions_found: number;
 }
 
 export default function LiveInterviewPage() {
@@ -45,6 +32,7 @@ export default function LiveInterviewPage() {
   const [interviewState, setInterviewState] = useState<InterviewState>({
     phase: "requirements",
     exchange_count: 0,
+    phase_exchanges: 0,
     elapsed_minutes: 0,
     total_minutes: 45,
     effective_difficulty: 5,
@@ -58,14 +46,25 @@ export default function LiveInterviewPage() {
   const [isComplete, setIsComplete] = useState(false);
   const [rightTab, setRightTab] = useState<"assessment" | "whiteboard">("assessment");
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
-  const [scorecard, setScorecard] = useState<Record<string, unknown> | null>(null);
+  const [scorecard, setScorecard] = useState<ScorecardData | null>(null);
   const [problemTitle, setProblemTitle] = useState(challengeId.replace(/-/g, " "));
 
   // Voice state
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  // voiceEnabled in a ref so playInterviewerAudio can read the latest value without
+  // depending on it — otherwise toggling voice changes initInterview's identity and
+  // re-runs the start effect, restarting the whole interview.
+  const voiceEnabledRef = useRef(voiceEnabled);
+  useEffect(() => {
+    voiceEnabledRef.current = voiceEnabled;
+  }, [voiceEnabled]);
   const { isListening, transcript, isSupported, startListening, stopListening } = useSpeechRecognition();
+  // Latest transcript + a flag set when the user taps "stop" to auto-send.
+  const transcriptRef = useRef("");
+  const autoSendRef = useRef(false);
+  const wasListeningRef = useRef(false);
 
   // Score change toasts
   const prevRubricRef = useRef<Record<string, number>>({});
@@ -110,16 +109,19 @@ export default function LiveInterviewPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Sync speech recognition transcript to input
+  // Sync speech recognition transcript to the input — only while actively
+  // listening, so it never clobbers text the user typed by hand.
   useEffect(() => {
-    if (transcript) {
+    transcriptRef.current = transcript;
+    if (isListening && transcript) {
       setInput(transcript);
     }
-  }, [transcript]);
+  }, [transcript, isListening]);
 
-  // Play TTS for interviewer messages when voice is enabled
+  // Play TTS for interviewer messages when voice is enabled. Reads voiceEnabled
+  // from a ref so this callback stays stable (see voiceEnabledRef above).
   const playInterviewerAudio = useCallback(async (text: string) => {
-    if (!voiceEnabled) return;
+    if (!voiceEnabledRef.current) return;
     try {
       setIsSpeaking(true);
       const { audio_url } = await generateInterviewTTS(text);
@@ -131,7 +133,17 @@ export default function LiveInterviewPage() {
     } catch {
       setIsSpeaking(false);
     }
-  }, [voiceEnabled]);
+  }, []);
+
+  // Stop any audio when leaving the page.
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
+  }, []);
 
   const initInterview = useCallback(async () => {
     try {
@@ -161,9 +173,10 @@ export default function LiveInterviewPage() {
     initInterview();
   }, [initInterview]);
 
-  const handleSend = async (e?: React.FormEvent) => {
+  const handleSend = async (e?: React.FormEvent, overrideText?: string) => {
     if (e) e.preventDefault();
-    if (!input.trim() || isLoading || !sessionId) return;
+    const userMessage = (overrideText ?? input).trim();
+    if (!userMessage || isLoading || !sessionId) return;
 
     // Stop listening if active
     if (isListening) stopListening();
@@ -174,7 +187,6 @@ export default function LiveInterviewPage() {
       setIsSpeaking(false);
     }
 
-    const userMessage = input.trim();
     setInput("");
     setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
     setIsLoading(true);
@@ -202,11 +214,10 @@ export default function LiveInterviewPage() {
 
   const handleMicToggle = () => {
     if (isListening) {
+      // Request auto-send; the actual send happens once listening fully stops and
+      // the final transcript has landed (see the effect below) — not on a timer.
+      autoSendRef.current = true;
       stopListening();
-      // Auto-send if there's content after stopping
-      if (input.trim()) {
-        setTimeout(() => handleSend(), 200);
-      }
     } else {
       // Stop any playing audio first
       if (audioRef.current) {
@@ -214,9 +225,22 @@ export default function LiveInterviewPage() {
         audioRef.current = null;
         setIsSpeaking(false);
       }
+      autoSendRef.current = false;
       startListening();
     }
   };
+
+  // When listening stops after a user-initiated stop, send the final transcript.
+  useEffect(() => {
+    if (wasListeningRef.current && !isListening && autoSendRef.current) {
+      autoSendRef.current = false;
+      const text = transcriptRef.current.trim();
+      if (text) handleSend(undefined, text);
+    }
+    wasListeningRef.current = isListening;
+    // handleSend intentionally omitted — captured fresh on each isListening change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isListening]);
 
   const handleTryAgain = () => {
     setMessages([]);
@@ -258,6 +282,8 @@ export default function LiveInterviewPage() {
                 : "text-gray-500 hover:text-gray-400 hover:bg-gray-800"
             }`}
             title={voiceEnabled ? "Disable voice" : "Enable voice"}
+            aria-label={voiceEnabled ? "Disable interviewer voice" : "Enable interviewer voice"}
+            aria-pressed={voiceEnabled}
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               {voiceEnabled ? (
@@ -328,7 +354,7 @@ export default function LiveInterviewPage() {
         {/* Chat area - 60% on desktop, full on mobile (hidden when panel open) */}
         <div className={`flex-[3] flex flex-col border-r border-gray-800 relative ${mobilePanelOpen ? "hidden md:flex" : "flex"}`}>
           {/* Messages */}
-          <div className="flex-1 overflow-y-auto px-3 md:px-6 py-4 space-y-4">
+          <div className="flex-1 overflow-y-auto px-3 md:px-6 py-4 space-y-4" aria-live="polite">
             {isStarting && (
               <div className="flex justify-center py-12">
                 <div className="flex items-center gap-2 text-gray-500 text-sm">
@@ -399,6 +425,7 @@ export default function LiveInterviewPage() {
                     : "bg-gray-800 text-gray-400 hover:text-gray-200 hover:bg-gray-700"
                 } disabled:opacity-30 disabled:cursor-not-allowed`}
                 title={isListening ? "Stop recording (sends message)" : "Start voice input"}
+                aria-label={isListening ? "Stop recording and send" : "Start voice input"}
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
@@ -500,7 +527,7 @@ export default function LiveInterviewPage() {
       {/* Scorecard overlay */}
       {isComplete && scorecard && (
         <Scorecard
-          scorecard={scorecard as never}
+          scorecard={scorecard}
           onTryAgain={handleTryAgain}
         />
       )}

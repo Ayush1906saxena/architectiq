@@ -55,8 +55,8 @@ export default function HistoryPage() {
     async function load() {
       try {
         const [historyData, statsData] = await Promise.all([
-          fetchInterviewHistory(),
-          fetchInterviewStats(),
+          fetchInterviewHistory<Interview[]>(),
+          fetchInterviewStats<Stats>(),
         ]);
         setInterviews(historyData);
         setStats(statsData);

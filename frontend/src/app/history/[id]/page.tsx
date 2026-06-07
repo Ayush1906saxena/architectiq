@@ -94,7 +94,7 @@ export default function InterviewReplayPage() {
 
     async function load() {
       try {
-        const replay = await fetchInterviewReplay(historyId);
+        const replay = await fetchInterviewReplay<ReplayData>(historyId);
         setData(replay);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : "Failed to load replay");

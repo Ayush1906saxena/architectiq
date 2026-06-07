@@ -42,7 +42,7 @@ export default function Sidebar() {
 
   useEffect(() => {
     if (user) {
-      fetchStreak().then((data) => {
+      fetchStreak<{ current_streak: number }>().then((data) => {
         if (data?.current_streak) setStreak(data.current_streak);
       }).catch(() => {});
     }

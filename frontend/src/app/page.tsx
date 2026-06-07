@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import { fetchCurriculum, fetchDailyChallenge, fetchStreak } from "@/lib/api";
@@ -25,15 +25,27 @@ export default function Home() {
   const { user } = useAuthStore();
   const [dailyChallenge, setDailyChallenge] = useState<{ problem_id: string; career_level: string; challenge_date: string } | null>(null);
   const [dailyStreak, setDailyStreak] = useState<{ current_streak: number; completed_today: boolean } | null>(null);
+  const [curriculumError, setCurriculumError] = useState(false);
 
-  useEffect(() => {
-    fetchCurriculum().then(setCurriculum).catch(() => {});
+  const loadCurriculum = useCallback(() => {
+    setCurriculumError(false);
+    fetchCurriculum()
+      .then(setCurriculum)
+      .catch(() => setCurriculumError(true));
   }, [setCurriculum]);
 
   useEffect(() => {
+    loadCurriculum();
+  }, [loadCurriculum]);
+
+  useEffect(() => {
     if (user) {
-      fetchDailyChallenge().then(setDailyChallenge).catch(() => {});
-      fetchStreak().then(setDailyStreak).catch(() => {});
+      fetchDailyChallenge<{ problem_id: string; career_level: string; challenge_date: string }>()
+        .then(setDailyChallenge)
+        .catch(() => {});
+      fetchStreak<{ current_streak: number; completed_today: boolean }>()
+        .then(setDailyStreak)
+        .catch(() => {});
     }
   }, [user]);
 
@@ -204,6 +216,16 @@ export default function Home() {
                 </motion.div>
               ))}
             </motion.div>
+          ) : curriculumError ? (
+            <div className="text-sm py-8 flex items-center gap-3 text-gray-400">
+              <span>Couldn&apos;t load the curriculum.</span>
+              <button
+                onClick={loadCurriculum}
+                className="px-3 py-1 rounded-lg border border-gray-700 text-blue-400 hover:bg-gray-800 transition-colors"
+              >
+                Retry
+              </button>
+            </div>
           ) : (
             <motion.div
               className="text-gray-500 text-sm py-8"
