@@ -36,7 +36,7 @@ export function App() {
           (n) => s.radar(n, SCORES.map(([, v]) => v / 10)), (n) => s.personas(n), (n) => s.word(n, "ARCHITECTIQ", "'Archivo Variable', sans-serif"),
         ],
         placements: [
-          { desk: P(1.75, 0, 0.74, -0.25, 0, 0.12), phone: P(0, 1.2, 0.4, -0.2, 0, 0.12) },
+          { desk: P(1.75, 0, 0.74, -0.25, 0, 0.12), phone: P(0, 1.65, 0.3, -0.2, 0, 0.12) },
           { desk: P(-1.7, 0, 0.95, 0.15), phone: P(0, 1.3, 0.55) },
           { desk: P(1.75, -0.05, 0.62, -0.35, 0.05, 0.3), phone: P(0, 1.3, 0.34, -0.3, 0.05, 0.3) },
           { desk: P(-1.7, 0, 0.82, 0.5, 0.1, 0.45), phone: P(0, 1.3, 0.5, 0.5, 0.1, 0.45) },
@@ -102,7 +102,7 @@ export function App() {
         <Section className="flex min-h-[100svh] flex-col justify-end pb-24 pt-28 md:justify-center md:pb-16">
           <div className="max-w-[640px]">
             <p className="label legible" data-scramble>Open source · system design academy</p>
-            <h1 className="title legible mt-5 text-[clamp(2.3rem,4.3vw,4.2rem)]" data-split="now">The system design interviewer that actually interviews you.</h1>
+            <h1 className="title legible mt-5 text-[clamp(1.9rem,4.3vw,4.2rem)]" data-split="now">The system design interviewer that actually interviews you.</h1>
             <p className="legible mt-6 max-w-[46ch] text-[clamp(1.05rem,1.4vw,1.25rem)] leading-snug text-ink/85" data-rise>
               {LESSONS} lessons from first principles, then a live mock interview that never gives you the answer, catches your
               contradictions and scores you on 8 dimensions.
@@ -111,7 +111,7 @@ export function App() {
               <a href="#run" className="rounded-full bg-ink px-6 py-3.5 text-[0.9375rem] font-semibold text-bg">Run it in one command</a>
               <a href={REPO} target="_blank" rel="noreferrer" className="rounded-full border border-line-strong px-6 py-3.5 text-[0.9375rem] font-medium hover:border-ink">Source on GitHub ↗</a>
             </div>
-            <dl className="mt-12 grid max-w-[560px] grid-cols-4 gap-4 border-t border-line pt-6" data-rise>
+            <dl className="mt-12 hidden max-w-[560px] grid-cols-4 gap-4 border-t border-line pt-6 sm:grid" data-rise>
               {[[LESSONS, "lessons"], [MODULES, "modules"], [10, "problems"], [8, "dimensions"]].map(([v, l]) => (
                 <div key={l}><dt className="sr-only">{l}</dt><dd className="title text-[clamp(1.6rem,2.6vw,2.2rem)]"><span data-count={v}>{v}</span></dd><dd className="mt-1 font-mono text-[0.625rem] uppercase tracking-[0.12em] text-muted">{l}</dd></div>
               ))}
