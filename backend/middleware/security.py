@@ -3,10 +3,8 @@ Security middleware for ArchitectIQ.
 Handles rate limiting, request size limits, and input sanitization.
 """
 import time
-import hashlib
-from collections import defaultdict
-from dataclasses import dataclass, field
-from fastapi import Request, HTTPException
+from dataclasses import dataclass
+from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 

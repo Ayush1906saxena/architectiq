@@ -12,7 +12,7 @@ Key changes from v1:
 """
 import time
 from enum import IntEnum
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 class Depth(IntEnum):

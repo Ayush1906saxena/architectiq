@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from config import settings
 from models.challenge import DesignChallengeRequest, DesignChallengeResponse

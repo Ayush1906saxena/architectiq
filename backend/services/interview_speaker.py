@@ -9,7 +9,7 @@ for what to say.
 """
 from pathlib import Path
 
-from services.ollama_client import ollama_client
+from services.ollama_client import is_fallback, ollama_client
 from services.interview_tracker import InterviewTracker
 
 # Load the core system prompt once at module init
@@ -221,6 +221,13 @@ class InterviewSpeaker:
             "Keep it to 3-4 sentences total. Be natural — this is the first thing the candidate hears."
         )
         raw = await ollama_client.generate(prompt, system=system, temperature=0.7)
+        if is_fallback(raw):
+            # The model is unreachable: open the interview anyway, in plain words, instead of "I missed that".
+            return (
+                f"Today we're going to design {problem_title.removeprefix('Design ').rstrip('.')}. "
+                f"{level_context.get(tracker.level, '')} "
+                "Before we start designing, what questions do you have about the requirements?"
+            ).replace("  ", " ")
         return _clean_response(raw)
 
 

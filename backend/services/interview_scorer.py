@@ -8,7 +8,7 @@ and catches cases where the LLM might be too generous or too harsh.
 """
 import json
 
-from services.interview_tracker import InterviewTracker, Depth, EXPECTED_DEPTH
+from services.interview_tracker import InterviewTracker, Depth
 from services.ollama_client import ollama_client
 
 RUBRIC_WEIGHTS = {

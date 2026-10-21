@@ -12,19 +12,29 @@ import httpx
 
 from config import settings
 
+# What the client returns when the model can't be reached; callers that need a real sentence check for it.
+FALLBACK_REPLIES = (
+    "I missed that — could you repeat your last point?",
+    "Let me gather my thoughts for a moment. Could you elaborate on your last point?",
+)
+
+
+def is_fallback(text: str) -> bool:
+    return (text or "").strip() in FALLBACK_REPLIES
+
 
 class LLMClient:
     def __init__(self):
         self._provider = settings.llm_provider.lower()
 
+        if self._provider == "groq" and not settings.groq_api_key:
+            # No key: use the local Ollama instead of failing every call (docker compose ships one).
+            print("GROQ_API_KEY not set: using Ollama at", settings.ollama_url, "(set GROQ_API_KEY to use Groq).")
+            self._provider = "ollama"
         if self._provider == "groq":
             self._api_key = settings.groq_api_key
             self._model = settings.groq_model
             self._base_url = "https://api.groq.com/openai/v1"
-            if not self._api_key:
-                print("WARNING: GROQ_API_KEY not set. LLM calls will fail.")
-                print("  Get a free key at https://console.groq.com")
-                print("  Then set: export GROQ_API_KEY=gsk_...")
         else:
             self._model = settings.ollama_model
             self._base_url = settings.ollama_url

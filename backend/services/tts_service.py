@@ -2,7 +2,6 @@
 TTS Service — uses gTTS (Google Text-to-Speech) for cross-platform audio generation.
 Falls back to silent WAV when offline or gTTS fails.
 """
-import hashlib
 import wave
 from pathlib import Path
 
